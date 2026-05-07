@@ -1,0 +1,4 @@
+# Keep this allow-list small and intentional. The workspace enables
+# clippy::pedantic and clippy::nursery in Cargo.toml; crate-local exceptions
+# should be justified near the code that needs them.
+msrv = "1.82.0"

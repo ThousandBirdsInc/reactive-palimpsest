@@ -1,0 +1,137 @@
+// Copyright 2026 Thousand Birds Inc.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+syntax = "proto3";
+
+package palimpsest.sync.v1;
+
+service SyncEngine {
+  rpc Subscribe(stream ClientMessage) returns (stream ServerMessage);
+}
+
+message ClientMessage {
+  oneof kind {
+    SubscribeRequest subscribe = 1;
+    UpdateRequest update = 2;
+    UnsubscribeRequest unsubscribe = 3;
+    AckRequest ack = 4;
+  }
+}
+
+message ServerMessage {
+  oneof kind {
+    Accepted accepted = 1;
+    Diff diff = 2;
+    Resync resync = 3;
+    Error error = 4;
+  }
+}
+
+message SubscribeRequest {
+  string client_subscription_id = 1;
+  string sql = 2;
+  map<string, VarValue> vars = 3;
+  optional uint64 resume_lsn = 4;
+}
+
+message UpdateRequest {
+  string subscription_id = 1;
+  map<string, VarValue> vars = 2;
+}
+
+message UnsubscribeRequest {
+  string subscription_id = 1;
+}
+
+message AckRequest {
+  string subscription_id = 1;
+  uint64 lsn = 2;
+}
+
+message Accepted {
+  string subscription_id = 1;
+  uint64 schema_id = 2;
+  uint64 snapshot_lsn = 3;
+  Schema schema = 4;
+}
+
+message Diff {
+  string subscription_id = 1;
+  uint64 lsn = 2;
+  DiffOp op = 3;
+  uint64 schema_id = 4;
+  bytes rows = 5;
+}
+
+message Resync {
+  string subscription_id = 1;
+  ResyncReason reason = 2;
+  string message = 3;
+}
+
+message Error {
+  string subscription_id = 1;
+  string code = 2;
+  string message = 3;
+}
+
+message Schema {
+  repeated Column columns = 1;
+  repeated uint32 primary_key_columns = 2;
+}
+
+message Column {
+  string name = 1;
+  DatumType type = 2;
+  bool nullable = 3;
+}
+
+message VarValue {
+  oneof kind {
+    bool bool_value = 1;
+    int64 int_value = 2;
+    double float_value = 3;
+    string string_value = 4;
+    bytes bytes_value = 5;
+    bool null_value = 6;
+  }
+}
+
+enum DiffOp {
+  DIFF_OP_UNSPECIFIED = 0;
+  DIFF_OP_INITIAL = 1;
+  DIFF_OP_INSERT = 2;
+  DIFF_OP_UPDATE = 3;
+  DIFF_OP_DELETE = 4;
+}
+
+enum ResyncReason {
+  RESYNC_REASON_UNSPECIFIED = 0;
+  RESYNC_REASON_LSN_COMPACTED = 1;
+  RESYNC_REASON_SCHEMA_CHANGED = 2;
+  RESYNC_REASON_BACKPRESSURE = 3;
+  RESYNC_REASON_SLOT_RECREATED = 4;
+}
+
+enum DatumType {
+  DATUM_TYPE_UNSPECIFIED = 0;
+  DATUM_TYPE_BOOL = 1;
+  DATUM_TYPE_I16 = 2;
+  DATUM_TYPE_I32 = 3;
+  DATUM_TYPE_I64 = 4;
+  DATUM_TYPE_F32 = 5;
+  DATUM_TYPE_F64 = 6;
+  DATUM_TYPE_NUMERIC = 7;
+  DATUM_TYPE_TEXT = 8;
+  DATUM_TYPE_BYTEA = 9;
+  DATUM_TYPE_DATE = 10;
+  DATUM_TYPE_TIME = 11;
+  DATUM_TYPE_TIMESTAMP = 12;
+  DATUM_TYPE_TIMESTAMP_TZ = 13;
+  DATUM_TYPE_INTERVAL = 14;
+  DATUM_TYPE_UUID = 15;
+  DATUM_TYPE_JSON = 16;
+  DATUM_TYPE_JSONB = 17;
+  DATUM_TYPE_ARRAY = 18;
+  DATUM_TYPE_NULL = 19;
+}
