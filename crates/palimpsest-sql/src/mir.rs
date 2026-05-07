@@ -93,6 +93,24 @@ impl MirGraph {
         &self.graph
     }
 
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.graph.node_count()
+    }
+
+    #[must_use]
+    pub fn root_kind(&self) -> &MirNodeKind {
+        &self.graph[self.root]
+    }
+
+    pub fn node_kinds(&self) -> impl Iterator<Item = &MirNodeKind> {
+        self.graph.node_weights()
+    }
+
+    pub fn set_root(&mut self, root: NodeIndex) {
+        self.root = root;
+    }
+
     pub fn add_input(&mut self, from: NodeIndex, to: NodeIndex) {
         self.graph.add_edge(from, to, MirEdgeKind::Input);
     }
