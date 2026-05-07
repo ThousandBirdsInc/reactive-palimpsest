@@ -1317,7 +1317,10 @@ are intentionally small enough to land in single PRs.
 - [ ] Type inference for expressions; reject type mismatches.
 - [ ] Predicate canonicalization (commute commutative ops, sort
   conjuncts, normalize literals).
-- [ ] Canonical hash function for an MIR subgraph (SipHash; output
+  - [x] commute equality operands
+  - [x] sort `AND` conjuncts
+  - [ ] normalize literals
+- [x] Canonical hash function for an MIR subgraph (SipHash; output
   is the canonicalization key).
 - [ ] Reuse pass: hash-equal subgraphs collapse to a single node.
 - [ ] Query validation pass per §8.5 (table/column existence,

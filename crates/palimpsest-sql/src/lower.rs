@@ -129,7 +129,7 @@ fn lower_select_body(select: &Select, context: &LowerContext) -> Result<MirGraph
         push_unary(
             &mut graph,
             MirNodeKind::Filter {
-                predicate: predicate.to_string(),
+                predicate: canonical_predicate(predicate),
             },
         );
     }
@@ -306,6 +306,52 @@ fn column_ref(expr: &Expr) -> Result<ColumnRef, SqlError> {
             })
         }
         _ => Err(SqlError::UnsupportedFeature("non-column join keys")),
+    }
+}
+
+fn canonical_predicate(expr: &Expr) -> String {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            let mut parts = flatten_and(left);
+            parts.extend(flatten_and(right));
+            parts.sort();
+            parts.join(" AND ")
+        }
+        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::Eq => {
+            let mut operands = [
+                (operand_sort_key(left), left.to_string()),
+                (operand_sort_key(right), right.to_string()),
+            ];
+            operands.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+            format!("{} = {}", operands[0].1, operands[1].1)
+        }
+        _ => expr.to_string(),
+    }
+}
+
+fn operand_sort_key(expr: &Expr) -> String {
+    match expr {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => format!("0:{expr}"),
+        _ => format!("1:{expr}"),
+    }
+}
+
+fn flatten_and(expr: &Expr) -> Vec<String> {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            let mut parts = flatten_and(left);
+            parts.extend(flatten_and(right));
+            parts
+        }
+        _ => vec![canonical_predicate(expr)],
     }
 }
 

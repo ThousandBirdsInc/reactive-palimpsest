@@ -3,6 +3,7 @@
 
 #![doc = "SQL parser, validation, and MIR scaffolding for Palimpsest."]
 
+pub mod canonical;
 mod error;
 pub mod lower;
 pub mod mir;
