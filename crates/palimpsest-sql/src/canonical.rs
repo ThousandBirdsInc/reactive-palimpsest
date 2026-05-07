@@ -88,7 +88,7 @@ fn canonical_node_kind(node: &MirNodeKind) -> String {
             limit,
             offset,
         } => format!("topk:{}:{limit}:{offset}", canonical_debug(order_by)),
-        MirNodeKind::CteRef { cte } => format!("cte-ref:{cte}"),
+        MirNodeKind::CteRef { .. } => "cte-ref".to_owned(),
         MirNodeKind::Leaf { name } => format!("leaf:{name}"),
     }
 }
@@ -129,5 +129,25 @@ mod tests {
             .expect("query should lower");
 
         assert_ne!(canonical_key(&left), canonical_key(&right));
+    }
+
+    #[test]
+    fn cte_names_do_not_affect_canonical_key() {
+        let left = parse_and_lower(
+            "WITH recent_posts AS (
+                SELECT id FROM posts WHERE author_id = 42
+             )
+             SELECT id FROM recent_posts",
+        )
+        .expect("query should lower");
+        let right = parse_and_lower(
+            "WITH visible_posts AS (
+                SELECT id FROM posts WHERE author_id = 42
+             )
+             SELECT id FROM visible_posts",
+        )
+        .expect("query should lower");
+
+        assert_eq!(canonical_key(&left), canonical_key(&right));
     }
 }

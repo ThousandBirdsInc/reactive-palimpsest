@@ -5,10 +5,11 @@
 mod tests {
     use proptest::{option, prelude::*};
 
-    use crate::parse_select;
+    use crate::{canonical::canonical_key, lower::parse_and_lower, parse_select};
 
     const TABLES: &[&str] = &["posts", "authors", "comments"];
     const COLUMNS: &[&str] = &["id", "author_id", "created_at", "title"];
+    const CTE_NAMES: &[&str] = &["recent_posts", "visible_posts", "filtered_posts"];
 
     proptest! {
         #[test]
@@ -18,6 +19,17 @@ mod tests {
             let reparsed = parse_select(&rendered)?;
 
             prop_assert_eq!(statement, reparsed);
+        }
+
+        #[test]
+        fn alpha_renaming_cte_preserves_canonical_key((left_name, right_name) in distinct_cte_names()) {
+            let left = cte_query(&left_name);
+            let right = cte_query(&right_name);
+
+            let left = parse_and_lower(&left)?;
+            let right = parse_and_lower(&right)?;
+
+            prop_assert_eq!(canonical_key(&left), canonical_key(&right));
         }
     }
 
@@ -63,5 +75,23 @@ mod tests {
 
     fn column_name() -> impl Strategy<Value = String> {
         prop::sample::select(COLUMNS).prop_map(str::to_owned)
+    }
+
+    fn distinct_cte_names() -> impl Strategy<Value = (String, String)> {
+        (
+            prop::sample::select(CTE_NAMES),
+            prop::sample::select(CTE_NAMES),
+        )
+            .prop_filter("CTE names must differ", |(left, right)| left != right)
+            .prop_map(|(left, right)| (left.to_owned(), right.to_owned()))
+    }
+
+    fn cte_query(name: &str) -> String {
+        format!(
+            "WITH {name} AS (
+                SELECT id FROM posts WHERE author_id = 42
+             )
+             SELECT id FROM {name}"
+        )
     }
 }

@@ -1328,7 +1328,7 @@ are intentionally small enough to land in single PRs.
   equi-join only, etc.).
 - [ ] Snapshot tests: AST, MIR raw, MIR canonicalized, MIR
   permission-rewritten, build plan.
-- [ ] Property test: alpha-renaming a CTE produces same canonical
+- [x] Property test: alpha-renaming a CTE produces same canonical
   hash.
 - [x] Property test: parsing then unparsing then reparsing yields
   identical AST (for the supported subset).
