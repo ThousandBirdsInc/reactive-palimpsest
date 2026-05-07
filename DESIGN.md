@@ -1254,7 +1254,7 @@ are intentionally small enough to land in single PRs.
 - [x] `WalGenerator::encode(&[LogicalEvent]) -> Vec<Bytes>`.
 - [x] Auto-emit `Relation` before first row event per table.
 - [x] `skip_lsn` to simulate gaps.
-- [ ] Round-trip property: `decode(encode(events)) == events`,
+- [x] Round-trip property: `decode(encode(events)) == events`,
   with `proptest` generators for `LogicalEvent`.
 - [ ] `MockPostgres`: TCP listener on port 0, returns connection
   string.

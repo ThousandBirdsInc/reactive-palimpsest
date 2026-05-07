@@ -556,6 +556,7 @@ name = "palimpsest-test-harness"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "proptest",
 ]
 
 [[package]]

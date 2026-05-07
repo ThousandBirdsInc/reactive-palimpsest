@@ -197,6 +197,11 @@ impl WalGenerator {
                 bytes.put_u8(b'S');
                 bytes.put_u32(table.get());
                 bytes.put_u16(u16::try_from(new_columns.len()).unwrap_or(u16::MAX));
+                for column in new_columns {
+                    put_string(&mut bytes, &column.name);
+                    bytes.put_u32(column.type_oid);
+                    bytes.put_u8(u8::from(column.nullable));
+                }
             }
             LogicalEvent::Keepalive => {
                 bytes.put_u8(b'K');
@@ -233,14 +238,21 @@ fn put_optional_tuple(bytes: &mut BytesMut, tuple: Option<&Tuple>) {
 fn put_tuple(bytes: &mut BytesMut, tuple: &Tuple) {
     bytes.put_u16(u16::try_from(tuple.len()).unwrap_or(u16::MAX));
     for value in tuple {
-        bytes.put_u16(u16::try_from(value.len()).unwrap_or(u16::MAX));
-        bytes.put_slice(value.as_bytes());
+        put_string(bytes, value);
     }
+}
+
+fn put_string(bytes: &mut BytesMut, value: &str) {
+    bytes.put_u16(u16::try_from(value.len()).unwrap_or(u16::MAX));
+    bytes.put_slice(value.as_bytes());
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Catalog, LogicalEvent, TableId, WalGenerator};
+    use bytes::{Buf, Bytes};
+    use proptest::{option, prelude::*};
+
+    use super::{Catalog, ColumnDef, LogicalEvent, TableId, Tuple, WalGenerator};
 
     #[test]
     fn auto_emits_relation_before_first_row_for_table() {
@@ -289,5 +301,178 @@ mod tests {
         }]);
 
         assert_eq!(frames.len(), 2);
+    }
+
+    proptest! {
+        #[test]
+        fn generated_frames_round_trip(events in logical_events()) {
+            let mut generator = WalGenerator::new();
+            let frames = generator.encode(&events);
+
+            let decoded = decode_frames(&frames)?;
+
+            prop_assert_eq!(decoded, events);
+        }
+    }
+
+    fn logical_events() -> impl Strategy<Value = Vec<LogicalEvent>> {
+        prop::collection::vec(logical_event(), 0..32)
+    }
+
+    fn logical_event() -> impl Strategy<Value = LogicalEvent> {
+        prop_oneof![
+            (0_u32..1_000_000).prop_map(|xid| LogicalEvent::Begin { xid }),
+            (table_id(), tuple()).prop_map(|(table, new)| LogicalEvent::Insert { table, new }),
+            (table_id(), option::of(tuple()), tuple())
+                .prop_map(|(table, old, new)| LogicalEvent::Update { table, old, new }),
+            (table_id(), tuple()).prop_map(|(table, old)| LogicalEvent::Delete { table, old }),
+            Just(LogicalEvent::Commit),
+            (table_id(), prop::collection::vec(column_def(), 0..8)).prop_map(
+                |(table, new_columns)| LogicalEvent::RelationChange { table, new_columns }
+            ),
+            Just(LogicalEvent::Keepalive),
+        ]
+    }
+
+    fn table_id() -> impl Strategy<Value = TableId> {
+        (1_u32..256).prop_map(TableId::new)
+    }
+
+    fn tuple() -> impl Strategy<Value = Tuple> {
+        prop::collection::vec("[a-z0-9_]{0,16}", 0..8)
+    }
+
+    fn column_def() -> impl Strategy<Value = ColumnDef> {
+        ("[a-z][a-z0-9_]{0,15}", 1_u32..10_000, any::<bool>()).prop_map(
+            |(name, type_oid, nullable)| ColumnDef {
+                name,
+                type_oid,
+                nullable,
+            },
+        )
+    }
+
+    fn decode_frames(frames: &[Bytes]) -> Result<Vec<LogicalEvent>, TestCaseError> {
+        let mut events = Vec::new();
+
+        for frame in frames {
+            if frame.len() == 5 && frame[0] == b'R' {
+                continue;
+            }
+
+            let mut bytes = frame.clone();
+            ensure_remaining(&bytes, 9)?;
+            let _lsn = bytes.get_u64();
+
+            match bytes.get_u8() {
+                b'B' => {
+                    ensure_remaining(&bytes, 4)?;
+                    events.push(LogicalEvent::Begin {
+                        xid: bytes.get_u32(),
+                    });
+                }
+                b'I' => {
+                    ensure_remaining(&bytes, 4)?;
+                    let table = TableId::new(bytes.get_u32());
+                    let new = get_tuple(&mut bytes)?;
+                    events.push(LogicalEvent::Insert { table, new });
+                }
+                b'U' => {
+                    ensure_remaining(&bytes, 5)?;
+                    let table = TableId::new(bytes.get_u32());
+                    let old = get_optional_tuple(&mut bytes)?;
+                    let new = get_tuple(&mut bytes)?;
+                    events.push(LogicalEvent::Update { table, old, new });
+                }
+                b'D' => {
+                    ensure_remaining(&bytes, 4)?;
+                    let table = TableId::new(bytes.get_u32());
+                    let old = get_tuple(&mut bytes)?;
+                    events.push(LogicalEvent::Delete { table, old });
+                }
+                b'C' => events.push(LogicalEvent::Commit),
+                b'S' => {
+                    ensure_remaining(&bytes, 6)?;
+                    let table = TableId::new(bytes.get_u32());
+                    let column_count = bytes.get_u16();
+                    let mut new_columns = Vec::with_capacity(usize::from(column_count));
+                    for _ in 0..column_count {
+                        new_columns.push(get_column_def(&mut bytes)?);
+                    }
+                    events.push(LogicalEvent::RelationChange { table, new_columns });
+                }
+                b'K' => events.push(LogicalEvent::Keepalive),
+                tag => {
+                    return Err(TestCaseError::fail(format!("unexpected frame tag {tag}")));
+                }
+            }
+
+            prop_assert!(
+                !bytes.has_remaining(),
+                "frame should not contain trailing bytes"
+            );
+        }
+
+        Ok(events)
+    }
+
+    fn get_optional_tuple(bytes: &mut Bytes) -> Result<Option<Tuple>, TestCaseError> {
+        ensure_remaining(bytes, 1)?;
+        match bytes.get_u8() {
+            0 => Ok(None),
+            1 => get_tuple(bytes).map(Some),
+            tag => Err(TestCaseError::fail(format!(
+                "unexpected optional tuple tag {tag}"
+            ))),
+        }
+    }
+
+    fn get_tuple(bytes: &mut Bytes) -> Result<Tuple, TestCaseError> {
+        ensure_remaining(bytes, 2)?;
+        let value_count = bytes.get_u16();
+        let mut tuple = Vec::with_capacity(usize::from(value_count));
+        for _ in 0..value_count {
+            tuple.push(get_string(bytes)?);
+        }
+        Ok(tuple)
+    }
+
+    fn get_column_def(bytes: &mut Bytes) -> Result<ColumnDef, TestCaseError> {
+        let name = get_string(bytes)?;
+        ensure_remaining(bytes, 5)?;
+        let type_oid = bytes.get_u32();
+        let nullable = match bytes.get_u8() {
+            0 => false,
+            1 => true,
+            tag => {
+                return Err(TestCaseError::fail(format!(
+                    "unexpected nullable tag {tag}"
+                )));
+            }
+        };
+
+        Ok(ColumnDef {
+            name,
+            type_oid,
+            nullable,
+        })
+    }
+
+    fn get_string(bytes: &mut Bytes) -> Result<String, TestCaseError> {
+        ensure_remaining(bytes, 2)?;
+        let len = usize::from(bytes.get_u16());
+        ensure_remaining(bytes, len)?;
+        let value = bytes.copy_to_bytes(len);
+        String::from_utf8(value.to_vec())
+            .map_err(|err| TestCaseError::fail(format!("invalid utf8: {err}")))
+    }
+
+    fn ensure_remaining(bytes: &Bytes, count: usize) -> Result<(), TestCaseError> {
+        prop_assert!(
+            bytes.remaining() >= count,
+            "frame ended early: need {count} bytes, have {}",
+            bytes.remaining()
+        );
+        Ok(())
     }
 }
