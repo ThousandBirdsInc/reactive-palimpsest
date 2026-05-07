@@ -1244,16 +1244,16 @@ are intentionally small enough to land in single PRs.
 
 ### 18.3 `palimpsest-test-harness` (Phase 1, parallel)
 
-- [ ] Create crate with `dev-dependencies = false` so it can be a
+- [x] Create crate with `dev-dependencies = false` so it can be a
   regular dependency of test-only consumers.
-- [ ] `WalGenerator` skeleton with `next_lsn`, `Catalog`,
+- [x] `WalGenerator` skeleton with `next_lsn`, `Catalog`,
   `relation_emitted` set.
 - [ ] Encode each pgoutput message type symmetrically with the
   decoder; share enum definitions where possible.
-- [ ] `LogicalEvent` enum per §15.4.1.
-- [ ] `WalGenerator::encode(&[LogicalEvent]) -> Vec<Bytes>`.
-- [ ] Auto-emit `Relation` before first row event per table.
-- [ ] `skip_lsn` to simulate gaps.
+- [x] `LogicalEvent` enum per §15.4.1.
+- [x] `WalGenerator::encode(&[LogicalEvent]) -> Vec<Bytes>`.
+- [x] Auto-emit `Relation` before first row event per table.
+- [x] `skip_lsn` to simulate gaps.
 - [ ] Round-trip property: `decode(encode(events)) == events`,
   with `proptest` generators for `LogicalEvent`.
 - [ ] `MockPostgres`: TCP listener on port 0, returns connection

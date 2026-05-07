@@ -12,6 +12,7 @@ backlog live in [DESIGN.md](DESIGN.md).
 | --- | --- |
 | `crates/palimpsest-proto` | Shared gRPC and wire protocol types generated from protobuf definitions. |
 | `crates/palimpsest-sql` | SQL parsing, validation, and MIR definitions. |
+| `crates/palimpsest-test-harness` | Postgres-free harness primitives for WAL and integration tests. |
 | `xtask` | Project-specific maintenance commands such as fixture regeneration and size checks. |
 
 ## Development
