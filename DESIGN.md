@@ -1290,17 +1290,20 @@ are intentionally small enough to land in single PRs.
 
 ### 18.4 `palimpsest-sql` — SQL frontend (Phase 1)
 
-- [ ] Wire `sqlparser-rs` with `PostgreSqlDialect`.
+- [x] Wire `sqlparser-rs` with `PostgreSqlDialect`.
 - [ ] AST normalization passes:
   - [ ] expand `*` projections,
   - [ ] resolve qualified names against catalog,
   - [ ] propagate aliases,
   - [ ] desugar `BETWEEN`, `IN (list)`, `NOT IN`, `IS NULL`.
 - [ ] Reject unsupported features at parse time with typed errors:
-  `WITH RECURSIVE`, window functions, `RIGHT/FULL JOIN`, theta
-  joins, `ORDER BY` without `LIMIT`, scalar subqueries with
-  unbounded result.
-- [ ] `MirNodeKind` enum + `MirGraph` newtype around `petgraph`.
+  - [x] `WITH RECURSIVE`
+  - [ ] window functions
+  - [x] `RIGHT/FULL JOIN`
+  - [x] theta joins
+  - [x] `ORDER BY` without `LIMIT`
+  - [ ] scalar subqueries with unbounded result
+- [x] `MirNodeKind` enum + `MirGraph` newtype around `petgraph`.
 - [ ] Lowering: AST `Statement::Query` → MIR.
 - [ ] CTE handling: lift each `WITH` arm into its own subgraph;
   `CteRef` placeholders in consumer position.

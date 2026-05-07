@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/palimpsest-proto",
+    "crates/palimpsest-sql",
     "xtask",
 ]
 resolver = "2"
@@ -23,6 +24,7 @@ bytes = "1.7"
 differential-dataflow = "0.13"
 futures = "0.3"
 insta = "1.40"
+petgraph = "0.7"
 prost = "0.13"
 prost-build = "0.13"
 proptest = "1.5"

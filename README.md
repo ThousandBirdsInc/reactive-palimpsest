@@ -11,6 +11,7 @@ backlog live in [DESIGN.md](DESIGN.md).
 | Path | Purpose |
 | --- | --- |
 | `crates/palimpsest-proto` | Shared gRPC and wire protocol types generated from protobuf definitions. |
+| `crates/palimpsest-sql` | SQL parsing, validation, and MIR definitions. |
 | `xtask` | Project-specific maintenance commands such as fixture regeneration and size checks. |
 
 ## Development
