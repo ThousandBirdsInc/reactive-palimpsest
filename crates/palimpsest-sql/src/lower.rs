@@ -4,7 +4,7 @@
 use sqlparser::ast::{
     BinaryOperator, Distinct, DuplicateTreatment, Expr, Function, FunctionArgExpr,
     FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator, Query, Select, SelectItem,
-    SetExpr, Statement, TableFactor, TableWithJoins, Value,
+    SetExpr, SetOperator, SetQuantifier, Statement, TableFactor, TableWithJoins, Value,
 };
 
 use crate::{
@@ -30,19 +30,7 @@ fn lower_query(query: &Query) -> Result<MirGraph, SqlError> {
         return Err(SqlError::UnsupportedFeature("MIR lowering for CTEs"));
     }
 
-    let mut graph = match query.body.as_ref() {
-        SetExpr::Select(select) => lower_select_body(select)?,
-        SetExpr::SetOperation { .. } => {
-            return Err(SqlError::UnsupportedFeature(
-                "MIR lowering for set operations",
-            ));
-        }
-        SetExpr::Query(query) => return lower_query(query),
-        SetExpr::Values(_) => return Err(SqlError::UnsupportedFeature("VALUES queries")),
-        SetExpr::Insert(_) => return Err(SqlError::UnsupportedFeature("INSERT in query body")),
-        SetExpr::Update(_) => return Err(SqlError::UnsupportedFeature("UPDATE in query body")),
-        SetExpr::Table(_) => return Err(SqlError::UnsupportedFeature("TABLE queries")),
-    };
+    let mut graph = lower_set_expr(&query.body)?;
 
     if let Some(order_by) = &query.order_by {
         let limit = query
@@ -74,6 +62,41 @@ fn lower_query(query: &Query) -> Result<MirGraph, SqlError> {
         );
     }
 
+    Ok(graph)
+}
+
+fn lower_set_expr(expr: &SetExpr) -> Result<MirGraph, SqlError> {
+    match expr {
+        SetExpr::Select(select) => lower_select_body(select),
+        SetExpr::SetOperation {
+            op: SetOperator::Union,
+            set_quantifier: SetQuantifier::All,
+            left,
+            right,
+        } => lower_union_all(left, right),
+        SetExpr::SetOperation {
+            op: SetOperator::Union,
+            ..
+        } => Err(SqlError::UnsupportedFeature("UNION without ALL")),
+        SetExpr::SetOperation { .. } => Err(SqlError::UnsupportedFeature("EXCEPT or INTERSECT")),
+        SetExpr::Query(query) => lower_query(query),
+        SetExpr::Values(_) => Err(SqlError::UnsupportedFeature("VALUES queries")),
+        SetExpr::Insert(_) => Err(SqlError::UnsupportedFeature("INSERT in query body")),
+        SetExpr::Update(_) => Err(SqlError::UnsupportedFeature("UPDATE in query body")),
+        SetExpr::Table(_) => Err(SqlError::UnsupportedFeature("TABLE queries")),
+    }
+}
+
+fn lower_union_all(left: &SetExpr, right: &SetExpr) -> Result<MirGraph, SqlError> {
+    let mut graph = lower_set_expr(left)?;
+    let left_root = graph.root();
+    let right = lower_set_expr(right)?;
+    let right_root = graph.append_graph(&right);
+
+    let union = graph.add_node(MirNodeKind::Union);
+    graph.add_input(left_root, union);
+    graph.add_input(right_root, union);
+    graph.set_root(union);
     Ok(graph)
 }
 
@@ -510,5 +533,37 @@ mod tests {
             MirNodeKind::Aggregate { group_by, aggs }
                 if group_by.is_empty() && aggs.len() == 1
         )));
+    }
+
+    #[test]
+    fn lowers_union_all() {
+        let graph = parse_and_lower(
+            "SELECT id FROM posts
+             UNION ALL
+             SELECT id FROM archived_posts",
+        )
+        .expect("UNION ALL should lower");
+
+        assert_eq!(graph.node_count(), 5);
+        assert!(matches!(graph.root_kind(), MirNodeKind::Union));
+        assert_eq!(
+            graph
+                .node_kinds()
+                .filter(|node| matches!(node, MirNodeKind::BaseTable { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn rejects_distinct_union_lowering() {
+        let err = parse_and_lower(
+            "SELECT id FROM posts
+             UNION
+             SELECT id FROM archived_posts",
+        )
+        .expect_err("UNION DISTINCT is not in the supported lowering subset");
+
+        assert!(err.to_string().contains("UNION without ALL"));
     }
 }

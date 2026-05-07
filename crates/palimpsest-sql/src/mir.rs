@@ -1,7 +1,9 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use petgraph::{graph::NodeIndex, Graph};
+use std::collections::HashMap;
+
+use petgraph::{graph::NodeIndex, visit::EdgeRef, Graph};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinKind {
@@ -117,5 +119,24 @@ impl MirGraph {
 
     pub fn add_node(&mut self, node: MirNodeKind) -> NodeIndex {
         self.graph.add_node(node)
+    }
+
+    pub fn append_graph(&mut self, other: &Self) -> NodeIndex {
+        let mut node_map = HashMap::with_capacity(other.graph.node_count());
+
+        for source in other.graph.node_indices() {
+            let target = self.graph.add_node(other.graph[source].clone());
+            node_map.insert(source, target);
+        }
+
+        for edge in other.graph.edge_references() {
+            self.graph.add_edge(
+                node_map[&edge.source()],
+                node_map[&edge.target()],
+                *edge.weight(),
+            );
+        }
+
+        node_map[&other.root]
     }
 }
