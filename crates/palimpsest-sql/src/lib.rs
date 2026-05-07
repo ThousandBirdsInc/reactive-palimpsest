@@ -7,6 +7,7 @@ mod error;
 pub mod lower;
 pub mod mir;
 pub mod parser;
+mod properties;
 
 pub use error::SqlError;
 pub use lower::{lower_select_statement, parse_and_lower};

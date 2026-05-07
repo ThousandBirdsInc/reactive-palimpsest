@@ -1323,7 +1323,7 @@ are intentionally small enough to land in single PRs.
   permission-rewritten, build plan.
 - [ ] Property test: alpha-renaming a CTE produces same canonical
   hash.
-- [ ] Property test: parsing then unparsing then reparsing yields
+- [x] Property test: parsing then unparsing then reparsing yields
   identical AST (for the supported subset).
 - [ ] Documentation: supported SQL grammar reference table.
 

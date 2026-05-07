@@ -16,5 +16,8 @@ petgraph.workspace = true
 sqlparser = { workspace = true, features = ["visitor"] }
 thiserror.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true
