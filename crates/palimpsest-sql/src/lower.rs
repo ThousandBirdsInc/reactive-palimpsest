@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use sqlparser::ast::{
-    Distinct, Expr, GroupByExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, Value,
+    BinaryOperator, Distinct, Expr, GroupByExpr, Join, JoinConstraint, JoinOperator, Query, Select,
+    SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
 };
 
 use crate::{
-    mir::{MirGraph, MirNodeKind, OrderKey},
+    mir::{ColumnRef, JoinKind, MirGraph, MirNodeKind, OrderKey},
     parse_select, SqlError,
 };
 
@@ -78,11 +79,7 @@ fn lower_query(query: &Query) -> Result<MirGraph, SqlError> {
 fn lower_select_body(select: &Select) -> Result<MirGraph, SqlError> {
     reject_select_features_not_lowered(select)?;
 
-    let table = only_base_table(select)?;
-    let mut graph = MirGraph::new(MirNodeKind::BaseTable {
-        table,
-        project: Vec::new(),
-    });
+    let mut graph = lower_from(select)?;
 
     if let Some(predicate) = &select.selection {
         push_unary(
@@ -108,9 +105,6 @@ fn lower_select_body(select: &Select) -> Result<MirGraph, SqlError> {
 }
 
 fn reject_select_features_not_lowered(select: &Select) -> Result<(), SqlError> {
-    if !select.from.iter().all(|source| source.joins.is_empty()) {
-        return Err(SqlError::UnsupportedFeature("MIR lowering for joins"));
-    }
     if !is_empty_group_by(&select.group_by) || select.having.is_some() {
         return Err(SqlError::UnsupportedFeature("MIR lowering for aggregates"));
     }
@@ -139,14 +133,70 @@ fn reject_select_features_not_lowered(select: &Select) -> Result<(), SqlError> {
     Ok(())
 }
 
-fn only_base_table(select: &Select) -> Result<String, SqlError> {
-    let [table] = select.from.as_slice() else {
+fn lower_from(select: &Select) -> Result<MirGraph, SqlError> {
+    let [source] = select.from.as_slice() else {
         return Err(SqlError::UnsupportedFeature(
             "MIR lowering for zero or multiple FROM items",
         ));
     };
 
-    match &table.relation {
+    lower_table_with_joins(source)
+}
+
+fn lower_table_with_joins(source: &TableWithJoins) -> Result<MirGraph, SqlError> {
+    let table = base_table_name(&source.relation)?;
+    let mut graph = MirGraph::new(MirNodeKind::BaseTable {
+        table,
+        project: Vec::new(),
+    });
+
+    for join in &source.joins {
+        lower_join(&mut graph, join)?;
+    }
+
+    Ok(graph)
+}
+
+fn lower_join(graph: &mut MirGraph, join: &Join) -> Result<(), SqlError> {
+    let table = base_table_name(&join.relation)?;
+    let right = graph.add_node(MirNodeKind::BaseTable {
+        table,
+        project: Vec::new(),
+    });
+
+    let (kind, on) = match &join.join_operator {
+        JoinOperator::Inner(JoinConstraint::On(predicate)) => {
+            (JoinKind::Inner, equi_join_columns(predicate)?)
+        }
+        JoinOperator::LeftOuter(JoinConstraint::On(predicate)) => {
+            (JoinKind::Left, equi_join_columns(predicate)?)
+        }
+        JoinOperator::Inner(
+            JoinConstraint::Using(_) | JoinConstraint::Natural | JoinConstraint::None,
+        )
+        | JoinOperator::LeftOuter(
+            JoinConstraint::Using(_) | JoinConstraint::Natural | JoinConstraint::None,
+        ) => {
+            return Err(SqlError::UnsupportedFeature(
+                "MIR lowering for non-ON joins",
+            ));
+        }
+        JoinOperator::CrossJoin => {
+            return Err(SqlError::UnsupportedFeature("MIR lowering for cross joins"));
+        }
+        _ => return Err(SqlError::UnsupportedFeature("non-standard joins")),
+    };
+
+    let left = graph.root();
+    let join = graph.add_node(MirNodeKind::Join { kind, on });
+    graph.add_input(left, join);
+    graph.add_input(right, join);
+    graph.set_root(join);
+    Ok(())
+}
+
+fn base_table_name(table: &TableFactor) -> Result<String, SqlError> {
+    match table {
         TableFactor::Table { name, .. } => Ok(name.to_string()),
         TableFactor::Derived { .. } => Err(SqlError::UnsupportedFeature(
             "MIR lowering for derived tables",
@@ -154,6 +204,46 @@ fn only_base_table(select: &Select) -> Result<String, SqlError> {
         _ => Err(SqlError::UnsupportedFeature(
             "table functions or special table factors",
         )),
+    }
+}
+
+fn equi_join_columns(predicate: &Expr) -> Result<Vec<(ColumnRef, ColumnRef)>, SqlError> {
+    match predicate {
+        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::Eq => {
+            Ok(vec![(column_ref(left)?, column_ref(right)?)])
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            let mut pairs = equi_join_columns(left)?;
+            pairs.extend(equi_join_columns(right)?);
+            Ok(pairs)
+        }
+        _ => Err(SqlError::UnsupportedFeature("theta joins")),
+    }
+}
+
+fn column_ref(expr: &Expr) -> Result<ColumnRef, SqlError> {
+    match expr {
+        Expr::Identifier(ident) => Ok(ColumnRef {
+            relation: None,
+            name: ident.value.clone(),
+        }),
+        Expr::CompoundIdentifier(parts) => {
+            let [relation, name] = parts.as_slice() else {
+                return Err(SqlError::UnsupportedFeature(
+                    "multi-part column references beyond relation.column",
+                ));
+            };
+
+            Ok(ColumnRef {
+                relation: Some(relation.value.clone()),
+                name: name.value.clone(),
+            })
+        }
+        _ => Err(SqlError::UnsupportedFeature("non-column join keys")),
     }
 }
 
@@ -195,7 +285,7 @@ fn is_empty_group_by(group_by: &GroupByExpr) -> bool {
 mod tests {
     use crate::{
         lower::parse_and_lower,
-        mir::{MirNodeKind, OrderKey},
+        mir::{ColumnRef, JoinKind, MirNodeKind, OrderKey},
     };
 
     #[test]
@@ -239,13 +329,47 @@ mod tests {
     }
 
     #[test]
-    fn leaves_joins_for_later_lowering() {
-        let err = parse_and_lower(
+    fn lowers_equi_join() {
+        let graph = parse_and_lower(
             "SELECT posts.id
              FROM posts JOIN authors ON posts.author_id = authors.id",
         )
-        .expect_err("joins are parsed and validated, but not lowered in this slice");
+        .expect("validated equi-join should lower");
 
-        assert!(err.to_string().contains("MIR lowering for joins"));
+        assert_eq!(graph.node_count(), 4);
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Join {
+                kind: JoinKind::Inner,
+                on,
+            } if on == &vec![(
+                ColumnRef {
+                    relation: Some("posts".to_owned()),
+                    name: "author_id".to_owned(),
+                },
+                ColumnRef {
+                    relation: Some("authors".to_owned()),
+                    name: "id".to_owned(),
+                },
+            )]
+        )));
+    }
+
+    #[test]
+    fn lowers_left_equi_join_with_conjunction() {
+        let graph = parse_and_lower(
+            "SELECT posts.id
+             FROM posts LEFT JOIN comments
+               ON posts.id = comments.post_id AND posts.author_id = comments.author_id",
+        )
+        .expect("validated left equi-join should lower");
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Join {
+                kind: JoinKind::Left,
+                on,
+            } if on.len() == 2
+        )));
     }
 }

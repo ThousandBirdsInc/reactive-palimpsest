@@ -1307,7 +1307,8 @@ are intentionally small enough to land in single PRs.
 - [ ] Lowering: AST `Statement::Query` → MIR.
   - [x] single-table `SELECT` with `WHERE`, projection,
     `DISTINCT`, `ORDER BY` + `LIMIT/OFFSET`
-  - [ ] joins, aggregates, set operations, and derived tables
+  - [x] equi-joins and left equi-joins
+  - [ ] aggregates, set operations, and derived tables
 - [ ] CTE handling: lift each `WITH` arm into its own subgraph;
   `CteRef` placeholders in consumer position.
 - [ ] Column-reference resolution against MIR's schema attribute.
