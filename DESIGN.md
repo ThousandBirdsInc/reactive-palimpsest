@@ -1332,7 +1332,7 @@ are intentionally small enough to land in single PRs.
   hash.
 - [x] Property test: parsing then unparsing then reparsing yields
   identical AST (for the supported subset).
-- [ ] Documentation: supported SQL grammar reference table.
+- [x] Documentation: supported SQL grammar reference table.
 
 ### 18.5 `palimpsest-dataflow` — execution engine (Phase 2)
 

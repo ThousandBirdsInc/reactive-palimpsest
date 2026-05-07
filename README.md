@@ -4,7 +4,8 @@ Palimpsest is a Rust service for maintaining live SQL query result sets from a
 Postgres logical replication stream and pushing row-level diffs to clients.
 
 The current repository is in scaffold phase. The architecture and implementation
-backlog live in [DESIGN.md](DESIGN.md).
+backlog live in [DESIGN.md](DESIGN.md), and the current SQL frontend subset is
+documented in [docs/supported-sql.md](docs/supported-sql.md).
 
 ## Workspace
 
