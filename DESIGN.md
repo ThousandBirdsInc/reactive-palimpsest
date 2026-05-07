@@ -1308,7 +1308,8 @@ are intentionally small enough to land in single PRs.
   - [x] single-table `SELECT` with `WHERE`, projection,
     `DISTINCT`, `ORDER BY` + `LIMIT/OFFSET`
   - [x] equi-joins and left equi-joins
-  - [ ] aggregates, set operations, and derived tables
+  - [x] basic aggregates with optional `GROUP BY`
+  - [ ] set operations and derived tables
 - [ ] CTE handling: lift each `WITH` arm into its own subgraph;
   `CteRef` placeholders in consumer position.
 - [ ] Column-reference resolution against MIR's schema attribute.

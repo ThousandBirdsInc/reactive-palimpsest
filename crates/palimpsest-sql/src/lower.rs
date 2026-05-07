@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use sqlparser::ast::{
-    BinaryOperator, Distinct, Expr, GroupByExpr, Join, JoinConstraint, JoinOperator, Query, Select,
-    SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
+    BinaryOperator, Distinct, DuplicateTreatment, Expr, Function, FunctionArgExpr,
+    FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator, Query, Select, SelectItem,
+    SetExpr, Statement, TableFactor, TableWithJoins, Value,
 };
 
 use crate::{
-    mir::{ColumnRef, JoinKind, MirGraph, MirNodeKind, OrderKey},
+    mir::{AggExpr, ColumnRef, JoinKind, MirGraph, MirNodeKind, OrderKey},
     parse_select, SqlError,
 };
 
@@ -90,6 +91,12 @@ fn lower_select_body(select: &Select) -> Result<MirGraph, SqlError> {
         );
     }
 
+    let group_by = group_by_columns(&select.group_by)?;
+    let aggs = aggregate_exprs(&select.projection)?;
+    if !group_by.is_empty() || !aggs.is_empty() {
+        push_unary(&mut graph, MirNodeKind::Aggregate { group_by, aggs });
+    }
+
     push_unary(
         &mut graph,
         MirNodeKind::Project {
@@ -105,8 +112,11 @@ fn lower_select_body(select: &Select) -> Result<MirGraph, SqlError> {
 }
 
 fn reject_select_features_not_lowered(select: &Select) -> Result<(), SqlError> {
-    if !is_empty_group_by(&select.group_by) || select.having.is_some() {
-        return Err(SqlError::UnsupportedFeature("MIR lowering for aggregates"));
+    if select.having.is_some() {
+        return Err(SqlError::UnsupportedFeature("HAVING"));
+    }
+    if has_group_by_modifiers(&select.group_by) {
+        return Err(SqlError::UnsupportedFeature("GROUP BY modifiers"));
     }
     if select.distinct.is_some() && !matches!(select.distinct, Some(Distinct::Distinct)) {
         return Err(SqlError::UnsupportedFeature("DISTINCT ON"));
@@ -247,6 +257,91 @@ fn column_ref(expr: &Expr) -> Result<ColumnRef, SqlError> {
     }
 }
 
+fn group_by_columns(group_by: &GroupByExpr) -> Result<Vec<ColumnRef>, SqlError> {
+    match group_by {
+        GroupByExpr::Expressions(expressions, modifiers) if modifiers.is_empty() => {
+            expressions.iter().map(column_ref).collect()
+        }
+        GroupByExpr::Expressions(_, _) => Err(SqlError::UnsupportedFeature("GROUP BY modifiers")),
+        GroupByExpr::All(_) => Err(SqlError::UnsupportedFeature("GROUP BY ALL")),
+    }
+}
+
+fn aggregate_exprs(projection: &[SelectItem]) -> Result<Vec<AggExpr>, SqlError> {
+    projection.iter().try_fold(Vec::new(), |mut aggs, item| {
+        match item {
+            SelectItem::UnnamedExpr(Expr::Function(function)) => {
+                if let Some(agg) = aggregate_expr(function, None)? {
+                    aggs.push(agg);
+                }
+            }
+            SelectItem::ExprWithAlias {
+                expr: Expr::Function(function),
+                alias,
+            } => {
+                if let Some(agg) = aggregate_expr(function, Some(alias.value.clone()))? {
+                    aggs.push(agg);
+                }
+            }
+            SelectItem::UnnamedExpr(_)
+            | SelectItem::ExprWithAlias { .. }
+            | SelectItem::QualifiedWildcard(_, _)
+            | SelectItem::Wildcard(_) => {}
+        }
+
+        Ok(aggs)
+    })
+}
+
+fn aggregate_expr(function: &Function, alias: Option<String>) -> Result<Option<AggExpr>, SqlError> {
+    let name = function.name.to_string().to_ascii_lowercase();
+    if !matches!(name.as_str(), "count" | "sum" | "min" | "max" | "avg") {
+        return Ok(None);
+    }
+
+    let mut args = function_args(&function.args)?;
+    if matches!(
+        function.args,
+        FunctionArguments::List(ref args)
+            if args.duplicate_treatment == Some(DuplicateTreatment::Distinct)
+    ) {
+        args.insert(0, "DISTINCT".to_owned());
+    }
+
+    Ok(Some(AggExpr {
+        function: name,
+        args,
+        alias,
+    }))
+}
+
+fn function_args(args: &FunctionArguments) -> Result<Vec<String>, SqlError> {
+    match args {
+        FunctionArguments::None => Ok(Vec::new()),
+        FunctionArguments::Subquery(_) => Err(SqlError::UnsupportedFeature(
+            "subqueries in aggregate arguments",
+        )),
+        FunctionArguments::List(args) => args
+            .args
+            .iter()
+            .map(|arg| match arg {
+                sqlparser::ast::FunctionArg::Named { .. } => {
+                    Err(SqlError::UnsupportedFeature("named aggregate arguments"))
+                }
+                sqlparser::ast::FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+                    Ok(expr.to_string())
+                }
+                sqlparser::ast::FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(name)) => {
+                    Ok(format!("{name}.*"))
+                }
+                sqlparser::ast::FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
+                    Ok("*".to_owned())
+                }
+            })
+            .collect(),
+    }
+}
+
 fn select_item_name(item: &SelectItem) -> String {
     match item {
         SelectItem::UnnamedExpr(expr) => expr.to_string(),
@@ -272,12 +367,11 @@ fn push_unary(graph: &mut MirGraph, node: MirNodeKind) {
     graph.set_root(next_root);
 }
 
-fn is_empty_group_by(group_by: &GroupByExpr) -> bool {
+fn has_group_by_modifiers(group_by: &GroupByExpr) -> bool {
     match group_by {
-        GroupByExpr::Expressions(expressions, modifiers) => {
-            expressions.is_empty() && modifiers.is_empty()
+        GroupByExpr::Expressions(_, modifiers) | GroupByExpr::All(modifiers) => {
+            !modifiers.is_empty()
         }
-        GroupByExpr::All(_) => false,
     }
 }
 
@@ -285,7 +379,7 @@ fn is_empty_group_by(group_by: &GroupByExpr) -> bool {
 mod tests {
     use crate::{
         lower::parse_and_lower,
-        mir::{ColumnRef, JoinKind, MirNodeKind, OrderKey},
+        mir::{AggExpr, ColumnRef, JoinKind, MirNodeKind, OrderKey},
     };
 
     #[test]
@@ -370,6 +464,51 @@ mod tests {
                 kind: JoinKind::Left,
                 on,
             } if on.len() == 2
+        )));
+    }
+
+    #[test]
+    fn lowers_group_by_aggregate() {
+        let graph = parse_and_lower(
+            "SELECT author_id, count(*) AS post_count, max(created_at)
+             FROM posts
+             WHERE author_id = 42
+             GROUP BY author_id",
+        )
+        .expect("basic aggregate query should lower");
+
+        assert_eq!(graph.node_count(), 4);
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Aggregate { group_by, aggs }
+                if group_by == &vec![ColumnRef {
+                    relation: None,
+                    name: "author_id".to_owned(),
+                }]
+                    && aggs == &vec![
+                        AggExpr {
+                            function: "count".to_owned(),
+                            args: vec!["*".to_owned()],
+                            alias: Some("post_count".to_owned()),
+                        },
+                        AggExpr {
+                            function: "max".to_owned(),
+                            args: vec!["created_at".to_owned()],
+                            alias: None,
+                        },
+                    ]
+        )));
+    }
+
+    #[test]
+    fn lowers_scalar_aggregate() {
+        let graph = parse_and_lower("SELECT count(*) FROM posts")
+            .expect("scalar aggregate query should lower");
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Aggregate { group_by, aggs }
+                if group_by.is_empty() && aggs.len() == 1
         )));
     }
 }
