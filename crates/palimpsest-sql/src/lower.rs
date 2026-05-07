@@ -1,6 +1,8 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::collections::HashMap;
+
 use sqlparser::ast::{
     BinaryOperator, Distinct, DuplicateTreatment, Expr, Function, FunctionArgExpr,
     FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator, Query, Select, SelectItem,
@@ -26,11 +28,20 @@ pub fn lower_select_statement(statement: &Statement) -> Result<MirGraph, SqlErro
 }
 
 fn lower_query(query: &Query) -> Result<MirGraph, SqlError> {
-    if query.with.is_some() {
-        return Err(SqlError::UnsupportedFeature("MIR lowering for CTEs"));
+    let mut context = LowerContext::default();
+
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            let graph = lower_query_with_context(&cte.query, &context)?;
+            context.ctes.insert(cte.alias.name.value.clone(), graph);
+        }
     }
 
-    let mut graph = lower_set_expr(&query.body)?;
+    lower_query_with_context(query, &context)
+}
+
+fn lower_query_with_context(query: &Query, context: &LowerContext) -> Result<MirGraph, SqlError> {
+    let mut graph = lower_set_expr(&query.body, context)?;
 
     if let Some(order_by) = &query.order_by {
         let limit = query
@@ -65,21 +76,26 @@ fn lower_query(query: &Query) -> Result<MirGraph, SqlError> {
     Ok(graph)
 }
 
-fn lower_set_expr(expr: &SetExpr) -> Result<MirGraph, SqlError> {
+#[derive(Debug, Default)]
+struct LowerContext {
+    ctes: HashMap<String, MirGraph>,
+}
+
+fn lower_set_expr(expr: &SetExpr, context: &LowerContext) -> Result<MirGraph, SqlError> {
     match expr {
-        SetExpr::Select(select) => lower_select_body(select),
+        SetExpr::Select(select) => lower_select_body(select, context),
         SetExpr::SetOperation {
             op: SetOperator::Union,
             set_quantifier: SetQuantifier::All,
             left,
             right,
-        } => lower_union_all(left, right),
+        } => lower_union_all(left, right, context),
         SetExpr::SetOperation {
             op: SetOperator::Union,
             ..
         } => Err(SqlError::UnsupportedFeature("UNION without ALL")),
         SetExpr::SetOperation { .. } => Err(SqlError::UnsupportedFeature("EXCEPT or INTERSECT")),
-        SetExpr::Query(query) => lower_query(query),
+        SetExpr::Query(query) => lower_query_with_context(query, context),
         SetExpr::Values(_) => Err(SqlError::UnsupportedFeature("VALUES queries")),
         SetExpr::Insert(_) => Err(SqlError::UnsupportedFeature("INSERT in query body")),
         SetExpr::Update(_) => Err(SqlError::UnsupportedFeature("UPDATE in query body")),
@@ -87,10 +103,14 @@ fn lower_set_expr(expr: &SetExpr) -> Result<MirGraph, SqlError> {
     }
 }
 
-fn lower_union_all(left: &SetExpr, right: &SetExpr) -> Result<MirGraph, SqlError> {
-    let mut graph = lower_set_expr(left)?;
+fn lower_union_all(
+    left: &SetExpr,
+    right: &SetExpr,
+    context: &LowerContext,
+) -> Result<MirGraph, SqlError> {
+    let mut graph = lower_set_expr(left, context)?;
     let left_root = graph.root();
-    let right = lower_set_expr(right)?;
+    let right = lower_set_expr(right, context)?;
     let right_root = graph.append_graph(&right);
 
     let union = graph.add_node(MirNodeKind::Union);
@@ -100,10 +120,10 @@ fn lower_union_all(left: &SetExpr, right: &SetExpr) -> Result<MirGraph, SqlError
     Ok(graph)
 }
 
-fn lower_select_body(select: &Select) -> Result<MirGraph, SqlError> {
+fn lower_select_body(select: &Select, context: &LowerContext) -> Result<MirGraph, SqlError> {
     reject_select_features_not_lowered(select)?;
 
-    let mut graph = lower_from(select)?;
+    let mut graph = lower_from(select, context)?;
 
     if let Some(predicate) = &select.selection {
         push_unary(
@@ -166,36 +186,32 @@ fn reject_select_features_not_lowered(select: &Select) -> Result<(), SqlError> {
     Ok(())
 }
 
-fn lower_from(select: &Select) -> Result<MirGraph, SqlError> {
+fn lower_from(select: &Select, context: &LowerContext) -> Result<MirGraph, SqlError> {
     let [source] = select.from.as_slice() else {
         return Err(SqlError::UnsupportedFeature(
             "MIR lowering for zero or multiple FROM items",
         ));
     };
 
-    lower_table_with_joins(source)
+    lower_table_with_joins(source, context)
 }
 
-fn lower_table_with_joins(source: &TableWithJoins) -> Result<MirGraph, SqlError> {
-    let table = base_table_name(&source.relation)?;
-    let mut graph = MirGraph::new(MirNodeKind::BaseTable {
-        table,
-        project: Vec::new(),
-    });
+fn lower_table_with_joins(
+    source: &TableWithJoins,
+    context: &LowerContext,
+) -> Result<MirGraph, SqlError> {
+    let mut graph = lower_table_factor(&source.relation, context)?;
 
     for join in &source.joins {
-        lower_join(&mut graph, join)?;
+        lower_join(&mut graph, join, context)?;
     }
 
     Ok(graph)
 }
 
-fn lower_join(graph: &mut MirGraph, join: &Join) -> Result<(), SqlError> {
-    let table = base_table_name(&join.relation)?;
-    let right = graph.add_node(MirNodeKind::BaseTable {
-        table,
-        project: Vec::new(),
-    });
+fn lower_join(graph: &mut MirGraph, join: &Join, context: &LowerContext) -> Result<(), SqlError> {
+    let right_graph = lower_table_factor(&join.relation, context)?;
+    let right = graph.append_graph(&right_graph);
 
     let (kind, on) = match &join.join_operator {
         JoinOperator::Inner(JoinConstraint::On(predicate)) => {
@@ -228,9 +244,22 @@ fn lower_join(graph: &mut MirGraph, join: &Join) -> Result<(), SqlError> {
     Ok(())
 }
 
-fn base_table_name(table: &TableFactor) -> Result<String, SqlError> {
+fn lower_table_factor(table: &TableFactor, context: &LowerContext) -> Result<MirGraph, SqlError> {
     match table {
-        TableFactor::Table { name, .. } => Ok(name.to_string()),
+        TableFactor::Table { name, .. } => {
+            let name = name.to_string();
+            if let Some(cte) = context.ctes.get(&name) {
+                let mut graph = MirGraph::new(MirNodeKind::CteRef { cte: name });
+                let cte_root = graph.append_graph(cte);
+                graph.add_cte_expansion(cte_root, graph.root());
+                Ok(graph)
+            } else {
+                Ok(MirGraph::new(MirNodeKind::BaseTable {
+                    table: name,
+                    project: Vec::new(),
+                }))
+            }
+        }
         TableFactor::Derived { .. } => Err(SqlError::UnsupportedFeature(
             "MIR lowering for derived tables",
         )),
@@ -402,7 +431,7 @@ fn has_group_by_modifiers(group_by: &GroupByExpr) -> bool {
 mod tests {
     use crate::{
         lower::parse_and_lower,
-        mir::{AggExpr, ColumnRef, JoinKind, MirNodeKind, OrderKey},
+        mir::{AggExpr, ColumnRef, JoinKind, MirEdgeKind, MirNodeKind, OrderKey},
     };
 
     #[test]
@@ -565,5 +594,26 @@ mod tests {
         .expect_err("UNION DISTINCT is not in the supported lowering subset");
 
         assert!(err.to_string().contains("UNION without ALL"));
+    }
+
+    #[test]
+    fn lowers_cte_reference() {
+        let graph = parse_and_lower(
+            "WITH recent_posts AS (
+                SELECT id, author_id FROM posts WHERE author_id = 42
+             )
+             SELECT id FROM recent_posts",
+        )
+        .expect("non-recursive CTE should lower");
+
+        assert_eq!(graph.node_count(), 5);
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::CteRef { cte } if cte == "recent_posts"
+        )));
+        assert!(graph
+            .graph()
+            .edge_weights()
+            .any(|edge| *edge == MirEdgeKind::CteExpansion));
     }
 }

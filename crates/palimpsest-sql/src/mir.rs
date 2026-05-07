@@ -117,6 +117,10 @@ impl MirGraph {
         self.graph.add_edge(from, to, MirEdgeKind::Input);
     }
 
+    pub fn add_cte_expansion(&mut self, from: NodeIndex, to: NodeIndex) {
+        self.graph.add_edge(from, to, MirEdgeKind::CteExpansion);
+    }
+
     pub fn add_node(&mut self, node: MirNodeKind) -> NodeIndex {
         self.graph.add_node(node)
     }

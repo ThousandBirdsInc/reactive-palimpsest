@@ -1311,7 +1311,7 @@ are intentionally small enough to land in single PRs.
   - [x] basic aggregates with optional `GROUP BY`
   - [x] `UNION ALL`
   - [ ] `UNION`/`EXCEPT`/`INTERSECT` and derived tables
-- [ ] CTE handling: lift each `WITH` arm into its own subgraph;
+- [x] CTE handling: lift each `WITH` arm into its own subgraph;
   `CteRef` placeholders in consumer position.
 - [ ] Column-reference resolution against MIR's schema attribute.
 - [ ] Type inference for expressions; reject type mismatches.
