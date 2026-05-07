@@ -1,10 +1,12 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use core::ops::ControlFlow;
+
 use sqlparser::{
     ast::{
         BinaryOperator, Expr, JoinConstraint, JoinOperator, Query, Select, SetExpr, Statement,
-        TableFactor, TableWithJoins,
+        TableFactor, TableWithJoins, Visit, Visitor,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -44,6 +46,7 @@ pub fn validate_query(query: &Query) -> Result<(), SqlError> {
         return Err(SqlError::UnsupportedFeature("ORDER BY without LIMIT"));
     }
 
+    validate_expression_surface(query)?;
     validate_set_expr(&query.body)
 }
 
@@ -132,6 +135,32 @@ fn is_equi_join_predicate(expr: &Expr) -> bool {
     }
 }
 
+fn validate_expression_surface(query: &Query) -> Result<(), SqlError> {
+    let mut visitor = UnsupportedExprVisitor;
+    match query.visit(&mut visitor) {
+        ControlFlow::Continue(()) => Ok(()),
+        ControlFlow::Break(feature) => Err(SqlError::UnsupportedFeature(feature)),
+    }
+}
+
+struct UnsupportedExprVisitor;
+
+impl Visitor for UnsupportedExprVisitor {
+    type Break = &'static str;
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        match expr {
+            Expr::Function(function) if function.over.is_some() => {
+                ControlFlow::Break("window functions")
+            }
+            Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::Subquery(_) => {
+                ControlFlow::Break("scalar subqueries with unbounded result")
+            }
+            _ => ControlFlow::Continue(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_select;
@@ -188,5 +217,24 @@ mod tests {
         .expect_err("theta joins are out of scope for v1");
 
         assert!(err.to_string().contains("theta joins"));
+    }
+
+    #[test]
+    fn rejects_window_functions() {
+        let err = parse_select(
+            "SELECT row_number() OVER (PARTITION BY author_id ORDER BY created_at)
+             FROM posts",
+        )
+        .expect_err("window functions are out of scope for v1");
+
+        assert!(err.to_string().contains("window functions"));
+    }
+
+    #[test]
+    fn rejects_scalar_subqueries() {
+        let err = parse_select("SELECT (SELECT max(id) FROM posts) FROM authors")
+            .expect_err("scalar subqueries are out of scope for v1");
+
+        assert!(err.to_string().contains("scalar subqueries"));
     }
 }

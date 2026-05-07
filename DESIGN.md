@@ -1298,11 +1298,11 @@ are intentionally small enough to land in single PRs.
   - [ ] desugar `BETWEEN`, `IN (list)`, `NOT IN`, `IS NULL`.
 - [ ] Reject unsupported features at parse time with typed errors:
   - [x] `WITH RECURSIVE`
-  - [ ] window functions
+  - [x] window functions
   - [x] `RIGHT/FULL JOIN`
   - [x] theta joins
   - [x] `ORDER BY` without `LIMIT`
-  - [ ] scalar subqueries with unbounded result
+  - [x] scalar subqueries with unbounded result
 - [x] `MirNodeKind` enum + `MirGraph` newtype around `petgraph`.
 - [ ] Lowering: AST `Statement::Query` → MIR.
 - [ ] CTE handling: lift each `WITH` arm into its own subgraph;
