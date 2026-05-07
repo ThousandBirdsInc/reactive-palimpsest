@@ -260,9 +260,14 @@ fn lower_table_factor(table: &TableFactor, context: &LowerContext) -> Result<Mir
                 }))
             }
         }
-        TableFactor::Derived { .. } => Err(SqlError::UnsupportedFeature(
-            "MIR lowering for derived tables",
-        )),
+        TableFactor::Derived {
+            lateral: false,
+            subquery,
+            ..
+        } => lower_query_with_context(subquery, context),
+        TableFactor::Derived { lateral: true, .. } => {
+            Err(SqlError::UnsupportedFeature("LATERAL derived tables"))
+        }
         _ => Err(SqlError::UnsupportedFeature(
             "table functions or special table factors",
         )),
@@ -661,5 +666,22 @@ mod tests {
             .graph()
             .edge_weights()
             .any(|edge| *edge == MirEdgeKind::CteExpansion));
+    }
+
+    #[test]
+    fn lowers_derived_table() {
+        let graph = parse_and_lower(
+            "SELECT id
+             FROM (
+                SELECT id FROM posts WHERE author_id = 42
+             ) AS recent_posts",
+        )
+        .expect("derived table should lower through nested query path");
+
+        assert_eq!(graph.node_count(), 4);
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Filter { predicate } if predicate == "author_id = 42"
+        )));
     }
 }

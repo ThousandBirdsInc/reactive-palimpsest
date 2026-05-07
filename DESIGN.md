@@ -1310,7 +1310,8 @@ are intentionally small enough to land in single PRs.
   - [x] equi-joins and left equi-joins
   - [x] basic aggregates with optional `GROUP BY`
   - [x] `UNION ALL`
-  - [ ] `UNION`/`EXCEPT`/`INTERSECT` and derived tables
+  - [x] derived tables
+  - [ ] `UNION`/`EXCEPT`/`INTERSECT`
 - [x] CTE handling: lift each `WITH` arm into its own subgraph;
   `CteRef` placeholders in consumer position.
 - [ ] Column-reference resolution against MIR's schema attribute.
