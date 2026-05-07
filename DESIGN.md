@@ -1256,7 +1256,7 @@ are intentionally small enough to land in single PRs.
 - [x] `skip_lsn` to simulate gaps.
 - [x] Round-trip property: `decode(encode(events)) == events`,
   with `proptest` generators for `LogicalEvent`.
-- [ ] `MockPostgres`: TCP listener on port 0, returns connection
+- [x] `MockPostgres`: TCP listener on port 0, returns connection
   string.
 - [ ] Implement startup handshake (Auth, ParameterStatus, BKD,
   RFQ).
