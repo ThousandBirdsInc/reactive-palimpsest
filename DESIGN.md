@@ -1238,7 +1238,7 @@ are intentionally small enough to land in single PRs.
 - [x] Refresh catalog on `RelationChange` events.
 - [x] Unit tests: every pgoutput message variant, including v3
   two-phase commit and v4 streaming.
-- [ ] Round-trip test with `WalGenerator` (after §18.3 lands).
+- [x] Round-trip test with `WalGenerator` (after §18.3 lands).
 - [x] Documentation: pgoutput message reference table in module
   docstring.
 

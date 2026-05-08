@@ -18,6 +18,7 @@ smallvec.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+palimpsest-test-harness = { path = "../palimpsest-test-harness" }
 proptest.workspace = true
 
 [lints]

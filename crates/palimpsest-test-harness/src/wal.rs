@@ -158,6 +158,30 @@ impl WalGenerator {
         frames
     }
 
+    pub fn encode_pgoutput(&mut self, events: &[LogicalEvent]) -> Vec<Bytes> {
+        let mut frames = Vec::new();
+
+        for event in events {
+            if let Some((table, column_count)) = event.relation_shape() {
+                debug_assert!(
+                    self.catalog.tables.is_empty() || self.catalog.contains(table),
+                    "logical event references table missing from test catalog"
+                );
+
+                if self.relation_emitted.insert(table) {
+                    frames.push(Self::encode_pgoutput_relation(table, column_count));
+                }
+            }
+
+            if let Some(frame) = self.encode_pgoutput_event(event) {
+                frames.push(frame);
+                self.next_lsn.advance(1);
+            }
+        }
+
+        frames
+    }
+
     fn encode_relation(table: TableId) -> Bytes {
         let mut bytes = BytesMut::with_capacity(5);
         bytes.put_u8(b'R');
@@ -210,6 +234,82 @@ impl WalGenerator {
 
         bytes.freeze()
     }
+
+    fn encode_pgoutput_relation(table: TableId, column_count: usize) -> Bytes {
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(b'R');
+        bytes.put_u32(table.get());
+        put_cstr(&mut bytes, "public");
+        put_cstr(&mut bytes, &format!("table_{}", table.get()));
+        bytes.put_u8(b'd');
+        bytes.put_u16(u16::try_from(column_count).unwrap_or(u16::MAX));
+        for index in 0..column_count {
+            bytes.put_u8(u8::from(index == 0));
+            put_cstr(&mut bytes, &format!("c{}", index + 1));
+            bytes.put_u32(25);
+            bytes.put_u32(u32::MAX);
+        }
+        bytes.freeze()
+    }
+
+    fn encode_pgoutput_event(&self, event: &LogicalEvent) -> Option<Bytes> {
+        let mut bytes = BytesMut::new();
+
+        match event {
+            LogicalEvent::Begin { xid } => {
+                bytes.put_u8(b'B');
+                bytes.put_u64(self.next_lsn.get());
+                bytes.put_u64(0);
+                bytes.put_u32(*xid);
+            }
+            LogicalEvent::Insert { table, new } => {
+                bytes.put_u8(b'I');
+                bytes.put_u32(table.get());
+                bytes.put_u8(b'N');
+                put_pgoutput_tuple(&mut bytes, new);
+            }
+            LogicalEvent::Update { table, old, new } => {
+                bytes.put_u8(b'U');
+                bytes.put_u32(table.get());
+                if let Some(old) = old {
+                    bytes.put_u8(b'O');
+                    put_pgoutput_tuple(&mut bytes, old);
+                }
+                bytes.put_u8(b'N');
+                put_pgoutput_tuple(&mut bytes, new);
+            }
+            LogicalEvent::Delete { table, old } => {
+                bytes.put_u8(b'D');
+                bytes.put_u32(table.get());
+                bytes.put_u8(b'O');
+                put_pgoutput_tuple(&mut bytes, old);
+            }
+            LogicalEvent::Commit => {
+                bytes.put_u8(b'C');
+                bytes.put_u8(0);
+                bytes.put_u64(self.next_lsn.get());
+                bytes.put_u64(self.next_lsn.get().saturating_add(1));
+                bytes.put_u64(0);
+            }
+            LogicalEvent::RelationChange { table, new_columns } => {
+                bytes.put_u8(b'R');
+                bytes.put_u32(table.get());
+                put_cstr(&mut bytes, "public");
+                put_cstr(&mut bytes, &format!("table_{}", table.get()));
+                bytes.put_u8(b'd');
+                bytes.put_u16(u16::try_from(new_columns.len()).unwrap_or(u16::MAX));
+                for (index, column) in new_columns.iter().enumerate() {
+                    bytes.put_u8(u8::from(index == 0));
+                    put_cstr(&mut bytes, &column.name);
+                    bytes.put_u32(column.type_oid);
+                    bytes.put_u32(u32::MAX);
+                }
+            }
+            LogicalEvent::Keepalive => return None,
+        }
+
+        Some(bytes.freeze())
+    }
 }
 
 impl LogicalEvent {
@@ -220,6 +320,18 @@ impl LogicalEvent {
             | Self::Update { table, .. }
             | Self::Delete { table, .. }
             | Self::RelationChange { table, .. } => Some(*table),
+            Self::Begin { .. } | Self::Commit | Self::Keepalive => None,
+        }
+    }
+
+    #[must_use]
+    pub fn relation_shape(&self) -> Option<(TableId, usize)> {
+        match self {
+            Self::Insert { table, new } | Self::Update { table, new, .. } => {
+                Some((*table, new.len()))
+            }
+            Self::Delete { table, old } => Some((*table, old.len())),
+            Self::RelationChange { table, new_columns } => Some((*table, new_columns.len())),
             Self::Begin { .. } | Self::Commit | Self::Keepalive => None,
         }
     }
@@ -245,6 +357,20 @@ fn put_tuple(bytes: &mut BytesMut, tuple: &Tuple) {
 fn put_string(bytes: &mut BytesMut, value: &str) {
     bytes.put_u16(u16::try_from(value.len()).unwrap_or(u16::MAX));
     bytes.put_slice(value.as_bytes());
+}
+
+fn put_cstr(bytes: &mut BytesMut, value: &str) {
+    bytes.put_slice(value.as_bytes());
+    bytes.put_u8(0);
+}
+
+fn put_pgoutput_tuple(bytes: &mut BytesMut, tuple: &Tuple) {
+    bytes.put_u16(u16::try_from(tuple.len()).unwrap_or(u16::MAX));
+    for value in tuple {
+        bytes.put_u8(b't');
+        bytes.put_u32(u32::try_from(value.len()).unwrap_or(u32::MAX));
+        bytes.put_slice(value.as_bytes());
+    }
 }
 
 #[cfg(test)]
