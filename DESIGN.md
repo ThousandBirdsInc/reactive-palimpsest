@@ -1347,16 +1347,16 @@ are intentionally small enough to land in single PRs.
   per-row Vec heap allocations.
 - [x] WAL → dataflow source operator: receives `DecodedEvent`,
   emits `(Row, Lsn, +1/-1)` triples.
-- [ ] Operator: `Filter` via differential `.filter()`.
-- [ ] Operator: `Project` via `.map()`.
-- [ ] Operator: `Equi-join` via `.join_map()` over arrangements
+- [x] Operator: `Filter` via differential `.filter()`.
+- [x] Operator: `Project` via `.map()`.
+- [x] Operator: `Equi-join` via `.join_map()` over arrangements
   keyed by join columns.
 - [ ] Operator: `LeftJoin` via differential's `outer_join` or a
   custom op if upstream lacks one.
 - [ ] Operator: `Aggregate` via `.reduce()`; support `count`,
   `sum`, `min`, `max`, `avg` (= sum/count), `count_distinct`.
-- [ ] Operator: `Distinct` via `.distinct()`.
-- [ ] Operator: `Union` via `.concat()`.
+- [x] Operator: `Distinct` via `.distinct()`.
+- [x] Operator: `Union` via `.concat()`.
 - [ ] Operator: `TopK` via `.reduce()` + custom slice (no built-in
   in differential at the time of writing; verify).
 - [ ] Operator: `CteRef` resolves to a shared arrangement handle.
