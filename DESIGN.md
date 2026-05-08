@@ -1269,7 +1269,7 @@ are intentionally small enough to land in single PRs.
   `WalGenerator`; emit periodic `Keepalive`.
 - [ ] Receive and record `StandbyStatus` from client; expose via
   `MockPostgres::acks()`.
-- [ ] `Fault` enum per §15.7; one test per variant.
+- [x] `Fault` enum per §15.7; one test per variant.
 - [ ] Catalog-response fixtures: capture from real Postgres
   (16, 17) via an `xtask regen-pg-fixtures` script; check
   fixtures + their checksums into source.

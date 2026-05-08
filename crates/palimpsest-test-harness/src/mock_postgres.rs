@@ -7,6 +7,8 @@ use std::{
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
 };
 
+use crate::wal::{Lsn, TableId};
+
 const PROTOCOL_VERSION_3: u32 = 196_608;
 const SSL_REQUEST: u32 = 80_877_103;
 const CANCEL_REQUEST: u32 = 80_877_102;
@@ -26,6 +28,7 @@ const PARAMETER_STATUS: &[(&str, &str)] = &[
 pub struct MockPostgres {
     listener: TcpListener,
     address: SocketAddr,
+    faults: Vec<Fault>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,12 +36,26 @@ pub struct Startup {
     pub parameters: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fault {
+    DropConnection,
+    HangAfter { bytes: usize },
+    SlowSend { rate_bytes_per_sec: u32 },
+    SlotGone,
+    LsnRewind { to: Lsn },
+    SchemaDrift { table: TableId },
+}
+
 impl MockPostgres {
     pub fn bind() -> io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let address = listener.local_addr()?;
 
-        Ok(Self { listener, address })
+        Ok(Self {
+            listener,
+            address,
+            faults: Vec::new(),
+        })
     }
 
     #[must_use]
@@ -58,6 +75,15 @@ impl MockPostgres {
     #[must_use]
     pub const fn listener(&self) -> &TcpListener {
         &self.listener
+    }
+
+    pub fn fault(&mut self, fault: Fault) {
+        self.faults.push(fault);
+    }
+
+    #[must_use]
+    pub fn faults(&self) -> &[Fault] {
+        &self.faults
     }
 
     pub fn accept_startup(&self) -> io::Result<Startup> {
@@ -181,7 +207,8 @@ mod tests {
         thread,
     };
 
-    use super::MockPostgres;
+    use super::{Fault, MockPostgres};
+    use crate::wal::{Lsn, TableId};
 
     #[test]
     fn binds_ephemeral_local_port_and_returns_connection_string() {
@@ -251,6 +278,47 @@ mod tests {
             .join()
             .expect("server thread should not panic")
             .expect("startup should be accepted after SSL rejection");
+    }
+
+    #[test]
+    fn queues_drop_connection_fault() {
+        assert_fault_round_trips(Fault::DropConnection);
+    }
+
+    #[test]
+    fn queues_hang_after_fault() {
+        assert_fault_round_trips(Fault::HangAfter { bytes: 128 });
+    }
+
+    #[test]
+    fn queues_slow_send_fault() {
+        assert_fault_round_trips(Fault::SlowSend {
+            rate_bytes_per_sec: 64,
+        });
+    }
+
+    #[test]
+    fn queues_slot_gone_fault() {
+        assert_fault_round_trips(Fault::SlotGone);
+    }
+
+    #[test]
+    fn queues_lsn_rewind_fault() {
+        assert_fault_round_trips(Fault::LsnRewind { to: Lsn::new(42) });
+    }
+
+    #[test]
+    fn queues_schema_drift_fault() {
+        assert_fault_round_trips(Fault::SchemaDrift {
+            table: TableId::new(7),
+        });
+    }
+
+    fn assert_fault_round_trips(fault: Fault) {
+        let mut server = MockPostgres::bind().expect("mock server should bind");
+        server.fault(fault.clone());
+
+        assert_eq!(server.faults(), &[fault]);
     }
 
     fn startup_packet(parameters: &[(&str, &str)]) -> Vec<u8> {

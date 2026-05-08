@@ -6,5 +6,5 @@
 pub mod mock_postgres;
 pub mod wal;
 
-pub use mock_postgres::{MockPostgres, Startup};
+pub use mock_postgres::{Fault, MockPostgres, Startup};
 pub use wal::{Catalog, ColumnDef, LogicalEvent, Lsn, TableId, Tuple, WalGenerator};
