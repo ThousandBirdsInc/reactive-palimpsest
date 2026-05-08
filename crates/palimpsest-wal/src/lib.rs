@@ -27,6 +27,6 @@ pub use error::{Result, WalError};
 pub use protocol::{
     decode_pgoutput_message, DecodedEvent, Origin, RowOp, StreamAction, Truncate, TwoPhaseAction,
 };
-pub use source::{RestartLsnStore, WalConfig, WalSource};
+pub use source::{ReconnectBackoff, RestartLsnStore, WalConfig, WalSource};
 pub use spill::{BackpressureQueue, StreamSpillBuffer};
 pub use types::{ColumnDef, Lsn, TableId, Tuple};

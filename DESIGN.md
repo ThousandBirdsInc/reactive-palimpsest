@@ -1231,7 +1231,7 @@ are intentionally small enough to land in single PRs.
   control; updated on each `Ack`.
 - [x] Slot recreation on slot-gone error: re-export snapshot,
   reconcile with downstream by forcing `Resync`.
-- [ ] Reconnect/retry: keep upstream's exponential backoff; surface
+- [x] Reconnect/retry: keep upstream's exponential backoff; surface
   reconnect events to consumer.
 - [x] Catalog probe queries against `pg_class`, `pg_attribute`,
   `pg_index`, `pg_namespace`; populate `Catalog`.
