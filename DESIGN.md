@@ -1274,7 +1274,7 @@ are intentionally small enough to land in single PRs.
   (16, 17) via an `xtask regen-pg-fixtures` script; check
   fixtures + their checksums into source.
 - [x] `ReferenceExecutor` skeleton with table HashMaps.
-- [ ] Apply `LogicalEvent` to `ReferenceExecutor` state.
+- [x] Apply `LogicalEvent` to `ReferenceExecutor` state.
 - [ ] Lower MIR → reference plan; one match arm per MIR variant.
 - [ ] Filter, Project, Equi-join (nested loop), LeftJoin,
   Aggregate (HashMap), Distinct, Union, TopK (BinaryHeap),
