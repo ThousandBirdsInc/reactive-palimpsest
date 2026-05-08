@@ -1236,7 +1236,7 @@ are intentionally small enough to land in single PRs.
 - [x] Catalog probe queries against `pg_class`, `pg_attribute`,
   `pg_index`, `pg_namespace`; populate `Catalog`.
 - [x] Refresh catalog on `RelationChange` events.
-- [ ] Unit tests: every pgoutput message variant, including v3
+- [x] Unit tests: every pgoutput message variant, including v3
   two-phase commit and v4 streaming.
 - [ ] Round-trip test with `WalGenerator` (after §18.3 lands).
 - [x] Documentation: pgoutput message reference table in module

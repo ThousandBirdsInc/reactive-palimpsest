@@ -365,8 +365,11 @@ impl Decoder {
 mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
 
-    use super::{decode_pgoutput_message, DecodedEvent, RowOp, StreamAction};
-    use crate::{Catalog, Datum, Lsn, TableId, Tuple, BOOL_OID, INT4_OID, TEXT_OID};
+    use super::{
+        decode_pgoutput_message, DecodedEvent, Origin, RowOp, StreamAction, Truncate,
+        TwoPhaseAction,
+    };
+    use crate::{Catalog, Datum, Lsn, TableId, Tuple, WalError, BOOL_OID, INT4_OID, TEXT_OID};
 
     #[test]
     fn decodes_relation_and_insert_tuple() {
@@ -450,6 +453,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decodes_control_and_rare_message_variants() {
+        let mut catalog = Catalog::new();
+
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, begin(55, 99)).unwrap(),
+            DecodedEvent::Begin {
+                xid: 55,
+                commit_lsn: Lsn::new(99),
+            }
+        );
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, truncate(&[TableId::new(1), TableId::new(2)]))
+                .unwrap(),
+            DecodedEvent::Truncate(Truncate {
+                tables: vec![TableId::new(1), TableId::new(2)],
+                cascade: true,
+                restart_identity: true,
+            })
+        );
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, origin()).unwrap(),
+            DecodedEvent::Origin(Origin {
+                lsn: Lsn::new(88),
+                name: "origin-a".to_owned(),
+            })
+        );
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, stream_start()).unwrap(),
+            DecodedEvent::Stream(StreamAction::Start {
+                xid: 7,
+                first_segment: true,
+            })
+        );
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, Bytes::from_static(b"E")).unwrap(),
+            DecodedEvent::Stream(StreamAction::Stop)
+        );
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, stream_abort()).unwrap(),
+            DecodedEvent::Stream(StreamAction::Abort { xid: 7, subxid: 8 })
+        );
+    }
+
+    #[test]
+    fn decodes_two_phase_commit_variants() {
+        let mut catalog = Catalog::new();
+
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, two_phase(b'b', 11, "gid-a")).unwrap(),
+            DecodedEvent::TwoPhase(TwoPhaseAction::BeginPrepare {
+                xid: 11,
+                gid: "gid-a".to_owned(),
+            })
+        );
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, two_phase(b'P', 12, "gid-b")).unwrap(),
+            DecodedEvent::TwoPhase(TwoPhaseAction::Prepare {
+                xid: 12,
+                gid: "gid-b".to_owned(),
+            })
+        );
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, two_phase(b'K', 13, "gid-c")).unwrap(),
+            DecodedEvent::TwoPhase(TwoPhaseAction::CommitPrepared {
+                xid: 13,
+                gid: "gid-c".to_owned(),
+            })
+        );
+        assert_eq!(
+            decode_pgoutput_message(&mut catalog, two_phase(b'r', 14, "gid-d")).unwrap(),
+            DecodedEvent::TwoPhase(TwoPhaseAction::RollbackPrepared {
+                xid: 14,
+                gid: "gid-d".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn explicitly_rejects_type_and_logical_message_variants_for_phase_one() {
+        let mut catalog = Catalog::new();
+        assert!(matches!(
+            decode_pgoutput_message(&mut catalog, Bytes::from_static(b"Y")),
+            Err(WalError::UnsupportedMessage(b'Y'))
+        ));
+        assert!(matches!(
+            decode_pgoutput_message(&mut catalog, Bytes::from_static(b"M")),
+            Err(WalError::UnsupportedMessage(b'M'))
+        ));
+    }
+
     fn relation(table: TableId, columns: &[(&str, u32)]) -> Bytes {
         let mut bytes = BytesMut::new();
         bytes.put_u8(b'R');
@@ -464,6 +558,15 @@ mod tests {
             bytes.put_u32(*oid);
             bytes.put_u32(u32::MAX);
         }
+        bytes.freeze()
+    }
+
+    fn begin(xid: u32, lsn: u64) -> Bytes {
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(b'B');
+        bytes.put_u64(lsn);
+        bytes.put_u64(0);
+        bytes.put_u32(xid);
         bytes.freeze()
     }
 
@@ -498,6 +601,53 @@ mod tests {
         bytes.put_u64(commit_lsn);
         bytes.put_u64(end_lsn);
         bytes.put_u64(0);
+        bytes.freeze()
+    }
+
+    fn truncate(tables: &[TableId]) -> Bytes {
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(b'T');
+        bytes.put_u32(u32::try_from(tables.len()).unwrap());
+        bytes.put_u8(3);
+        for table in tables {
+            bytes.put_u32(table.get());
+        }
+        bytes.freeze()
+    }
+
+    fn origin() -> Bytes {
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(b'O');
+        bytes.put_u64(88);
+        put_cstr(&mut bytes, "origin-a");
+        bytes.freeze()
+    }
+
+    fn stream_start() -> Bytes {
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(b'S');
+        bytes.put_u32(7);
+        bytes.put_u8(1);
+        bytes.freeze()
+    }
+
+    fn stream_abort() -> Bytes {
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(b'A');
+        bytes.put_u32(7);
+        bytes.put_u32(8);
+        bytes.freeze()
+    }
+
+    fn two_phase(tag: u8, xid: u32, gid: &str) -> Bytes {
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(tag);
+        bytes.put_u8(0);
+        bytes.put_u64(1);
+        bytes.put_u64(2);
+        bytes.put_u64(3);
+        bytes.put_u32(xid);
+        put_cstr(&mut bytes, gid);
         bytes.freeze()
     }
 
