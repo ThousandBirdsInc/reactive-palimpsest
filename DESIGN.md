@@ -1222,9 +1222,9 @@ are intentionally small enough to land in single PRs.
 - [x] TOAST handling: detect `'u'` (unchanged) markers and surface
   them as `Datum::Unchanged` rather than dropping.
 - [x] Implement `WalSource` and `DecodedEvent` per design §6.
-- [ ] Backpressure: bounded mpsc between decoder task and consumer;
+- [x] Backpressure: bounded mpsc between decoder task and consumer;
   saturation triggers spill (next item).
-- [ ] Spill-to-disk path: when the bounded channel saturates during
+- [x] Spill-to-disk path: when the bounded channel saturates during
   a streamed transaction, write segments to a temp file keyed by
   xid; drain on `StreamCommit`.
 - [x] `restart_lsn` persistence: small SQLite table (or file) we
