@@ -4,9 +4,11 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use timely::{
-    order::PartialOrder,
-    progress::timestamp::{PathSummary, Timestamp},
+    order::{PartialOrder, TotalOrder},
+    progress::timestamp::{PathSummary, Refines, Timestamp},
 };
+
+use crate::lattice::{Lattice, Maximum};
 
 /// PostgreSQL WAL location used as a timely timestamp.
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -54,11 +56,39 @@ impl PartialOrder for Lsn {
     }
 }
 
+impl TotalOrder for Lsn {}
+
 impl Timestamp for Lsn {
     type Summary = LsnSummary;
 
     fn minimum() -> Self {
         Self(0)
+    }
+}
+
+impl Refines<()> for Lsn {
+    fn to_inner(_other: ()) -> Self {
+        Self::minimum()
+    }
+
+    fn to_outer(self) {}
+
+    fn summarize(_path: Self::Summary) {}
+}
+
+impl Lattice for Lsn {
+    fn join(&self, other: &Self) -> Self {
+        Self(self.0.max(other.0))
+    }
+
+    fn meet(&self, other: &Self) -> Self {
+        Self(self.0.min(other.0))
+    }
+}
+
+impl Maximum for Lsn {
+    fn maximum() -> Self {
+        Self(u64::MAX)
     }
 }
 
@@ -108,9 +138,10 @@ impl PathSummary<Lsn> for LsnSummary {
 
 #[cfg(test)]
 mod tests {
-    use timely::progress::timestamp::{PathSummary, Timestamp};
+    use timely::progress::timestamp::{PathSummary, Refines, Timestamp};
 
     use super::{Lsn, LsnSummary};
+    use crate::lattice::{Lattice, Maximum};
 
     #[test]
     fn lsn_is_timely_timestamp_with_zero_minimum() {
@@ -119,6 +150,10 @@ mod tests {
             &Lsn::new(7),
             &Lsn::new(9)
         ));
+        assert_eq!(<Lsn as Refines<()>>::to_inner(()), Lsn::minimum());
+        assert_eq!(Lsn::maximum(), Lsn::new(u64::MAX));
+        assert_eq!(Lsn::new(7).join(&Lsn::new(9)), Lsn::new(9));
+        assert_eq!(Lsn::new(7).meet(&Lsn::new(9)), Lsn::new(7));
     }
 
     #[test]

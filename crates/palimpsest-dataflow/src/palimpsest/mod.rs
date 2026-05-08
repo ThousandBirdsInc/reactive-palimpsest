@@ -1,10 +1,12 @@
 //! Palimpsest-specific dataflow runtime extensions.
 
+pub mod compaction;
 pub mod relational;
 pub mod time;
 pub mod wal;
 pub mod worker;
 
+pub use compaction::{LsnWatermarks, SubscriberId};
 pub use relational::{
     aggregate_i64, distinct, equi_join, filter, left_join, project, topk, union, union_distinct,
     AggregateFunc, AggregateValue, SortDirection,

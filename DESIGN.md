@@ -1367,7 +1367,7 @@ are intentionally small enough to land in single PRs.
 - [ ] Upquery resolver: walk MIR backward, issue
   `SELECT ... WHERE pk IN (...)` against Postgres for base table
   state.
-- [ ] LSN watermark eviction:
+- [x] LSN watermark eviction:
   `Trace::set_logical_compaction(min_subscriber_lsn)`.
 - [ ] Reference counting on shared subgraphs; teardown when last
   subscriber drops.
