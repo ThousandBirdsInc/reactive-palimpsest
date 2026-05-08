@@ -644,6 +644,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures",
+ "palimpsest-test-harness",
  "proptest",
  "smallvec",
  "thiserror",
