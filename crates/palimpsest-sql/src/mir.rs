@@ -11,6 +11,12 @@ pub enum JoinKind {
     Left,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetQuantifierKind {
+    Distinct,
+    All,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnRef {
     pub relation: Option<String>,
@@ -51,7 +57,15 @@ pub enum MirNodeKind {
         aggs: Vec<AggExpr>,
     },
     Distinct,
-    Union,
+    Union {
+        quantifier: SetQuantifierKind,
+    },
+    Except {
+        quantifier: SetQuantifierKind,
+    },
+    Intersect {
+        quantifier: SetQuantifierKind,
+    },
     TopK {
         order_by: Vec<OrderKey>,
         limit: usize,

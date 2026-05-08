@@ -10,7 +10,7 @@ use sqlparser::ast::{
 };
 
 use crate::{
-    mir::{AggExpr, ColumnRef, JoinKind, MirGraph, MirNodeKind, OrderKey},
+    mir::{AggExpr, ColumnRef, JoinKind, MirGraph, MirNodeKind, OrderKey, SetQuantifierKind},
     parse_select, SqlError,
 };
 
@@ -85,16 +85,11 @@ fn lower_set_expr(expr: &SetExpr, context: &LowerContext) -> Result<MirGraph, Sq
     match expr {
         SetExpr::Select(select) => lower_select_body(select, context),
         SetExpr::SetOperation {
-            op: SetOperator::Union,
-            set_quantifier: SetQuantifier::All,
+            op,
+            set_quantifier,
             left,
             right,
-        } => lower_union_all(left, right, context),
-        SetExpr::SetOperation {
-            op: SetOperator::Union,
-            ..
-        } => Err(SqlError::UnsupportedFeature("UNION without ALL")),
-        SetExpr::SetOperation { .. } => Err(SqlError::UnsupportedFeature("EXCEPT or INTERSECT")),
+        } => lower_set_operation(*op, *set_quantifier, left, right, context),
         SetExpr::Query(query) => lower_query_with_context(query, context),
         SetExpr::Values(_) => Err(SqlError::UnsupportedFeature("VALUES queries")),
         SetExpr::Insert(_) => Err(SqlError::UnsupportedFeature("INSERT in query body")),
@@ -103,21 +98,38 @@ fn lower_set_expr(expr: &SetExpr, context: &LowerContext) -> Result<MirGraph, Sq
     }
 }
 
-fn lower_union_all(
+fn lower_set_operation(
+    op: SetOperator,
+    set_quantifier: SetQuantifier,
     left: &SetExpr,
     right: &SetExpr,
     context: &LowerContext,
 ) -> Result<MirGraph, SqlError> {
+    let quantifier = lower_set_quantifier(set_quantifier)?;
     let mut graph = lower_set_expr(left, context)?;
     let left_root = graph.root();
     let right = lower_set_expr(right, context)?;
     let right_root = graph.append_graph(&right);
 
-    let union = graph.add_node(MirNodeKind::Union);
-    graph.add_input(left_root, union);
-    graph.add_input(right_root, union);
-    graph.set_root(union);
+    let set_op = graph.add_node(match op {
+        SetOperator::Union => MirNodeKind::Union { quantifier },
+        SetOperator::Except => MirNodeKind::Except { quantifier },
+        SetOperator::Intersect => MirNodeKind::Intersect { quantifier },
+    });
+    graph.add_input(left_root, set_op);
+    graph.add_input(right_root, set_op);
+    graph.set_root(set_op);
     Ok(graph)
+}
+
+fn lower_set_quantifier(quantifier: SetQuantifier) -> Result<SetQuantifierKind, SqlError> {
+    match quantifier {
+        SetQuantifier::All => Ok(SetQuantifierKind::All),
+        SetQuantifier::None | SetQuantifier::Distinct => Ok(SetQuantifierKind::Distinct),
+        SetQuantifier::ByName | SetQuantifier::AllByName | SetQuantifier::DistinctByName => {
+            Err(SqlError::UnsupportedFeature("set operations BY NAME"))
+        }
+    }
 }
 
 fn lower_select_body(select: &Select, context: &LowerContext) -> Result<MirGraph, SqlError> {
@@ -328,20 +340,65 @@ fn canonical_predicate(expr: &Expr) -> String {
         }
         Expr::BinaryOp { left, op, right } if *op == BinaryOperator::Eq => {
             let mut operands = [
-                (operand_sort_key(left), left.to_string()),
-                (operand_sort_key(right), right.to_string()),
+                (operand_sort_key(left), canonical_expr(left)),
+                (operand_sort_key(right), canonical_expr(right)),
             ];
             operands.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
             format!("{} = {}", operands[0].1, operands[1].1)
         }
-        _ => expr.to_string(),
+        Expr::BinaryOp { left, op, right } => {
+            format!("{} {op} {}", canonical_expr(left), canonical_expr(right))
+        }
+        _ => canonical_expr(expr),
     }
 }
 
 fn operand_sort_key(expr: &Expr) -> String {
     match expr {
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => format!("0:{expr}"),
-        _ => format!("1:{expr}"),
+        _ => format!("1:{}", canonical_expr(expr)),
+    }
+}
+
+fn canonical_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::Value(value) => canonical_value(value),
+        Expr::UnaryOp { op, expr } => format!("{op} {}", canonical_expr(expr)),
+        Expr::Nested(expr) => canonical_expr(expr),
+        Expr::BinaryOp { left, op, right } => {
+            format!("{} {op} {}", canonical_expr(left), canonical_expr(right))
+        }
+        _ => expr.to_string(),
+    }
+}
+
+fn canonical_value(value: &Value) -> String {
+    match value {
+        Value::Number(value, false) => canonical_number(value),
+        Value::SingleQuotedString(value)
+        | Value::EscapedStringLiteral(value)
+        | Value::UnicodeStringLiteral(value)
+        | Value::NationalStringLiteral(value) => format!("'{}'", value.replace('\'', "''")),
+        Value::Boolean(value) => value.to_string(),
+        Value::Null => "NULL".to_owned(),
+        _ => value.to_string(),
+    }
+}
+
+fn canonical_number(value: &str) -> String {
+    let value = value.trim_start_matches('+');
+    if value.contains(['.', 'e', 'E']) {
+        return value.to_ascii_lowercase();
+    }
+
+    let negative = value.starts_with('-');
+    let digits = if negative { &value[1..] } else { value };
+    let digits = digits.trim_start_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    if negative && digits != "0" {
+        format!("-{digits}")
+    } else {
+        digits.to_owned()
     }
 }
 
@@ -482,7 +539,9 @@ fn has_group_by_modifiers(group_by: &GroupByExpr) -> bool {
 mod tests {
     use crate::{
         lower::parse_and_lower,
-        mir::{AggExpr, ColumnRef, JoinKind, MirEdgeKind, MirNodeKind, OrderKey},
+        mir::{
+            AggExpr, ColumnRef, JoinKind, MirEdgeKind, MirNodeKind, OrderKey, SetQuantifierKind,
+        },
     };
 
     #[test]
@@ -625,7 +684,12 @@ mod tests {
         .expect("UNION ALL should lower");
 
         assert_eq!(graph.node_count(), 5);
-        assert!(matches!(graph.root_kind(), MirNodeKind::Union));
+        assert!(matches!(
+            graph.root_kind(),
+            MirNodeKind::Union {
+                quantifier: SetQuantifierKind::All,
+            }
+        ));
         assert_eq!(
             graph
                 .node_kinds()
@@ -636,15 +700,49 @@ mod tests {
     }
 
     #[test]
-    fn rejects_distinct_union_lowering() {
-        let err = parse_and_lower(
+    fn lowers_distinct_union() {
+        let graph = parse_and_lower(
             "SELECT id FROM posts
              UNION
              SELECT id FROM archived_posts",
         )
-        .expect_err("UNION DISTINCT is not in the supported lowering subset");
+        .expect("UNION DISTINCT should lower");
 
-        assert!(err.to_string().contains("UNION without ALL"));
+        assert!(matches!(
+            graph.root_kind(),
+            MirNodeKind::Union {
+                quantifier: SetQuantifierKind::Distinct,
+            }
+        ));
+    }
+
+    #[test]
+    fn lowers_except_and_intersect() {
+        let except = parse_and_lower(
+            "SELECT id FROM posts
+             EXCEPT
+             SELECT id FROM archived_posts",
+        )
+        .expect("EXCEPT should lower");
+        let intersect = parse_and_lower(
+            "SELECT id FROM posts
+             INTERSECT ALL
+             SELECT id FROM archived_posts",
+        )
+        .expect("INTERSECT ALL should lower");
+
+        assert!(matches!(
+            except.root_kind(),
+            MirNodeKind::Except {
+                quantifier: SetQuantifierKind::Distinct,
+            }
+        ));
+        assert!(matches!(
+            intersect.root_kind(),
+            MirNodeKind::Intersect {
+                quantifier: SetQuantifierKind::All,
+            }
+        ));
     }
 
     #[test]

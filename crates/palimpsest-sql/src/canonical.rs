@@ -55,7 +55,10 @@ fn canonical_node(
         })
         .collect::<Vec<_>>();
 
-    if matches!(graph.graph()[node_index], MirNodeKind::Union) {
+    if matches!(
+        graph.graph()[node_index],
+        MirNodeKind::Union { .. } | MirNodeKind::Intersect { .. }
+    ) {
         inputs.sort();
     }
 
@@ -82,7 +85,9 @@ fn canonical_node_kind(node: &MirNodeKind) -> String {
             )
         }
         MirNodeKind::Distinct => "distinct".to_owned(),
-        MirNodeKind::Union => "union".to_owned(),
+        MirNodeKind::Union { quantifier } => format!("union:{quantifier:?}"),
+        MirNodeKind::Except { quantifier } => format!("except:{quantifier:?}"),
+        MirNodeKind::Intersect { quantifier } => format!("intersect:{quantifier:?}"),
         MirNodeKind::TopK {
             order_by,
             limit,
@@ -129,6 +134,21 @@ mod tests {
             .expect("query should lower");
 
         assert_ne!(canonical_key(&left), canonical_key(&right));
+    }
+
+    #[test]
+    fn normalized_literals_have_same_key() {
+        let left = parse_and_lower("SELECT id FROM posts WHERE author_id = 00042")
+            .expect("query should lower");
+        let right = parse_and_lower("SELECT id FROM posts WHERE author_id = 42")
+            .expect("query should lower");
+        let escaped = parse_and_lower("SELECT id FROM posts WHERE title = E'hello'")
+            .expect("query should lower");
+        let quoted = parse_and_lower("SELECT id FROM posts WHERE title = 'hello'")
+            .expect("query should lower");
+
+        assert_eq!(canonical_form(&left), canonical_form(&right));
+        assert_eq!(canonical_key(&escaped), canonical_key(&quoted));
     }
 
     #[test]
