@@ -104,6 +104,8 @@ pub mod input;
 pub mod lattice;
 pub mod logging;
 pub mod operators;
+/// Palimpsest-specific runtime extensions layered onto the vendored engine.
+pub mod palimpsest;
 pub mod trace;
 
 /// Configuration options for differential dataflow.

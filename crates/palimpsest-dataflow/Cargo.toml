@@ -15,9 +15,11 @@ categories.workspace = true
 columnar = { version = "0.11", default-features = false }
 columnation = "0.1"
 fnv = "1.0"
+palimpsest-wal = { path = "../palimpsest-wal" }
 paste = "1.0"
 serde = { workspace = true, features = ["derive"] }
 timely.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 bytemuck = "1.18"

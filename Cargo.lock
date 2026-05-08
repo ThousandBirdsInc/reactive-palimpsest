@@ -774,10 +774,12 @@ dependencies = [
  "graph_map",
  "itertools 0.13.0",
  "mimalloc",
+ "palimpsest-wal",
  "paste",
  "rand 0.4.6",
  "serde",
  "timely",
+ "tokio",
 ]
 
 [[package]]
