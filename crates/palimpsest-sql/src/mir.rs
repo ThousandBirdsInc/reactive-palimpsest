@@ -157,4 +157,8 @@ impl MirGraph {
 
         node_map[&other.root]
     }
+
+    pub(crate) fn from_graph(graph: Graph<MirNodeKind, MirEdgeKind>, root: NodeIndex) -> Self {
+        Self { graph, root }
+    }
 }
