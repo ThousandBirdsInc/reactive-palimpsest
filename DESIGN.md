@@ -1258,7 +1258,7 @@ are intentionally small enough to land in single PRs.
   with `proptest` generators for `LogicalEvent`.
 - [x] `MockPostgres`: TCP listener on port 0, returns connection
   string.
-- [ ] Implement startup handshake (Auth, ParameterStatus, BKD,
+- [x] Implement startup handshake (Auth, ParameterStatus, BKD,
   RFQ).
 - [ ] Implement catalog-query pattern matching with canned
   responses; centralize match table in
