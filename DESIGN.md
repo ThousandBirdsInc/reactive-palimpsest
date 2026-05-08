@@ -1260,14 +1260,14 @@ are intentionally small enough to land in single PRs.
   string.
 - [x] Implement startup handshake (Auth, ParameterStatus, BKD,
   RFQ).
-- [ ] Implement catalog-query pattern matching with canned
+- [x] Implement catalog-query pattern matching with canned
   responses; centralize match table in
   `mock_postgres::catalog::DISPATCH`.
-- [ ] Implement replication commands: `IDENTIFY_SYSTEM`,
+- [x] Implement replication commands: `IDENTIFY_SYSTEM`,
   `CREATE_REPLICATION_SLOT`, `START_REPLICATION`.
-- [ ] Implement CopyBoth mode: stream `XLogData` payloads from
+- [x] Implement CopyBoth mode: stream `XLogData` payloads from
   `WalGenerator`; emit periodic `Keepalive`.
-- [ ] Receive and record `StandbyStatus` from client; expose via
+- [x] Receive and record `StandbyStatus` from client; expose via
   `MockPostgres::acks()`.
 - [x] `Fault` enum per §15.7; one test per variant.
 - [ ] Catalog-response fixtures: capture from real Postgres
