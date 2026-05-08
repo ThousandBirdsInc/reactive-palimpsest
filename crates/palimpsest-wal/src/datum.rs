@@ -171,16 +171,15 @@ pub fn stock_postgres_16_type(oid: u32) -> Option<DatumType> {
     let datum_type = match oid {
         BOOL_OID => DatumType::Bool,
         BYTEA_OID => DatumType::Bytea,
-        CHAR_OID | NAME_OID | BPCHAR_OID | VARCHAR_OID => DatumType::Text,
+        CHAR_OID | NAME_OID | TEXT_OID | BPCHAR_OID | VARCHAR_OID => DatumType::Text,
         INT8_OID => DatumType::I64,
         INT2_OID => DatumType::I16,
-        INT2_VECTOR_OID => DatumType::Array(Box::new(DatumType::I16)),
+        INT2_VECTOR_OID | INT2_ARRAY_OID => DatumType::Array(Box::new(DatumType::I16)),
         INT4_OID => DatumType::I32,
-        OID_VECTOR_OID => DatumType::Array(Box::new(DatumType::I32)),
-        TEXT_OID => DatumType::Text,
+        OID_VECTOR_OID | INT4_ARRAY_OID => DatumType::Array(Box::new(DatumType::I32)),
         FLOAT4_OID => DatumType::F32,
         FLOAT8_OID => DatumType::F64,
-        MONEY_OID => DatumType::Numeric,
+        MONEY_OID | NUMERIC_OID => DatumType::Numeric,
         UUID_OID => DatumType::Uuid,
         JSON_OID => DatumType::Json,
         JSONB_OID => DatumType::Jsonb,
@@ -189,19 +188,16 @@ pub fn stock_postgres_16_type(oid: u32) -> Option<DatumType> {
         TIMESTAMP_OID => DatumType::Timestamp,
         TIMESTAMPTZ_OID => DatumType::TimestampTz,
         INTERVAL_OID => DatumType::Interval,
-        NUMERIC_OID => DatumType::Numeric,
         BOOL_ARRAY_OID => DatumType::Array(Box::new(DatumType::Bool)),
         BYTEA_ARRAY_OID => DatumType::Array(Box::new(DatumType::Bytea)),
         CHAR_ARRAY_OID | NAME_ARRAY_OID | BPCHAR_ARRAY_OID | VARCHAR_ARRAY_OID => {
             DatumType::Array(Box::new(DatumType::Text))
         }
-        INT2_ARRAY_OID => DatumType::Array(Box::new(DatumType::I16)),
-        INT4_ARRAY_OID => DatumType::Array(Box::new(DatumType::I32)),
         TEXT_ARRAY_OID => DatumType::Array(Box::new(DatumType::Text)),
         INT8_ARRAY_OID => DatumType::Array(Box::new(DatumType::I64)),
         FLOAT4_ARRAY_OID => DatumType::Array(Box::new(DatumType::F32)),
         FLOAT8_ARRAY_OID => DatumType::Array(Box::new(DatumType::F64)),
-        MONEY_ARRAY_OID => DatumType::Array(Box::new(DatumType::Numeric)),
+        MONEY_ARRAY_OID | NUMERIC_ARRAY_OID => DatumType::Array(Box::new(DatumType::Numeric)),
         DATE_ARRAY_OID => DatumType::Array(Box::new(DatumType::Date)),
         TIME_ARRAY_OID => DatumType::Array(Box::new(DatumType::Time)),
         TIMESTAMP_ARRAY_OID => DatumType::Array(Box::new(DatumType::Timestamp)),
@@ -210,7 +206,6 @@ pub fn stock_postgres_16_type(oid: u32) -> Option<DatumType> {
         UUID_ARRAY_OID => DatumType::Array(Box::new(DatumType::Uuid)),
         JSON_ARRAY_OID => DatumType::Array(Box::new(DatumType::Json)),
         JSONB_ARRAY_OID => DatumType::Array(Box::new(DatumType::Jsonb)),
-        NUMERIC_ARRAY_OID => DatumType::Array(Box::new(DatumType::Numeric)),
         INT2_VECTOR_ARRAY_OID => {
             DatumType::Array(Box::new(DatumType::Array(Box::new(DatumType::I16))))
         }
