@@ -1291,11 +1291,11 @@ are intentionally small enough to land in single PRs.
 ### 18.4 `palimpsest-sql` — SQL frontend (Phase 1)
 
 - [x] Wire `sqlparser-rs` with `PostgreSqlDialect`.
-- [ ] AST normalization passes:
-  - [ ] expand `*` projections,
-  - [ ] resolve qualified names against catalog,
-  - [ ] propagate aliases,
-  - [ ] desugar `BETWEEN`, `IN (list)`, `NOT IN`, `IS NULL`.
+- [x] AST normalization passes:
+  - [x] expand `*` projections,
+  - [x] resolve qualified names against catalog,
+  - [x] propagate aliases,
+  - [x] desugar `BETWEEN`, `IN (list)`, `NOT IN`, `IS NULL`.
 - [x] Reject unsupported features at parse time with typed errors:
   - [x] `WITH RECURSIVE`
   - [x] window functions
@@ -1304,29 +1304,29 @@ are intentionally small enough to land in single PRs.
   - [x] `ORDER BY` without `LIMIT`
   - [x] scalar subqueries with unbounded result
 - [x] `MirNodeKind` enum + `MirGraph` newtype around `petgraph`.
-- [ ] Lowering: AST `Statement::Query` → MIR.
+- [x] Lowering: AST `Statement::Query` → MIR.
   - [x] single-table `SELECT` with `WHERE`, projection,
     `DISTINCT`, `ORDER BY` + `LIMIT/OFFSET`
   - [x] equi-joins and left equi-joins
   - [x] basic aggregates with optional `GROUP BY`
   - [x] `UNION ALL`
   - [x] derived tables
-  - [ ] `UNION`/`EXCEPT`/`INTERSECT`
+  - [x] `UNION`/`EXCEPT`/`INTERSECT`
 - [x] CTE handling: lift each `WITH` arm into its own subgraph;
   `CteRef` placeholders in consumer position.
-- [ ] Column-reference resolution against MIR's schema attribute.
-- [ ] Type inference for expressions; reject type mismatches.
-- [ ] Predicate canonicalization (commute commutative ops, sort
+- [x] Column-reference resolution against MIR's schema attribute.
+- [x] Type inference for expressions; reject type mismatches.
+- [x] Predicate canonicalization (commute commutative ops, sort
   conjuncts, normalize literals).
   - [x] commute equality operands
   - [x] sort `AND` conjuncts
-  - [ ] normalize literals
+  - [x] normalize literals
 - [x] Canonical hash function for an MIR subgraph (SipHash; output
   is the canonicalization key).
-- [ ] Reuse pass: hash-equal subgraphs collapse to a single node.
-- [ ] Query validation pass per §8.5 (table/column existence,
+- [x] Reuse pass: hash-equal subgraphs collapse to a single node.
+- [x] Query validation pass per §8.5 (table/column existence,
   equi-join only, etc.).
-- [ ] Snapshot tests: AST, MIR raw, MIR canonicalized, MIR
+- [x] Snapshot tests: AST, MIR raw, MIR canonicalized, MIR
   permission-rewritten, build plan.
 - [x] Property test: alpha-renaming a CTE produces same canonical
   hash.
