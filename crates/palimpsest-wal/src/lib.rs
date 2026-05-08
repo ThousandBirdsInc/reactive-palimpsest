@@ -3,10 +3,13 @@
 
 #![doc = include_str!("../README.md")]
 
+mod catalog;
 mod datum;
 mod error;
+mod protocol;
 mod types;
 
+pub use catalog::{Catalog, RelationSchema, ReplicaIdentity};
 pub use datum::{
     decode_column_value, stock_postgres_16_type, BigDecimal, ColumnValue, Date, Datum, DatumType,
     Interval, Time, Timestamp, TimestampTz, Uuid, BOOL_ARRAY_OID, BOOL_OID, BYTEA_ARRAY_OID,
@@ -16,4 +19,7 @@ pub use datum::{
     TEXT_ARRAY_OID, TEXT_OID, TIMESTAMPTZ_OID, TIMESTAMP_OID, TIME_OID, UUID_ARRAY_OID, UUID_OID,
 };
 pub use error::{Result, WalError};
+pub use protocol::{
+    decode_pgoutput_message, DecodedEvent, Origin, RowOp, StreamAction, Truncate, TwoPhaseAction,
+};
 pub use types::{ColumnDef, Lsn, TableId, Tuple};

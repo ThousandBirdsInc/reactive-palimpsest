@@ -1216,10 +1216,10 @@ are intentionally small enough to land in single PRs.
   `Array(Vec<Datum>)`, `Null`.
 - [ ] Build OID → `DatumType` mapping table; cover at least the
   pg_type rows present in stock Postgres 16.
-- [ ] Implement decoder: `ColumnValue::{Text,Binary}(Bytes)` →
+- [x] Implement decoder: `ColumnValue::{Text,Binary}(Bytes)` →
   `Datum`, both for binary mode and text mode.
 - [ ] Replace pg-walstream's `RowData` with `Tuple = SmallVec<[Datum; 8]>`.
-- [ ] TOAST handling: detect `'u'` (unchanged) markers and surface
+- [x] TOAST handling: detect `'u'` (unchanged) markers and surface
   them as `Datum::Unchanged` rather than dropping.
 - [ ] Implement `WalSource` and `DecodedEvent` per design §6.
 - [ ] Backpressure: bounded mpsc between decoder task and consumer;
@@ -1239,7 +1239,7 @@ are intentionally small enough to land in single PRs.
 - [ ] Unit tests: every pgoutput message variant, including v3
   two-phase commit and v4 streaming.
 - [ ] Round-trip test with `WalGenerator` (after §18.3 lands).
-- [ ] Documentation: pgoutput message reference table in module
+- [x] Documentation: pgoutput message reference table in module
   docstring.
 
 ### 18.3 `palimpsest-test-harness` (Phase 1, parallel)

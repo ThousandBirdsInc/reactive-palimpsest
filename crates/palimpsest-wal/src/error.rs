@@ -36,6 +36,16 @@ pub enum WalError {
     Uuid(String),
     #[error("unexpected end of WAL message while reading {0}")]
     UnexpectedEof(&'static str),
+    #[error("malformed pgoutput message: {0}")]
+    Malformed(&'static str),
+    #[error("relation {0:?} is not in the WAL catalog")]
+    UnknownRelation(crate::TableId),
+    #[error("tuple for relation {table:?} has {actual} columns; expected {expected}")]
+    TupleArity {
+        table: crate::TableId,
+        expected: usize,
+        actual: usize,
+    },
     #[error("unsupported pgoutput message tag {0}")]
     UnsupportedMessage(u8),
     #[error("I/O error: {0}")]
