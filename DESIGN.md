@@ -1248,7 +1248,7 @@ are intentionally small enough to land in single PRs.
   regular dependency of test-only consumers.
 - [x] `WalGenerator` skeleton with `next_lsn`, `Catalog`,
   `relation_emitted` set.
-- [ ] Encode each pgoutput message type symmetrically with the
+- [x] Encode each pgoutput message type symmetrically with the
   decoder; share enum definitions where possible.
 - [x] `LogicalEvent` enum per §15.4.1.
 - [x] `WalGenerator::encode(&[LogicalEvent]) -> Vec<Bytes>`.

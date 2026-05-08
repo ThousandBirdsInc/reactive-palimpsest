@@ -52,6 +52,12 @@ pub struct ColumnDef {
     pub nullable: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TruncateOpts {
+    pub cascade: bool,
+    pub restart_identity: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
     tables: HashSet<TableId>,
@@ -95,6 +101,42 @@ pub enum LogicalEvent {
     RelationChange {
         table: TableId,
         new_columns: Vec<ColumnDef>,
+    },
+    Truncate {
+        tables: Vec<TableId>,
+        options: TruncateOpts,
+    },
+    Origin {
+        lsn: Lsn,
+        name: String,
+    },
+    StreamStart {
+        xid: u32,
+        first_segment: bool,
+    },
+    StreamStop,
+    StreamCommit {
+        xid: u32,
+    },
+    StreamAbort {
+        xid: u32,
+        subxid: u32,
+    },
+    BeginPrepare {
+        xid: u32,
+        gid: String,
+    },
+    Prepare {
+        xid: u32,
+        gid: String,
+    },
+    CommitPrepared {
+        xid: u32,
+        gid: String,
+    },
+    RollbackPrepared {
+        xid: u32,
+        gid: String,
     },
     Keepalive,
 }
@@ -227,6 +269,56 @@ impl WalGenerator {
                     bytes.put_u8(u8::from(column.nullable));
                 }
             }
+            LogicalEvent::Truncate { tables, options } => {
+                bytes.put_u8(b'T');
+                bytes.put_u32(u32::try_from(tables.len()).unwrap_or(u32::MAX));
+                bytes.put_u8(options.flags());
+                for table in tables {
+                    bytes.put_u32(table.get());
+                }
+            }
+            LogicalEvent::Origin { lsn, name } => {
+                bytes.put_u8(b'O');
+                bytes.put_u64(lsn.get());
+                put_string(&mut bytes, name);
+            }
+            LogicalEvent::StreamStart { xid, first_segment } => {
+                bytes.put_u8(b'Y');
+                bytes.put_u32(*xid);
+                bytes.put_u8(u8::from(*first_segment));
+            }
+            LogicalEvent::StreamStop => {
+                bytes.put_u8(b'E');
+            }
+            LogicalEvent::StreamCommit { xid } => {
+                bytes.put_u8(b'c');
+                bytes.put_u32(*xid);
+            }
+            LogicalEvent::StreamAbort { xid, subxid } => {
+                bytes.put_u8(b'A');
+                bytes.put_u32(*xid);
+                bytes.put_u32(*subxid);
+            }
+            LogicalEvent::BeginPrepare { xid, gid } => {
+                bytes.put_u8(b'b');
+                bytes.put_u32(*xid);
+                put_string(&mut bytes, gid);
+            }
+            LogicalEvent::Prepare { xid, gid } => {
+                bytes.put_u8(b'P');
+                bytes.put_u32(*xid);
+                put_string(&mut bytes, gid);
+            }
+            LogicalEvent::CommitPrepared { xid, gid } => {
+                bytes.put_u8(b'p');
+                bytes.put_u32(*xid);
+                put_string(&mut bytes, gid);
+            }
+            LogicalEvent::RollbackPrepared { xid, gid } => {
+                bytes.put_u8(b'r');
+                bytes.put_u32(*xid);
+                put_string(&mut bytes, gid);
+            }
             LogicalEvent::Keepalive => {
                 bytes.put_u8(b'K');
             }
@@ -305,10 +397,66 @@ impl WalGenerator {
                     bytes.put_u32(u32::MAX);
                 }
             }
+            LogicalEvent::Truncate { tables, options } => {
+                bytes.put_u8(b'T');
+                bytes.put_u32(u32::try_from(tables.len()).unwrap_or(u32::MAX));
+                bytes.put_u8(options.flags());
+                for table in tables {
+                    bytes.put_u32(table.get());
+                }
+            }
+            LogicalEvent::Origin { lsn, name } => {
+                bytes.put_u8(b'O');
+                bytes.put_u64(lsn.get());
+                put_cstr(&mut bytes, name);
+            }
+            LogicalEvent::StreamStart { xid, first_segment } => {
+                bytes.put_u8(b'S');
+                bytes.put_u32(*xid);
+                bytes.put_u8(u8::from(*first_segment));
+            }
+            LogicalEvent::StreamStop => {
+                bytes.put_u8(b'E');
+            }
+            LogicalEvent::StreamCommit { xid } => {
+                bytes.put_u8(b'c');
+                bytes.put_u32(*xid);
+                bytes.put_u8(0);
+                bytes.put_u64(self.next_lsn.get());
+                bytes.put_u64(self.next_lsn.get().saturating_add(1));
+                bytes.put_u64(0);
+            }
+            LogicalEvent::StreamAbort { xid, subxid } => {
+                bytes.put_u8(b'A');
+                bytes.put_u32(*xid);
+                bytes.put_u32(*subxid);
+            }
+            LogicalEvent::BeginPrepare { xid, gid } => {
+                bytes.put_u8(b'b');
+                put_pgoutput_prepare(&mut bytes, self.next_lsn, *xid, gid);
+            }
+            LogicalEvent::Prepare { xid, gid } => {
+                bytes.put_u8(b'P');
+                put_pgoutput_prepare(&mut bytes, self.next_lsn, *xid, gid);
+            }
+            LogicalEvent::CommitPrepared { xid, gid } => {
+                bytes.put_u8(b'K');
+                put_pgoutput_prepare(&mut bytes, self.next_lsn, *xid, gid);
+            }
+            LogicalEvent::RollbackPrepared { xid, gid } => {
+                bytes.put_u8(b'r');
+                put_pgoutput_prepare(&mut bytes, self.next_lsn, *xid, gid);
+            }
             LogicalEvent::Keepalive => return None,
         }
 
         Some(bytes.freeze())
+    }
+}
+
+impl TruncateOpts {
+    fn flags(self) -> u8 {
+        u8::from(self.cascade) | (u8::from(self.restart_identity) << 1)
     }
 }
 
@@ -320,7 +468,19 @@ impl LogicalEvent {
             | Self::Update { table, .. }
             | Self::Delete { table, .. }
             | Self::RelationChange { table, .. } => Some(*table),
-            Self::Begin { .. } | Self::Commit | Self::Keepalive => None,
+            Self::Begin { .. }
+            | Self::Commit
+            | Self::Truncate { .. }
+            | Self::Origin { .. }
+            | Self::StreamStart { .. }
+            | Self::StreamStop
+            | Self::StreamCommit { .. }
+            | Self::StreamAbort { .. }
+            | Self::BeginPrepare { .. }
+            | Self::Prepare { .. }
+            | Self::CommitPrepared { .. }
+            | Self::RollbackPrepared { .. }
+            | Self::Keepalive => None,
         }
     }
 
@@ -332,7 +492,19 @@ impl LogicalEvent {
             }
             Self::Delete { table, old } => Some((*table, old.len())),
             Self::RelationChange { table, new_columns } => Some((*table, new_columns.len())),
-            Self::Begin { .. } | Self::Commit | Self::Keepalive => None,
+            Self::Begin { .. }
+            | Self::Commit
+            | Self::Truncate { .. }
+            | Self::Origin { .. }
+            | Self::StreamStart { .. }
+            | Self::StreamStop
+            | Self::StreamCommit { .. }
+            | Self::StreamAbort { .. }
+            | Self::BeginPrepare { .. }
+            | Self::Prepare { .. }
+            | Self::CommitPrepared { .. }
+            | Self::RollbackPrepared { .. }
+            | Self::Keepalive => None,
         }
     }
 }
@@ -373,12 +545,23 @@ fn put_pgoutput_tuple(bytes: &mut BytesMut, tuple: &Tuple) {
     }
 }
 
+fn put_pgoutput_prepare(bytes: &mut BytesMut, lsn: Lsn, xid: u32, gid: &str) {
+    bytes.put_u8(0);
+    bytes.put_u64(lsn.get());
+    bytes.put_u64(lsn.get().saturating_add(1));
+    bytes.put_u64(0);
+    bytes.put_u32(xid);
+    put_cstr(bytes, gid);
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::{Buf, Bytes};
     use proptest::{option, prelude::*};
 
-    use super::{Catalog, ColumnDef, LogicalEvent, TableId, Tuple, WalGenerator};
+    use super::{
+        Catalog, ColumnDef, LogicalEvent, Lsn, TableId, TruncateOpts, Tuple, WalGenerator,
+    };
 
     #[test]
     fn auto_emits_relation_before_first_row_for_table() {
@@ -429,6 +612,74 @@ mod tests {
         assert_eq!(frames.len(), 2);
     }
 
+    #[test]
+    fn pgoutput_encoder_covers_supported_message_tags() {
+        let table = TableId::new(7);
+        let mut generator = WalGenerator::new();
+        let frames = generator.encode_pgoutput(&[
+            LogicalEvent::Begin { xid: 1 },
+            LogicalEvent::Insert {
+                table,
+                new: vec!["1".to_owned()],
+            },
+            LogicalEvent::Update {
+                table,
+                old: Some(vec!["1".to_owned()]),
+                new: vec!["2".to_owned()],
+            },
+            LogicalEvent::Delete {
+                table,
+                old: vec!["2".to_owned()],
+            },
+            LogicalEvent::Commit,
+            LogicalEvent::Truncate {
+                tables: vec![table],
+                options: TruncateOpts {
+                    cascade: true,
+                    restart_identity: true,
+                },
+            },
+            LogicalEvent::Origin {
+                lsn: Lsn::new(99),
+                name: "origin".to_owned(),
+            },
+            LogicalEvent::StreamStart {
+                xid: 2,
+                first_segment: true,
+            },
+            LogicalEvent::StreamStop,
+            LogicalEvent::StreamCommit { xid: 2 },
+            LogicalEvent::StreamAbort { xid: 2, subxid: 3 },
+            LogicalEvent::BeginPrepare {
+                xid: 4,
+                gid: "gid-begin".to_owned(),
+            },
+            LogicalEvent::Prepare {
+                xid: 5,
+                gid: "gid-prepare".to_owned(),
+            },
+            LogicalEvent::CommitPrepared {
+                xid: 6,
+                gid: "gid-commit".to_owned(),
+            },
+            LogicalEvent::RollbackPrepared {
+                xid: 7,
+                gid: "gid-rollback".to_owned(),
+            },
+            LogicalEvent::Keepalive,
+        ]);
+
+        let tags = frames.iter().map(|frame| frame[0]).collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            vec![
+                b'B', b'R', b'I', b'U', b'D', b'C', b'T', b'O', b'S', b'E', b'c', b'A', b'b', b'P',
+                b'K', b'r'
+            ]
+        );
+        assert_eq!(generator.current_lsn().get(), 16);
+    }
+
     proptest! {
         #[test]
         fn generated_frames_round_trip(events in logical_events()) {
@@ -456,6 +707,40 @@ mod tests {
             (table_id(), prop::collection::vec(column_def(), 0..8)).prop_map(
                 |(table, new_columns)| LogicalEvent::RelationChange { table, new_columns }
             ),
+            (
+                prop::collection::vec(table_id(), 0..8),
+                any::<bool>(),
+                any::<bool>()
+            )
+                .prop_map(|(tables, cascade, restart_identity)| {
+                    LogicalEvent::Truncate {
+                        tables,
+                        options: TruncateOpts {
+                            cascade,
+                            restart_identity,
+                        },
+                    }
+                }),
+            (0_u64..1_000_000, "[a-z][a-z0-9_]{0,15}").prop_map(|(lsn, name)| {
+                LogicalEvent::Origin {
+                    lsn: Lsn::new(lsn),
+                    name,
+                }
+            }),
+            (0_u32..1_000_000, any::<bool>())
+                .prop_map(|(xid, first_segment)| LogicalEvent::StreamStart { xid, first_segment }),
+            Just(LogicalEvent::StreamStop),
+            (0_u32..1_000_000).prop_map(|xid| LogicalEvent::StreamCommit { xid }),
+            (0_u32..1_000_000, 0_u32..1_000_000)
+                .prop_map(|(xid, subxid)| LogicalEvent::StreamAbort { xid, subxid }),
+            (0_u32..1_000_000, "[a-z][a-z0-9_]{0,15}")
+                .prop_map(|(xid, gid)| LogicalEvent::BeginPrepare { xid, gid }),
+            (0_u32..1_000_000, "[a-z][a-z0-9_]{0,15}")
+                .prop_map(|(xid, gid)| LogicalEvent::Prepare { xid, gid }),
+            (0_u32..1_000_000, "[a-z][a-z0-9_]{0,15}")
+                .prop_map(|(xid, gid)| LogicalEvent::CommitPrepared { xid, gid }),
+            (0_u32..1_000_000, "[a-z][a-z0-9_]{0,15}")
+                .prop_map(|(xid, gid)| LogicalEvent::RollbackPrepared { xid, gid }),
             Just(LogicalEvent::Keepalive),
         ]
     }
@@ -526,6 +811,81 @@ mod tests {
                         new_columns.push(get_column_def(&mut bytes)?);
                     }
                     events.push(LogicalEvent::RelationChange { table, new_columns });
+                }
+                b'T' => {
+                    ensure_remaining(&bytes, 5)?;
+                    let table_count = bytes.get_u32();
+                    let flags = bytes.get_u8();
+                    let mut tables = Vec::with_capacity(usize::try_from(table_count).unwrap_or(0));
+                    for _ in 0..table_count {
+                        ensure_remaining(&bytes, 4)?;
+                        tables.push(TableId::new(bytes.get_u32()));
+                    }
+                    events.push(LogicalEvent::Truncate {
+                        tables,
+                        options: TruncateOpts {
+                            cascade: flags & 1 == 1,
+                            restart_identity: flags & 2 == 2,
+                        },
+                    });
+                }
+                b'O' => {
+                    ensure_remaining(&bytes, 8)?;
+                    let lsn = Lsn::new(bytes.get_u64());
+                    let name = get_string(&mut bytes)?;
+                    events.push(LogicalEvent::Origin { lsn, name });
+                }
+                b'Y' => {
+                    ensure_remaining(&bytes, 5)?;
+                    let xid = bytes.get_u32();
+                    let first_segment = match bytes.get_u8() {
+                        0 => false,
+                        1 => true,
+                        tag => {
+                            return Err(TestCaseError::fail(format!(
+                                "unexpected stream-start flag {tag}"
+                            )));
+                        }
+                    };
+                    events.push(LogicalEvent::StreamStart { xid, first_segment });
+                }
+                b'E' => events.push(LogicalEvent::StreamStop),
+                b'c' => {
+                    ensure_remaining(&bytes, 4)?;
+                    events.push(LogicalEvent::StreamCommit {
+                        xid: bytes.get_u32(),
+                    });
+                }
+                b'A' => {
+                    ensure_remaining(&bytes, 8)?;
+                    events.push(LogicalEvent::StreamAbort {
+                        xid: bytes.get_u32(),
+                        subxid: bytes.get_u32(),
+                    });
+                }
+                b'b' => {
+                    ensure_remaining(&bytes, 4)?;
+                    let xid = bytes.get_u32();
+                    let gid = get_string(&mut bytes)?;
+                    events.push(LogicalEvent::BeginPrepare { xid, gid });
+                }
+                b'P' => {
+                    ensure_remaining(&bytes, 4)?;
+                    let xid = bytes.get_u32();
+                    let gid = get_string(&mut bytes)?;
+                    events.push(LogicalEvent::Prepare { xid, gid });
+                }
+                b'p' => {
+                    ensure_remaining(&bytes, 4)?;
+                    let xid = bytes.get_u32();
+                    let gid = get_string(&mut bytes)?;
+                    events.push(LogicalEvent::CommitPrepared { xid, gid });
+                }
+                b'r' => {
+                    ensure_remaining(&bytes, 4)?;
+                    let xid = bytes.get_u32();
+                    let gid = get_string(&mut bytes)?;
+                    events.push(LogicalEvent::RollbackPrepared { xid, gid });
                 }
                 b'K' => events.push(LogicalEvent::Keepalive),
                 tag => {

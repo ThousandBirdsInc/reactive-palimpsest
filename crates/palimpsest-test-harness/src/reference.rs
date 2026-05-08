@@ -71,7 +71,19 @@ impl ReferenceExecutor {
                 LogicalEvent::RelationChange { table, .. } => {
                     self.table_mut(*table);
                 }
-                LogicalEvent::Begin { .. } | LogicalEvent::Commit | LogicalEvent::Keepalive => {}
+                LogicalEvent::Begin { .. }
+                | LogicalEvent::Commit
+                | LogicalEvent::Truncate { .. }
+                | LogicalEvent::Origin { .. }
+                | LogicalEvent::StreamStart { .. }
+                | LogicalEvent::StreamStop
+                | LogicalEvent::StreamCommit { .. }
+                | LogicalEvent::StreamAbort { .. }
+                | LogicalEvent::BeginPrepare { .. }
+                | LogicalEvent::Prepare { .. }
+                | LogicalEvent::CommitPrepared { .. }
+                | LogicalEvent::RollbackPrepared { .. }
+                | LogicalEvent::Keepalive => {}
             }
         }
     }
