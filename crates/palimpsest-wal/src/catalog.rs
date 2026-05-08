@@ -31,7 +31,6 @@ impl Catalog {
         self.relations.get(&table)
     }
 
-    #[must_use]
     pub fn relations(&self) -> impl Iterator<Item = &RelationSchema> {
         self.relations.values()
     }
@@ -86,6 +85,7 @@ impl TryFrom<u8> for ReplicaIdentity {
     }
 }
 
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn column_from_pgoutput(flags: u8, name: String, type_oid: u32) -> Result<ColumnDef> {
     let datum_type =
         stock_postgres_16_type(type_oid).ok_or(WalError::UnsupportedTypeOid(type_oid))?;
@@ -112,7 +112,7 @@ pub struct CatalogProbeRow {
 }
 
 #[must_use]
-pub fn catalog_probe_sql() -> &'static str {
+pub const fn catalog_probe_sql() -> &'static str {
     "SELECT c.oid AS table_oid, n.nspname AS namespace, c.relname AS table_name, \
      c.relreplident AS replica_identity, a.attname AS column_name, a.atttypid AS type_oid, \
      a.attnum, NOT a.attnotnull AS nullable, i.indisprimary AND a.attnum = ANY(i.indkey) AS primary_key \
@@ -177,7 +177,7 @@ struct ProbeRelation {
 }
 
 impl ProbeRelation {
-    fn new(
+    const fn new(
         table: TableId,
         namespace: String,
         name: String,

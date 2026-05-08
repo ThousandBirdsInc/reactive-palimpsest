@@ -9,6 +9,7 @@ use crate::{
     WalError,
 };
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodedEvent {
     Begin {
@@ -157,8 +158,6 @@ pub fn decode_pgoutput_message(catalog: &mut Catalog, bytes: Bytes) -> Result<De
             xid: decode_prepare_prefix(&mut decoder)?,
             gid: decoder.cstr("rollback prepared gid")?,
         }),
-        b'Y' => return Err(WalError::UnsupportedMessage(tag)),
-        b'M' => return Err(WalError::UnsupportedMessage(tag)),
         tag => return Err(WalError::UnsupportedMessage(tag)),
     };
     decoder.finish()?;
@@ -586,10 +585,8 @@ mod tests {
         if let Some(old) = old {
             bytes.put_u8(b'O');
             tuple(&mut bytes, old);
-            bytes.put_u8(b'N');
-        } else {
-            bytes.put_u8(b'N');
         }
+        bytes.put_u8(b'N');
         tuple(&mut bytes, new);
         bytes.freeze()
     }

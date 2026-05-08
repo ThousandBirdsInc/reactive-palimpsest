@@ -112,7 +112,7 @@ pub enum Datum {
     Uuid(Uuid),
     Json(Bytes),
     Jsonb(Bytes),
-    Array(Vec<Datum>),
+    Array(Vec<Self>),
     Null,
     Unchanged,
 }
@@ -136,7 +136,7 @@ pub enum DatumType {
     Uuid,
     Json,
     Jsonb,
-    Array(Box<DatumType>),
+    Array(Box<Self>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,7 +346,7 @@ fn parse_timestamp_tz(text: &str) -> Result<TimestampTz> {
 
 fn parse_interval(text: &str) -> Result<Interval> {
     let mut micros = 0_i64;
-    let mut parts = text.split_whitespace().peekable();
+    let mut parts = text.split_whitespace();
     while let Some(part) = parts.next() {
         if let Ok(value) = part.parse::<i64>() {
             match parts.next() {

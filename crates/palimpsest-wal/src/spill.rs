@@ -41,7 +41,7 @@ impl StreamSpillBuffer {
     }
 
     #[must_use]
-    pub fn spilled_segments(&self) -> usize {
+    pub const fn spilled_segments(&self) -> usize {
         self.spilled
     }
 
