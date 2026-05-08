@@ -1296,7 +1296,7 @@ are intentionally small enough to land in single PRs.
   - [ ] resolve qualified names against catalog,
   - [ ] propagate aliases,
   - [ ] desugar `BETWEEN`, `IN (list)`, `NOT IN`, `IS NULL`.
-- [ ] Reject unsupported features at parse time with typed errors:
+- [x] Reject unsupported features at parse time with typed errors:
   - [x] `WITH RECURSIVE`
   - [x] window functions
   - [x] `RIGHT/FULL JOIN`
@@ -1452,9 +1452,9 @@ are intentionally small enough to land in single PRs.
 
 ### 18.9 `palimpsest-proto` — wire protocol (Phase 3)
 
-- [ ] `.proto` file per §13: `SyncEngine` service,
+- [x] `.proto` file per §13: `SyncEngine` service,
   `ClientMessage`, `ServerMessage`, `Diff`.
-- [ ] `tonic-build` integration (build.rs).
+- [x] `tonic-build` integration (build.rs).
 - [ ] Manual `Row` codec: bincode payload referenced by
   `schema_id` from `Accepted`.
 - [ ] Wire-format snapshot tests against captured byte fixtures.
