@@ -778,6 +778,7 @@ dependencies = [
  "paste",
  "rand 0.4.6",
  "serde",
+ "smallvec",
  "timely",
  "tokio",
 ]

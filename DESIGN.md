@@ -1343,9 +1343,9 @@ are intentionally small enough to land in single PRs.
   the `step_loop` from `threadless.rs`.
 - [x] `Lsn` newtype implementing `timely::progress::Timestamp`
   with a `Summary` of `u64` advancement.
-- [ ] Custom `Container` implementation for `Row` to avoid
+- [x] Custom `Container` implementation for `Row` to avoid
   per-row Vec heap allocations.
-- [ ] WAL → dataflow source operator: receives `DecodedEvent`,
+- [x] WAL → dataflow source operator: receives `DecodedEvent`,
   emits `(Row, Lsn, +1/-1)` triples.
 - [ ] Operator: `Filter` via differential `.filter()`.
 - [ ] Operator: `Project` via `.map()`.

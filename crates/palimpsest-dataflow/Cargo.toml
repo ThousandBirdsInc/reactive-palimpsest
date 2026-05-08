@@ -18,6 +18,7 @@ fnv = "1.0"
 palimpsest-wal = { path = "../palimpsest-wal" }
 paste = "1.0"
 serde = { workspace = true, features = ["derive"] }
+smallvec.workspace = true
 timely.workspace = true
 tokio.workspace = true
 
