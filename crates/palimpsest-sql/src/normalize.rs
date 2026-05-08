@@ -71,7 +71,7 @@ fn normalize_query(
         for cte in &mut with.cte_tables {
             let mut cte_query = (*cte.query).clone();
             let mut shape = normalize_query(&mut cte_query, catalog, &local_context)?;
-            cte.query = Box::new(cte_query);
+            *cte.query = cte_query;
 
             if !cte.alias.columns.is_empty() {
                 if cte.alias.columns.len() != shape.columns.len() {
@@ -349,7 +349,13 @@ fn normalize_expr(
                 .map(|item| normalize_expr(item, scope, aliases))
                 .map(|item| item.map(|item| binary(value.clone(), op.clone(), item)));
             let first = parts.next().expect("empty list rejected above")?;
-            parts.try_fold(first, |left, right| right.map(|right| join(left, right)))
+            let normalized =
+                parts.try_fold(first, |left, right| right.map(|right| join(left, right)))?;
+            if *negated || list.len() == 1 {
+                Ok(normalized)
+            } else {
+                Ok(Expr::Nested(Box::new(normalized)))
+            }
         }
         Expr::IsNull(inner) => Ok(binary(
             normalize_expr(inner, scope, aliases)?,
@@ -378,12 +384,11 @@ fn normalize_expr(
                 }
             }
             Ok(Expr::UnaryOp {
-                op: op.clone(),
+                op: *op,
                 expr: Box::new(expr),
             })
         }
         Expr::Nested(inner) => normalize_expr(inner, scope, aliases),
-        Expr::Value(_) | Expr::Function(_) => Ok(expr.clone()),
         _ => Ok(expr.clone()),
     }
 }
@@ -441,14 +446,19 @@ fn resolve_column(scope: &Scope, qualifier: Option<&str>, column: &str) -> Resul
 
 fn infer_expr_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, SqlError> {
     match expr {
-        Expr::Value(Value::Boolean(_)) => Ok(ColumnType::Bool),
+        Expr::Value(Value::Boolean(_))
+        | Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            ..
+        } => Ok(ColumnType::Bool),
         Expr::Value(Value::Number(_, _)) => Ok(ColumnType::Int),
-        Expr::Value(Value::SingleQuotedString(_))
-        | Expr::Value(Value::EscapedStringLiteral(_))
-        | Expr::Value(Value::UnicodeStringLiteral(_))
-        | Expr::Value(Value::NationalStringLiteral(_))
-        | Expr::Value(Value::DoubleQuotedString(_)) => Ok(ColumnType::Text),
-        Expr::Value(Value::Null) => Ok(ColumnType::Unknown),
+        Expr::Value(
+            Value::SingleQuotedString(_)
+            | Value::EscapedStringLiteral(_)
+            | Value::UnicodeStringLiteral(_)
+            | Value::NationalStringLiteral(_)
+            | Value::DoubleQuotedString(_),
+        ) => Ok(ColumnType::Text),
         Expr::Identifier(identifier) => column_type(scope, None, &identifier.value),
         Expr::CompoundIdentifier(parts) => {
             let [relation, column] = parts.as_slice() else {
@@ -480,16 +490,10 @@ fn infer_expr_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, SqlError> {
             }
             _ => Ok(ColumnType::Unknown),
         },
-        Expr::UnaryOp {
-            op: UnaryOperator::Not,
-            ..
-        } => Ok(ColumnType::Bool),
         Expr::Function(function) => {
             let name = function.name.to_string().to_ascii_lowercase();
             if matches!(name.as_str(), "count") {
                 Ok(ColumnType::Int)
-            } else if matches!(name.as_str(), "sum" | "min" | "max" | "avg") {
-                Ok(ColumnType::Unknown)
             } else {
                 Ok(ColumnType::Unknown)
             }
@@ -631,7 +635,7 @@ fn validate_set_shapes(left: &QueryShape, right: &QueryShape) -> Result<(), SqlE
     Ok(())
 }
 
-fn wildcard_options_empty(options: &WildcardAdditionalOptions) -> bool {
+const fn wildcard_options_empty(options: &WildcardAdditionalOptions) -> bool {
     options.opt_ilike.is_none()
         && options.opt_exclude.is_none()
         && options.opt_except.is_none()

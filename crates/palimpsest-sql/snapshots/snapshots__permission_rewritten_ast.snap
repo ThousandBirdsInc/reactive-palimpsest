@@ -1,0 +1,5 @@
+---
+source: crates/palimpsest-sql/tests/snapshots.rs
+expression: normalized.to_string()
+---
+WITH recent_posts AS (SELECT posts.id, posts.author_id, posts.created_at FROM posts WHERE (posts.author_id = 42 OR posts.author_id = 7) AND posts.created_at <> NULL) SELECT recent_posts.id AS post_id, authors.name FROM recent_posts JOIN authors ON recent_posts.author_id = authors.id ORDER BY recent_posts.id LIMIT 10

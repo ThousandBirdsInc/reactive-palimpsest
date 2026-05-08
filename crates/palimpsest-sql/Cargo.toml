@@ -17,6 +17,7 @@ sqlparser = { workspace = true, features = ["visitor"] }
 thiserror.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 proptest.workspace = true
 
 [lints]

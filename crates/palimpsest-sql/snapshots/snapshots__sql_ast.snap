@@ -1,0 +1,307 @@
+---
+source: crates/palimpsest-sql/tests/snapshots.rs
+expression: "format!(\"{ast:#?}\")"
+---
+Query(
+    Query {
+        with: Some(
+            With {
+                recursive: false,
+                cte_tables: [
+                    Cte {
+                        alias: TableAlias {
+                            name: Ident {
+                                value: "recent_posts",
+                                quote_style: None,
+                            },
+                            columns: [],
+                        },
+                        query: Query {
+                            with: None,
+                            body: Select(
+                                Select {
+                                    distinct: None,
+                                    top: None,
+                                    top_before_distinct: false,
+                                    projection: [
+                                        UnnamedExpr(
+                                            Identifier(
+                                                Ident {
+                                                    value: "id",
+                                                    quote_style: None,
+                                                },
+                                            ),
+                                        ),
+                                        UnnamedExpr(
+                                            Identifier(
+                                                Ident {
+                                                    value: "author_id",
+                                                    quote_style: None,
+                                                },
+                                            ),
+                                        ),
+                                        UnnamedExpr(
+                                            Identifier(
+                                                Ident {
+                                                    value: "created_at",
+                                                    quote_style: None,
+                                                },
+                                            ),
+                                        ),
+                                    ],
+                                    into: None,
+                                    from: [
+                                        TableWithJoins {
+                                            relation: Table {
+                                                name: ObjectName(
+                                                    [
+                                                        Ident {
+                                                            value: "posts",
+                                                            quote_style: None,
+                                                        },
+                                                    ],
+                                                ),
+                                                alias: None,
+                                                args: None,
+                                                with_hints: [],
+                                                version: None,
+                                                with_ordinality: false,
+                                                partitions: [],
+                                            },
+                                            joins: [],
+                                        },
+                                    ],
+                                    lateral_views: [],
+                                    prewhere: None,
+                                    selection: Some(
+                                        BinaryOp {
+                                            left: InList {
+                                                expr: Identifier(
+                                                    Ident {
+                                                        value: "author_id",
+                                                        quote_style: None,
+                                                    },
+                                                ),
+                                                list: [
+                                                    Value(
+                                                        Number(
+                                                            "42",
+                                                            false,
+                                                        ),
+                                                    ),
+                                                    Value(
+                                                        Number(
+                                                            "7",
+                                                            false,
+                                                        ),
+                                                    ),
+                                                ],
+                                                negated: false,
+                                            },
+                                            op: And,
+                                            right: IsNotNull(
+                                                Identifier(
+                                                    Ident {
+                                                        value: "created_at",
+                                                        quote_style: None,
+                                                    },
+                                                ),
+                                            ),
+                                        },
+                                    ),
+                                    group_by: Expressions(
+                                        [],
+                                        [],
+                                    ),
+                                    cluster_by: [],
+                                    distribute_by: [],
+                                    sort_by: [],
+                                    having: None,
+                                    named_window: [],
+                                    qualify: None,
+                                    window_before_qualify: false,
+                                    value_table_mode: None,
+                                    connect_by: None,
+                                },
+                            ),
+                            order_by: None,
+                            limit: None,
+                            limit_by: [],
+                            offset: None,
+                            fetch: None,
+                            locks: [],
+                            for_clause: None,
+                            settings: None,
+                            format_clause: None,
+                        },
+                        from: None,
+                        materialized: None,
+                    },
+                ],
+            },
+        ),
+        body: Select(
+            Select {
+                distinct: None,
+                top: None,
+                top_before_distinct: false,
+                projection: [
+                    ExprWithAlias {
+                        expr: CompoundIdentifier(
+                            [
+                                Ident {
+                                    value: "recent_posts",
+                                    quote_style: None,
+                                },
+                                Ident {
+                                    value: "id",
+                                    quote_style: None,
+                                },
+                            ],
+                        ),
+                        alias: Ident {
+                            value: "post_id",
+                            quote_style: None,
+                        },
+                    },
+                    UnnamedExpr(
+                        CompoundIdentifier(
+                            [
+                                Ident {
+                                    value: "authors",
+                                    quote_style: None,
+                                },
+                                Ident {
+                                    value: "name",
+                                    quote_style: None,
+                                },
+                            ],
+                        ),
+                    ),
+                ],
+                into: None,
+                from: [
+                    TableWithJoins {
+                        relation: Table {
+                            name: ObjectName(
+                                [
+                                    Ident {
+                                        value: "recent_posts",
+                                        quote_style: None,
+                                    },
+                                ],
+                            ),
+                            alias: None,
+                            args: None,
+                            with_hints: [],
+                            version: None,
+                            with_ordinality: false,
+                            partitions: [],
+                        },
+                        joins: [
+                            Join {
+                                relation: Table {
+                                    name: ObjectName(
+                                        [
+                                            Ident {
+                                                value: "authors",
+                                                quote_style: None,
+                                            },
+                                        ],
+                                    ),
+                                    alias: None,
+                                    args: None,
+                                    with_hints: [],
+                                    version: None,
+                                    with_ordinality: false,
+                                    partitions: [],
+                                },
+                                global: false,
+                                join_operator: Inner(
+                                    On(
+                                        BinaryOp {
+                                            left: CompoundIdentifier(
+                                                [
+                                                    Ident {
+                                                        value: "recent_posts",
+                                                        quote_style: None,
+                                                    },
+                                                    Ident {
+                                                        value: "author_id",
+                                                        quote_style: None,
+                                                    },
+                                                ],
+                                            ),
+                                            op: Eq,
+                                            right: CompoundIdentifier(
+                                                [
+                                                    Ident {
+                                                        value: "authors",
+                                                        quote_style: None,
+                                                    },
+                                                    Ident {
+                                                        value: "id",
+                                                        quote_style: None,
+                                                    },
+                                                ],
+                                            ),
+                                        },
+                                    ),
+                                ),
+                            },
+                        ],
+                    },
+                ],
+                lateral_views: [],
+                prewhere: None,
+                selection: None,
+                group_by: Expressions(
+                    [],
+                    [],
+                ),
+                cluster_by: [],
+                distribute_by: [],
+                sort_by: [],
+                having: None,
+                named_window: [],
+                qualify: None,
+                window_before_qualify: false,
+                value_table_mode: None,
+                connect_by: None,
+            },
+        ),
+        order_by: Some(
+            OrderBy {
+                exprs: [
+                    OrderByExpr {
+                        expr: Identifier(
+                            Ident {
+                                value: "post_id",
+                                quote_style: None,
+                            },
+                        ),
+                        asc: None,
+                        nulls_first: None,
+                        with_fill: None,
+                    },
+                ],
+                interpolate: None,
+            },
+        ),
+        limit: Some(
+            Value(
+                Number(
+                    "10",
+                    false,
+                ),
+            ),
+        ),
+        limit_by: [],
+        offset: None,
+        fetch: None,
+        locks: [],
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+    },
+)

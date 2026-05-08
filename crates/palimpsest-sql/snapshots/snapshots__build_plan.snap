@@ -1,0 +1,12 @@
+---
+source: crates/palimpsest-sql/tests/snapshots.rs
+expression: render_build_plan(&mir)
+---
+0: CteRef { cte: "recent_posts" } <- [3:CteExpansion]
+1: BaseTable { table: "posts", project: [] } <- []
+2: Filter { predicate: "author_id IN (42, 7) AND created_at IS NOT NULL" } <- [1:Input]
+3: Project { columns: ["id", "author_id", "created_at"] } <- [2:Input]
+4: BaseTable { table: "authors", project: [] } <- []
+5: Join { kind: Inner, on: [(ColumnRef { relation: Some("recent_posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })] } <- [4:Input, 0:Input]
+6: Project { columns: ["post_id", "authors.name"] } <- [5:Input]
+7: TopK { order_by: [OrderKey { expression: "post_id", descending: false }], limit: 10, offset: 0 } <- [6:Input]

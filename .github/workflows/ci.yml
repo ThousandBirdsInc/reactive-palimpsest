@@ -56,6 +56,14 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+      - name: Install cargo-insta
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: cargo install cargo-insta --locked
+
+      - name: Snapshot tests
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: cargo insta test --unreferenced reject -p palimpsest-sql
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 

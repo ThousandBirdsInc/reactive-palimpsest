@@ -122,7 +122,7 @@ fn lower_set_operation(
     Ok(graph)
 }
 
-fn lower_set_quantifier(quantifier: SetQuantifier) -> Result<SetQuantifierKind, SqlError> {
+const fn lower_set_quantifier(quantifier: SetQuantifier) -> Result<SetQuantifierKind, SqlError> {
     match quantifier {
         SetQuantifier::All => Ok(SetQuantifierKind::All),
         SetQuantifier::None | SetQuantifier::Distinct => Ok(SetQuantifierKind::Distinct),
