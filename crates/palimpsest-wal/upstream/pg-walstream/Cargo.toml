@@ -1,0 +1,54 @@
+[package]
+name = "palimpsest_pg_walstream_upstream"
+version = "0.6.3"
+edition = "2021"
+authors = ["danielshih <dog830228@gmail.com>"]
+license = "BSD-3-Clause"
+repository = "https://github.com/isdaniel/pg-walstream"
+homepage = "https://github.com/isdaniel/pg-walstream"
+documentation = "https://docs.rs/pg_walstream"
+readme = "README.md"
+description = "PostgreSQL logical replication protocol library - parse and handle PostgreSQL WAL streaming messages"
+keywords = ["postgresql", "replication", "wal", "logical-decoding", "streaming"]
+categories = ["database", "parsing", "network-programming"]
+
+[dependencies]
+tokio = { version = "1.52.1", features = ["io-util", "net", "time", "macros", "rt", "rt-multi-thread"] }
+tokio-util = "0.7.18"
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+chrono = { version = "0.4.44", features = ["serde"] }
+bytes = { version = "1.11.1", features = ["serde"] }
+tracing = "0.1.44"
+futures-core = "0.3.32"
+memchr = "2.8.0"
+smallvec = { version = "1.15.1", features = ["serde"] }
+
+tokio-rustls = { version = "0.26.4", optional = true }
+rustls = { version = "0.23.39", default-features = false, features = ["std", "tls12"], optional = true }
+webpki-roots = { version = "1.0.7", optional = true }
+postgres-protocol = { version = "0.6.11", optional = true }
+aws-lc-rs = { version = "1.16.3", optional = true }
+socket2 = { version = "0.6.3", features = ["all"], optional = true }
+
+[features]
+default = ["rustls-tls"]
+
+rustls-tls = [
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:webpki-roots",
+    "dep:postgres-protocol",
+    "dep:aws-lc-rs",
+    "dep:socket2",
+    "rustls/aws_lc_rs",
+]
+
+[dev-dependencies]
+tokio = { version = "1.52.1", features = ["full"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
+futures = "0.3.32"
+serde_bytes = "0.11.19"
+
+[[bench]]
+name = "wal_pipeline"
+harness = false

@@ -1206,8 +1206,8 @@ are intentionally small enough to land in single PRs.
 
 ### 18.2 `palimpsest-wal` — WAL ingest (Phase 1)
 
-- [ ] Vendor `pg-walstream` source into `crates/palimpsest-wal/`.
-- [ ] Strip features we will not use (e.g. libpq backend if we
+- [x] Vendor `pg-walstream` source into `crates/palimpsest-wal/`.
+- [x] Strip features we will not use (e.g. libpq backend if we
   commit to rustls only).
 - [x] Define `Datum` enum with variants for all supported Postgres
   types: `Bool`, `I16/I32/I64`, `F32/F64`, `Numeric(BigDecimal)`,
@@ -1218,7 +1218,7 @@ are intentionally small enough to land in single PRs.
   pg_type rows present in stock Postgres 16.
 - [x] Implement decoder: `ColumnValue::{Text,Binary}(Bytes)` →
   `Datum`, both for binary mode and text mode.
-- [ ] Replace pg-walstream's `RowData` with `Tuple = SmallVec<[Datum; 8]>`.
+- [x] Replace pg-walstream's `RowData` with `Tuple = SmallVec<[Datum; 8]>`.
 - [x] TOAST handling: detect `'u'` (unchanged) markers and surface
   them as `Datum::Unchanged` rather than dropping.
 - [x] Implement `WalSource` and `DecodedEvent` per design §6.
