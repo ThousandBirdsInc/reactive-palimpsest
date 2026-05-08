@@ -7,9 +7,14 @@ mod catalog;
 mod datum;
 mod error;
 mod protocol;
+mod source;
+mod spill;
 mod types;
 
-pub use catalog::{Catalog, RelationSchema, ReplicaIdentity};
+pub use catalog::{
+    catalog_probe_sql, load_catalog_from_probe_rows, Catalog, CatalogProbeRow, RelationSchema,
+    ReplicaIdentity,
+};
 pub use datum::{
     decode_column_value, stock_postgres_16_type, BigDecimal, ColumnValue, Date, Datum, DatumType,
     Interval, Time, Timestamp, TimestampTz, Uuid, BOOL_ARRAY_OID, BOOL_OID, BYTEA_ARRAY_OID,
@@ -22,4 +27,6 @@ pub use error::{Result, WalError};
 pub use protocol::{
     decode_pgoutput_message, DecodedEvent, Origin, RowOp, StreamAction, Truncate, TwoPhaseAction,
 };
+pub use source::{RestartLsnStore, WalConfig, WalSource};
+pub use spill::StreamSpillBuffer;
 pub use types::{ColumnDef, Lsn, TableId, Tuple};

@@ -40,6 +40,8 @@ pub enum WalError {
     Malformed(&'static str),
     #[error("relation {0:?} is not in the WAL catalog")]
     UnknownRelation(crate::TableId),
+    #[error("slot {0} disappeared upstream")]
+    SlotGone(String),
     #[error("tuple for relation {table:?} has {actual} columns; expected {expected}")]
     TupleArity {
         table: crate::TableId,
@@ -48,6 +50,8 @@ pub enum WalError {
     },
     #[error("unsupported pgoutput message tag {0}")]
     UnsupportedMessage(u8),
+    #[error("restart LSN file contains invalid data")]
+    InvalidRestartLsn,
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 }

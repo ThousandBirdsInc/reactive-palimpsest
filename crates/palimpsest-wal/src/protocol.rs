@@ -32,6 +32,12 @@ pub enum DecodedEvent {
     Heartbeat {
         lsn: Lsn,
     },
+    Reconnect {
+        attempt: u32,
+    },
+    Resync {
+        snapshot_lsn: Lsn,
+    },
     Truncate(Truncate),
     Origin(Origin),
     Stream(StreamAction),

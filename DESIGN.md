@@ -1221,21 +1221,21 @@ are intentionally small enough to land in single PRs.
 - [ ] Replace pg-walstream's `RowData` with `Tuple = SmallVec<[Datum; 8]>`.
 - [x] TOAST handling: detect `'u'` (unchanged) markers and surface
   them as `Datum::Unchanged` rather than dropping.
-- [ ] Implement `WalSource` and `DecodedEvent` per design §6.
+- [x] Implement `WalSource` and `DecodedEvent` per design §6.
 - [ ] Backpressure: bounded mpsc between decoder task and consumer;
   saturation triggers spill (next item).
 - [ ] Spill-to-disk path: when the bounded channel saturates during
   a streamed transaction, write segments to a temp file keyed by
   xid; drain on `StreamCommit`.
-- [ ] `restart_lsn` persistence: small SQLite table (or file) we
+- [x] `restart_lsn` persistence: small SQLite table (or file) we
   control; updated on each `Ack`.
-- [ ] Slot recreation on slot-gone error: re-export snapshot,
+- [x] Slot recreation on slot-gone error: re-export snapshot,
   reconcile with downstream by forcing `Resync`.
 - [ ] Reconnect/retry: keep upstream's exponential backoff; surface
   reconnect events to consumer.
-- [ ] Catalog probe queries against `pg_class`, `pg_attribute`,
+- [x] Catalog probe queries against `pg_class`, `pg_attribute`,
   `pg_index`, `pg_namespace`; populate `Catalog`.
-- [ ] Refresh catalog on `RelationChange` events.
+- [x] Refresh catalog on `RelationChange` events.
 - [ ] Unit tests: every pgoutput message variant, including v3
   two-phase commit and v4 streaming.
 - [ ] Round-trip test with `WalGenerator` (after §18.3 lands).
