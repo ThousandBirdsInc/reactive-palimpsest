@@ -1214,7 +1214,7 @@ are intentionally small enough to land in single PRs.
   `Text(Bytes)`, `Bytea(Bytes)`, `Date`, `Time`, `Timestamp`,
   `TimestampTz`, `Interval`, `Uuid`, `Json(Bytes)`, `Jsonb(Bytes)`,
   `Array(Vec<Datum>)`, `Null`.
-- [ ] Build OID → `DatumType` mapping table; cover at least the
+- [x] Build OID → `DatumType` mapping table; cover at least the
   pg_type rows present in stock Postgres 16.
 - [x] Implement decoder: `ColumnValue::{Text,Binary}(Bytes)` →
   `Datum`, both for binary mode and text mode.

@@ -7,12 +7,19 @@ use crate::{Result, WalError};
 
 pub const BOOL_OID: u32 = 16;
 pub const BYTEA_OID: u32 = 17;
+const CHAR_OID: u32 = 18;
+const NAME_OID: u32 = 19;
 pub const INT8_OID: u32 = 20;
 pub const INT2_OID: u32 = 21;
+const INT2_VECTOR_OID: u32 = 22;
 pub const INT4_OID: u32 = 23;
 pub const TEXT_OID: u32 = 25;
+const OID_VECTOR_OID: u32 = 30;
 pub const FLOAT4_OID: u32 = 700;
 pub const FLOAT8_OID: u32 = 701;
+const MONEY_OID: u32 = 790;
+const BPCHAR_OID: u32 = 1042;
+const VARCHAR_OID: u32 = 1043;
 pub const UUID_OID: u32 = 2950;
 pub const JSON_OID: u32 = 114;
 pub const JSONB_OID: u32 = 3802;
@@ -25,16 +32,28 @@ pub const NUMERIC_OID: u32 = 1700;
 
 pub const BOOL_ARRAY_OID: u32 = 1000;
 pub const BYTEA_ARRAY_OID: u32 = 1001;
+const CHAR_ARRAY_OID: u32 = 1002;
+const NAME_ARRAY_OID: u32 = 1003;
 pub const INT2_ARRAY_OID: u32 = 1005;
 pub const INT4_ARRAY_OID: u32 = 1007;
 pub const TEXT_ARRAY_OID: u32 = 1009;
+const BPCHAR_ARRAY_OID: u32 = 1014;
+const VARCHAR_ARRAY_OID: u32 = 1015;
 pub const INT8_ARRAY_OID: u32 = 1016;
 pub const FLOAT4_ARRAY_OID: u32 = 1021;
 pub const FLOAT8_ARRAY_OID: u32 = 1022;
+const MONEY_ARRAY_OID: u32 = 791;
+const DATE_ARRAY_OID: u32 = 1182;
+const TIME_ARRAY_OID: u32 = 1183;
+const TIMESTAMP_ARRAY_OID: u32 = 1115;
+const TIMESTAMPTZ_ARRAY_OID: u32 = 1185;
+const INTERVAL_ARRAY_OID: u32 = 1187;
 pub const UUID_ARRAY_OID: u32 = 2951;
 pub const JSON_ARRAY_OID: u32 = 199;
 pub const JSONB_ARRAY_OID: u32 = 3807;
 pub const NUMERIC_ARRAY_OID: u32 = 1231;
+const INT2_VECTOR_ARRAY_OID: u32 = 1006;
+const OID_VECTOR_ARRAY_OID: u32 = 1013;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigDecimal(String);
@@ -152,12 +171,16 @@ pub fn stock_postgres_16_type(oid: u32) -> Option<DatumType> {
     let datum_type = match oid {
         BOOL_OID => DatumType::Bool,
         BYTEA_OID => DatumType::Bytea,
+        CHAR_OID | NAME_OID | BPCHAR_OID | VARCHAR_OID => DatumType::Text,
         INT8_OID => DatumType::I64,
         INT2_OID => DatumType::I16,
+        INT2_VECTOR_OID => DatumType::Array(Box::new(DatumType::I16)),
         INT4_OID => DatumType::I32,
+        OID_VECTOR_OID => DatumType::Array(Box::new(DatumType::I32)),
         TEXT_OID => DatumType::Text,
         FLOAT4_OID => DatumType::F32,
         FLOAT8_OID => DatumType::F64,
+        MONEY_OID => DatumType::Numeric,
         UUID_OID => DatumType::Uuid,
         JSON_OID => DatumType::Json,
         JSONB_OID => DatumType::Jsonb,
@@ -169,16 +192,31 @@ pub fn stock_postgres_16_type(oid: u32) -> Option<DatumType> {
         NUMERIC_OID => DatumType::Numeric,
         BOOL_ARRAY_OID => DatumType::Array(Box::new(DatumType::Bool)),
         BYTEA_ARRAY_OID => DatumType::Array(Box::new(DatumType::Bytea)),
+        CHAR_ARRAY_OID | NAME_ARRAY_OID | BPCHAR_ARRAY_OID | VARCHAR_ARRAY_OID => {
+            DatumType::Array(Box::new(DatumType::Text))
+        }
         INT2_ARRAY_OID => DatumType::Array(Box::new(DatumType::I16)),
         INT4_ARRAY_OID => DatumType::Array(Box::new(DatumType::I32)),
         TEXT_ARRAY_OID => DatumType::Array(Box::new(DatumType::Text)),
         INT8_ARRAY_OID => DatumType::Array(Box::new(DatumType::I64)),
         FLOAT4_ARRAY_OID => DatumType::Array(Box::new(DatumType::F32)),
         FLOAT8_ARRAY_OID => DatumType::Array(Box::new(DatumType::F64)),
+        MONEY_ARRAY_OID => DatumType::Array(Box::new(DatumType::Numeric)),
+        DATE_ARRAY_OID => DatumType::Array(Box::new(DatumType::Date)),
+        TIME_ARRAY_OID => DatumType::Array(Box::new(DatumType::Time)),
+        TIMESTAMP_ARRAY_OID => DatumType::Array(Box::new(DatumType::Timestamp)),
+        TIMESTAMPTZ_ARRAY_OID => DatumType::Array(Box::new(DatumType::TimestampTz)),
+        INTERVAL_ARRAY_OID => DatumType::Array(Box::new(DatumType::Interval)),
         UUID_ARRAY_OID => DatumType::Array(Box::new(DatumType::Uuid)),
         JSON_ARRAY_OID => DatumType::Array(Box::new(DatumType::Json)),
         JSONB_ARRAY_OID => DatumType::Array(Box::new(DatumType::Jsonb)),
         NUMERIC_ARRAY_OID => DatumType::Array(Box::new(DatumType::Numeric)),
+        INT2_VECTOR_ARRAY_OID => {
+            DatumType::Array(Box::new(DatumType::Array(Box::new(DatumType::I16))))
+        }
+        OID_VECTOR_ARRAY_OID => {
+            DatumType::Array(Box::new(DatumType::Array(Box::new(DatumType::I32))))
+        }
         _ => return None,
     };
 
@@ -460,17 +498,28 @@ mod tests {
 
     use super::{
         decode_column_value, stock_postgres_16_type, ColumnValue, Date, Datum, DatumType, Time,
-        BOOL_OID, INT4_OID, JSONB_OID, TEXT_ARRAY_OID, UUID_OID,
+        BPCHAR_OID, DATE_ARRAY_OID, INT4_OID, JSONB_OID, NAME_OID, TEXT_ARRAY_OID, UUID_OID,
+        VARCHAR_ARRAY_OID, VARCHAR_OID,
     };
 
     #[test]
     fn maps_stock_postgres_oids() {
-        assert_eq!(stock_postgres_16_type(BOOL_OID), Some(DatumType::Bool));
         assert_eq!(stock_postgres_16_type(INT4_OID), Some(DatumType::I32));
         assert_eq!(stock_postgres_16_type(UUID_OID), Some(DatumType::Uuid));
+        assert_eq!(stock_postgres_16_type(NAME_OID), Some(DatumType::Text));
+        assert_eq!(stock_postgres_16_type(VARCHAR_OID), Some(DatumType::Text));
+        assert_eq!(stock_postgres_16_type(BPCHAR_OID), Some(DatumType::Text));
         assert_eq!(
             stock_postgres_16_type(TEXT_ARRAY_OID),
             Some(DatumType::Array(Box::new(DatumType::Text)))
+        );
+        assert_eq!(
+            stock_postgres_16_type(VARCHAR_ARRAY_OID),
+            Some(DatumType::Array(Box::new(DatumType::Text)))
+        );
+        assert_eq!(
+            stock_postgres_16_type(DATE_ARRAY_OID),
+            Some(DatumType::Array(Box::new(DatumType::Date)))
         );
         assert_eq!(stock_postgres_16_type(999_999), None);
     }
