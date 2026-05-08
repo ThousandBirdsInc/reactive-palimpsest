@@ -5,7 +5,10 @@ pub mod time;
 pub mod wal;
 pub mod worker;
 
-pub use relational::{distinct, equi_join, filter, project, union, union_distinct};
+pub use relational::{
+    aggregate_i64, distinct, equi_join, filter, left_join, project, topk, union, union_distinct,
+    AggregateFunc, AggregateValue, SortDirection,
+};
 pub use time::{Lsn, LsnSummary};
 pub use wal::{Row, RowContainer, WalSourceState, WalUpdate};
 pub use worker::{
