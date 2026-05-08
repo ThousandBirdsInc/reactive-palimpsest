@@ -1,7 +1,7 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -52,6 +52,24 @@ pub struct ColumnDef {
     pub nullable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableDef {
+    pub id: TableId,
+    pub name: String,
+    pub columns: Vec<ColumnDef>,
+}
+
+impl TableDef {
+    #[must_use]
+    pub fn new(id: TableId, name: impl Into<String>, columns: Vec<ColumnDef>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            columns,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TruncateOpts {
     pub cascade: bool,
@@ -61,19 +79,44 @@ pub struct TruncateOpts {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
     tables: HashSet<TableId>,
+    table_defs: BTreeMap<TableId, TableDef>,
+    names: BTreeMap<String, TableId>,
 }
 
 impl Catalog {
     #[must_use]
     pub fn new(tables: impl IntoIterator<Item = TableId>) -> Self {
-        Self {
-            tables: tables.into_iter().collect(),
+        Self::with_tables(
+            tables
+                .into_iter()
+                .map(|table| TableDef::new(table, format!("table_{}", table.get()), Vec::new())),
+        )
+    }
+
+    #[must_use]
+    pub fn with_tables(tables: impl IntoIterator<Item = TableDef>) -> Self {
+        let mut catalog = Self::default();
+        for table in tables {
+            catalog.names.insert(table.name.clone(), table.id);
+            catalog.tables.insert(table.id);
+            catalog.table_defs.insert(table.id, table);
         }
+        catalog
     }
 
     #[must_use]
     pub fn contains(&self, table: TableId) -> bool {
         self.tables.contains(&table)
+    }
+
+    #[must_use]
+    pub fn table_id(&self, name: &str) -> Option<TableId> {
+        self.names.get(name).copied()
+    }
+
+    #[must_use]
+    pub fn table(&self, table: TableId) -> Option<&TableDef> {
+        self.table_defs.get(&table)
     }
 }
 
@@ -344,6 +387,7 @@ impl WalGenerator {
         bytes.freeze()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn encode_pgoutput_event(&self, event: &LogicalEvent) -> Option<Bytes> {
         let mut bytes = BytesMut::new();
 
@@ -763,6 +807,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     fn decode_frames(frames: &[Bytes]) -> Result<Vec<LogicalEvent>, TestCaseError> {
         let mut events = Vec::new();
 

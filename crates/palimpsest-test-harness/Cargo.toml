@@ -13,6 +13,8 @@ categories.workspace = true
 
 [dependencies]
 bytes.workspace = true
+palimpsest-sql = { path = "../palimpsest-sql" }
+petgraph.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

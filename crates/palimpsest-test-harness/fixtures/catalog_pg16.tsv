@@ -1,0 +1,5 @@
+7	public	posts	d	1	id	23	t	t
+7	public	posts	d	2	author_id	23	f	f
+7	public	posts	d	3	title	25	f	f
+8	public	authors	d	1	id	23	t	t
+8	public	authors	d	2	name	25	f	f

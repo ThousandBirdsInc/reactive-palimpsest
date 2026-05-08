@@ -56,6 +56,9 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+      - name: Reference executor line budget
+        run: cargo run -p xtask -- check-reference-budget
+
       - name: Install cargo-insta
         if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         run: cargo install cargo-insta --locked

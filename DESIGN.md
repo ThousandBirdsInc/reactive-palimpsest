@@ -1270,21 +1270,21 @@ are intentionally small enough to land in single PRs.
 - [x] Receive and record `StandbyStatus` from client; expose via
   `MockPostgres::acks()`.
 - [x] `Fault` enum per §15.7; one test per variant.
-- [ ] Catalog-response fixtures: capture from real Postgres
+- [x] Catalog-response fixtures: capture from real Postgres
   (16, 17) via an `xtask regen-pg-fixtures` script; check
   fixtures + their checksums into source.
 - [x] `ReferenceExecutor` skeleton with table HashMaps.
 - [x] Apply `LogicalEvent` to `ReferenceExecutor` state.
-- [ ] Lower MIR → reference plan; one match arm per MIR variant.
-- [ ] Filter, Project, Equi-join (nested loop), LeftJoin,
+- [x] Lower MIR → reference plan; one match arm per MIR variant.
+- [x] Filter, Project, Equi-join (nested loop), LeftJoin,
   Aggregate (HashMap), Distinct, Union, TopK (BinaryHeap),
   CteRef (substitution), Leaf.
-- [ ] Predicate evaluation with three-valued logic.
-- [ ] Set-equality assertion helper for order-insensitive
+- [x] Predicate evaluation with three-valued logic.
+- [x] Set-equality assertion helper for order-insensitive
   comparisons.
-- [ ] Fixture-line-count budget guard: CI fails if reference
+- [x] Fixture-line-count budget guard: CI fails if reference
   executor exceeds 1500 lines.
-- [ ] Composed harness builder: schema → wal-gen → mock-pg →
+- [x] Composed harness builder: schema → wal-gen → mock-pg →
   engine, plus reference-executor twin; match what §15.4.4
   shows.
 

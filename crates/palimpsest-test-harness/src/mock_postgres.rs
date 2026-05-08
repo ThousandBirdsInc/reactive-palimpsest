@@ -168,11 +168,7 @@ impl MockPostgres {
                 ClientMessage::Query(query) => {
                     let outcome = self.handle_query(&mut stream, &query)?;
                     if matches!(outcome, QueryOutcome::CopyBoth) {
-                        stream_copy_both(
-                            &mut stream,
-                            &mut self.wal_frames,
-                            Arc::clone(&self.acks),
-                        )?;
+                        stream_copy_both(&mut stream, &mut self.wal_frames, &self.acks)?;
                         break;
                     }
                 }
@@ -189,7 +185,7 @@ impl MockPostgres {
         Ok(startup)
     }
 
-    fn handle_query(&mut self, stream: &mut TcpStream, query: &str) -> io::Result<QueryOutcome> {
+    fn handle_query(&self, stream: &mut TcpStream, query: &str) -> io::Result<QueryOutcome> {
         let normalized = query.trim().trim_end_matches(';').to_ascii_uppercase();
 
         if normalized.starts_with("IDENTIFY_SYSTEM") {
@@ -531,13 +527,14 @@ fn write_copy_both_response(stream: &mut TcpStream) -> io::Result<()> {
 fn stream_copy_both(
     stream: &mut TcpStream,
     frames: &mut VecDeque<Bytes>,
-    acks: Arc<Mutex<Vec<StandbyStatus>>>,
+    acks: &Arc<Mutex<Vec<StandbyStatus>>>,
 ) -> io::Result<()> {
     let mut lsn = Lsn::default();
     while let Some(frame) = frames.pop_front() {
-        write_xlog_data(stream, lsn, frame)?;
+        write_xlog_data(stream, lsn, &frame)?;
         lsn = Lsn::new(lsn.get().saturating_add(1));
     }
+    write_primary_keepalive(stream, lsn)?;
 
     stream.set_read_timeout(Some(STATUS_READ_TIMEOUT))?;
     while let Some(message) = read_client_message(stream)? {
@@ -554,7 +551,7 @@ fn stream_copy_both(
     Ok(())
 }
 
-fn write_xlog_data(stream: &mut TcpStream, start_lsn: Lsn, data: Bytes) -> io::Result<()> {
+fn write_xlog_data(stream: &mut TcpStream, start_lsn: Lsn, data: &Bytes) -> io::Result<()> {
     let end_lsn = Lsn::new(
         start_lsn
             .get()
@@ -565,7 +562,16 @@ fn write_xlog_data(stream: &mut TcpStream, start_lsn: Lsn, data: Bytes) -> io::R
     payload.put_u64(start_lsn.get());
     payload.put_u64(end_lsn.get());
     payload.put_i64(0);
-    payload.put_slice(&data);
+    payload.put_slice(data);
+    write_message(stream, b'd', &payload)
+}
+
+fn write_primary_keepalive(stream: &mut TcpStream, lsn: Lsn) -> io::Result<()> {
+    let mut payload = BytesMut::with_capacity(18);
+    payload.put_u8(b'k');
+    payload.put_u64(lsn.get());
+    payload.put_i64(0);
+    payload.put_u8(0);
     write_message(stream, b'd', &payload)
 }
 

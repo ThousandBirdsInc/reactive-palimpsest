@@ -3,10 +3,17 @@
 
 #![doc = "Postgres-free test harness pieces for Palimpsest."]
 
+pub mod harness;
 pub mod mock_postgres;
 pub mod reference;
 pub mod wal;
 
+pub use harness::{HarnessBuilder, TestHarness};
 pub use mock_postgres::{Fault, MockPostgres, Startup};
-pub use reference::{PrimaryKey, ReferenceExecutor, Row};
-pub use wal::{Catalog, ColumnDef, LogicalEvent, Lsn, TableId, Tuple, WalGenerator};
+pub use reference::{
+    assert_set_eq, fixture_line_count_within_budget, PrimaryKey, ReferenceExecutor, Row, SetDiff,
+    Truth,
+};
+pub use wal::{
+    Catalog, ColumnDef, LogicalEvent, Lsn, TableDef, TableId, TruncateOpts, Tuple, WalGenerator,
+};
