@@ -1209,7 +1209,7 @@ are intentionally small enough to land in single PRs.
 - [ ] Vendor `pg-walstream` source into `crates/palimpsest-wal/`.
 - [ ] Strip features we will not use (e.g. libpq backend if we
   commit to rustls only).
-- [ ] Define `Datum` enum with variants for all supported Postgres
+- [x] Define `Datum` enum with variants for all supported Postgres
   types: `Bool`, `I16/I32/I64`, `F32/F64`, `Numeric(BigDecimal)`,
   `Text(Bytes)`, `Bytea(Bytes)`, `Date`, `Time`, `Timestamp`,
   `TimestampTz`, `Interval`, `Uuid`, `Json(Bytes)`, `Jsonb(Bytes)`,

@@ -3,6 +3,7 @@ members = [
     "crates/palimpsest-proto",
     "crates/palimpsest-sql",
     "crates/palimpsest-test-harness",
+    "crates/palimpsest-wal",
     "xtask",
 ]
 resolver = "2"
