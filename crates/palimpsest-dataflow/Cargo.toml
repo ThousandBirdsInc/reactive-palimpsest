@@ -1,0 +1,30 @@
+[package]
+name = "palimpsest-dataflow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+columnar = { version = "0.11", default-features = false }
+columnation = "0.1"
+fnv = "1.0"
+paste = "1.0"
+serde = { workspace = true, features = ["derive"] }
+timely.workspace = true
+
+[dev-dependencies]
+bytemuck = "1.18"
+graph_map = "0.1"
+itertools = "0.13"
+mimalloc = "0.1"
+rand = "0.4"
+
+[features]
+default = ["timely/getopts"]

@@ -1336,6 +1336,9 @@ are intentionally small enough to land in single PRs.
 
 ### 18.5 `palimpsest-dataflow` — execution engine (Phase 2)
 
+- [x] Vendor `differential-dataflow` into `palimpsest-dataflow`
+  and upgrade its timely/columnar dependency line for local
+  modification.
 - [ ] Embed `timely::worker::Worker` inside a tokio task; design
   the `step_loop` from `threadless.rs`.
 - [ ] `Lsn` newtype implementing `timely::progress::Timestamp`
