@@ -1273,7 +1273,7 @@ are intentionally small enough to land in single PRs.
 - [ ] Catalog-response fixtures: capture from real Postgres
   (16, 17) via an `xtask regen-pg-fixtures` script; check
   fixtures + their checksums into source.
-- [ ] `ReferenceExecutor` skeleton with table HashMaps.
+- [x] `ReferenceExecutor` skeleton with table HashMaps.
 - [ ] Apply `LogicalEvent` to `ReferenceExecutor` state.
 - [ ] Lower MIR → reference plan; one match arm per MIR variant.
 - [ ] Filter, Project, Equi-join (nested loop), LeftJoin,

@@ -4,7 +4,9 @@
 #![doc = "Postgres-free test harness pieces for Palimpsest."]
 
 pub mod mock_postgres;
+pub mod reference;
 pub mod wal;
 
 pub use mock_postgres::{Fault, MockPostgres, Startup};
+pub use reference::{PrimaryKey, ReferenceExecutor, Row};
 pub use wal::{Catalog, ColumnDef, LogicalEvent, Lsn, TableId, Tuple, WalGenerator};
