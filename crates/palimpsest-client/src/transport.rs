@@ -94,12 +94,7 @@ pub(crate) async fn open_subscribe(
     }
     #[cfg(target_arch = "wasm32")]
     {
-        // `auth` is currently ignored on wasm — the WS bridge accepts
-        // anonymous connections. To pass a bearer token, encode it in
-        // the URL (query string) or via WS subprotocol. Marking the
-        // arg as used to keep the signature symmetric.
-        let _ = auth;
-        wasm::open_subscribe(endpoint, outbound_rx, INBOUND_CAPACITY).await
+        wasm::open_subscribe(endpoint, auth, outbound_rx, INBOUND_CAPACITY).await
     }
 }
 
@@ -174,7 +169,7 @@ mod native {
 mod wasm {
     use futures::{SinkExt, StreamExt};
     use gloo_net::websocket::futures::WebSocket;
-    use gloo_net::websocket::Message as WsMessage;
+    use gloo_net::websocket::{Message as WsMessage, WebSocketError};
     use palimpsest_proto::palimpsest::sync::v1::{ClientMessage, ServerMessage};
     use prost::Message as _;
     use tokio::sync::mpsc;
@@ -182,13 +177,19 @@ mod wasm {
     use wasm_bindgen_futures::spawn_local;
 
     use super::{Endpoint, OpenError};
+    use crate::auth::Auth;
+
+    /// WS close code the demo's bridge uses to signal auth rejection.
+    /// Mirrors RFC 6455 §7.4 "Policy Violation".
+    const CLOSE_POLICY_VIOLATION: u16 = 1008;
 
     pub(super) async fn open_subscribe(
         endpoint: &Endpoint,
+        auth: &Auth,
         mut outbound_rx: mpsc::Receiver<ClientMessage>,
         inbound_capacity: usize,
     ) -> Result<mpsc::Receiver<Result<ServerMessage, tonic::Status>>, OpenError> {
-        let url = normalize_ws_url(endpoint);
+        let url = normalize_ws_url(endpoint, auth);
         let ws = WebSocket::open(&url).map_err(|err| {
             warn!(?err, %url, "ws open failed");
             OpenError::Transient
@@ -218,7 +219,10 @@ mod wasm {
         // server → browser: read binary frames, decode ServerMessage,
         // forward into the inbound channel as `Ok(_)`. Decode failures
         // are surfaced as `tonic::Status::data_loss` so the connection
-        // manager treats them like a normal stream error.
+        // manager treats them like a normal stream error. Auth-related
+        // close frames (code 1008) are surfaced as `Unauthenticated`
+        // so `OpenError::Auth` propagates up and the manager stops
+        // reconnecting instead of hot-looping against the bridge.
         spawn_local(async move {
             while let Some(item) = ws_stream.next().await {
                 let res = match item {
@@ -229,7 +233,7 @@ mod wasm {
                     Ok(WsMessage::Text(_)) => {
                         Err(tonic::Status::data_loss("unexpected ws text frame"))
                     }
-                    Err(err) => Err(tonic::Status::unavailable(format!("ws recv: {err}"))),
+                    Err(err) => Err(map_ws_error_to_status(&err)),
                 };
                 let stop = res.is_err();
                 if inbound_tx.send(res).await.is_err() {
@@ -244,14 +248,34 @@ mod wasm {
         Ok(inbound_rx)
     }
 
-    /// Map a user-supplied URL onto a valid `ws://`/`wss://` URL.
+    /// Map a `gloo_net::websocket::WebSocketError` onto a
+    /// `tonic::Status` whose code drives the connection manager's
+    /// retry vs. shutdown decision.
+    fn map_ws_error_to_status(err: &WebSocketError) -> tonic::Status {
+        match err {
+            WebSocketError::ConnectionClose(close_event)
+                if close_event.code == CLOSE_POLICY_VIOLATION =>
+            {
+                tonic::Status::unauthenticated(close_event.reason.clone())
+            }
+            other => tonic::Status::unavailable(format!("ws recv: {other:?}")),
+        }
+    }
+
+    /// Map a user-supplied URL + auth onto a valid `ws://`/`wss://`
+    /// URL.
     ///
     /// * `http://`/`https://` → swapped to `ws://`/`wss://` so callers
     ///   can pass the same origin they use for REST.
     /// * URLs without a path get `/ws/subscribe` appended — that's the
     ///   route the demo's nginx proxies to the WS bridge.
+    /// * A bearer token from `auth` is appended as `?token=<jwt>` (or
+    ///   `&token=…` if the URL already carries a query). Browsers
+    ///   cannot set `Authorization` headers on a WS handshake, so the
+    ///   server-side bridge reads the token off the URL and re-presents
+    ///   it as gRPC metadata to the inner SyncEngine.
     /// * Anything already `ws(s)://` passes through unchanged.
-    fn normalize_ws_url(url: &str) -> String {
+    fn normalize_ws_url(url: &str, auth: &Auth) -> String {
         let mut out = if let Some(rest) = url.strip_prefix("http://") {
             format!("ws://{rest}")
         } else if let Some(rest) = url.strip_prefix("https://") {
@@ -261,6 +285,12 @@ mod wasm {
         };
         if !path_present(&out) {
             out.push_str("/ws/subscribe");
+        }
+        if let Some(token) = bearer_token(auth) {
+            let separator = if out.contains('?') { '&' } else { '?' };
+            out.push(separator);
+            out.push_str("token=");
+            out.push_str(&url_encode(token));
         }
         out
     }
@@ -272,5 +302,40 @@ mod wasm {
         // Skip the scheme://
         let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
         after_scheme.contains('/')
+    }
+
+    /// Extract the bearer token from `auth`, if any. Returns `None`
+    /// for `Anonymous` and for `Raw` headers that aren't of the form
+    /// `Bearer …`.
+    fn bearer_token(auth: &Auth) -> Option<&str> {
+        match auth {
+            Auth::Anonymous => None,
+            Auth::Bearer(token) => Some(token.as_str()),
+            Auth::Raw(value) => value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer ")),
+        }
+    }
+
+    /// Minimal percent-encoding for the token query parameter. JWTs
+    /// only use URL-safe base64 (`A-Z a-z 0-9 - _`) plus `.`, all of
+    /// which are unreserved per RFC 3986, so a token never actually
+    /// needs encoding — but we still escape any non-unreserved byte
+    /// defensively in case the caller passes something exotic.
+    fn url_encode(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        for byte in input.bytes() {
+            match byte {
+                b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'-'
+                | b'_'
+                | b'.'
+                | b'~' => out.push(byte as char),
+                _ => out.push_str(&format!("%{byte:02X}")),
+            }
+        }
+        out
     }
 }

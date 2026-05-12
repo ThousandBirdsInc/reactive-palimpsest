@@ -109,6 +109,7 @@ fn bench_pump_to_deliver(c: &mut Criterion) {
                                 user_ctx: UserContext::new(std::iter::empty()),
                                 schema: schema(),
                                 resume_lsn: None,
+                compiled_plan: None,
                             },
                             &provider,
                         )

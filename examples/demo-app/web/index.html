@@ -59,10 +59,42 @@
       }
       .bar-published { background: #137333; }
       .bar-draft     { background: #b06000; }
+      .bar-events    { background: #1a73e8; }
       .bar-value {
         font-variant-numeric: tabular-nums; text-align: right;
         font-size: 13px; color: #333;
       }
+
+      .bubble-chart { display: block; width: 100%; height: auto;
+                      margin-top: 4px; }
+      .bubble-grid { stroke: #eef1f5; stroke-width: 1; }
+      .bubble-axis { stroke: #c8ced8; stroke-width: 1; }
+      .bubble-tick { font-size: 11px; fill: #6b7280;
+                     font-variant-numeric: tabular-nums; }
+      .bubble-axis-label { font-size: 12px; fill: #1f2937; font-weight: 500; }
+      .bubble circle {
+        stroke-width: 1.5;
+        transition: cx 480ms cubic-bezier(.4,0,.2,1),
+                    cy 480ms cubic-bezier(.4,0,.2,1),
+                    r  480ms cubic-bezier(.4,0,.2,1),
+                    fill 480ms ease;
+      }
+      .bubble-label {
+        font: 600 11px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        fill: #11181c; pointer-events: none;
+        transition: x 480ms cubic-bezier(.4,0,.2,1),
+                    y 480ms cubic-bezier(.4,0,.2,1);
+      }
+      .auto-toggle {
+        display: inline-flex; align-items: center; gap: 4px;
+        font-size: 12px; color: #555; padding: 3px 8px;
+        border: 1px solid #e1e7ef; border-radius: 999px;
+        background: #f7f9fc;
+      }
+      .auto-toggle input { margin: 0; }
+
+      .chip:disabled { opacity: 0.45; cursor: not-allowed; }
+      .rule-text { margin: 4px 0; font-size: 13px; color: #444; }
       .status { font-size: 12px; padding: 2px 8px; border-radius: 4px;
                 background: #eee; color: #444; }
       .status.open { background: #e6f4ea; color: #137333; }

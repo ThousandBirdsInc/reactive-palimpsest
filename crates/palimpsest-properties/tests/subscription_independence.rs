@@ -91,6 +91,7 @@ async fn parallel_subscriptions_receive_same_sequence() {
                 user_ctx: UserContext::new(std::iter::empty()),
                 schema: schema(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             &provider_a,
         )
@@ -105,6 +106,7 @@ async fn parallel_subscriptions_receive_same_sequence() {
                 user_ctx: UserContext::new(std::iter::empty()),
                 schema: schema(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             &provider_b,
         )

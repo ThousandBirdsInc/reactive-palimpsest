@@ -1,23 +1,61 @@
-# Palimpsest demo: write API + gRPC-Web in a single Rust binary,
-# behind an nginx-served React+WASM frontend.
+# Palimpsest demo: Postgres (with logical replication) → demo server
+# (consumer + write API + gRPC-Web) → nginx-served React+WASM frontend.
 #
 # Bring up:
 #   docker compose up --build
-# Tear down:
-#   docker compose down
+# Tear down (drops the postgres volume too):
+#   docker compose down -v
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: palimpsest-demo-postgres
+    environment:
+      POSTGRES_USER: palimpsest
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: palimpsest_demo
+    # Logical replication needs `wal_level=logical` plus headroom in
+    # the slot + sender counts. The defaults (10/10) are fine but
+    # spelled out here so the demo's requirements are obvious.
+    command: >
+      postgres
+      -c wal_level=logical
+      -c max_replication_slots=4
+      -c max_wal_senders=4
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palimpsest -d palimpsest_demo"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   server:
     build:
       context: ../..              # workspace root — needed for path deps
       dockerfile: examples/demo-app/server/Dockerfile
     image: palimpsest-demo-server:dev
     container_name: palimpsest-demo-server
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
-      - "3000:3000"                # write API
+      # Write API: only nginx in the web container needs to reach
+      # this (over docker DNS at `server:3000`), so host-side
+      # exposure is optional. Commented out to avoid colliding with
+      # Next.js dev servers on the developer's host.
+      # - "3000:3000"
       - "50051:50051"              # palimpsest gRPC-Web
     environment:
       RUST_LOG: "info,palimpsest_demo_server=debug,palimpsest_server=info"
+      # Postgres connection (the consumer + write client both use it).
+      PALIMPSEST_DEMO_PG_HOST: postgres
+      PALIMPSEST_DEMO_PG_PORT: "5432"
+      PALIMPSEST_DEMO_PG_USER: palimpsest
+      PALIMPSEST_DEMO_PG_PASSWORD: demo
+      PALIMPSEST_DEMO_PG_DB: palimpsest_demo
+      PALIMPSEST_DEMO_PG_SLOT: palimpsest_demo
+      PALIMPSEST_DEMO_PG_PUBLICATION: palimpsest_pub
     healthcheck:
       test: ["CMD", "/usr/local/bin/palimpsest-demo-server", "--healthcheck"]
       interval: 5s
@@ -35,3 +73,6 @@ services:
     depends_on:
       server:
         condition: service_started
+
+volumes:
+  postgres-data:

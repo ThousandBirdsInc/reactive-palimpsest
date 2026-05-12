@@ -78,6 +78,7 @@ async fn main() -> ExitCode {
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
+                    compiled_plan: None,
                 },
                 &provider,
             )

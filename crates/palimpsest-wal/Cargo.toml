@@ -12,8 +12,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-bytes.workspace = true
+bytes = { workspace = true, features = ["serde"] }
 futures.workspace = true
+serde = { workspace = true, features = ["derive"] }
 smallvec.workspace = true
 thiserror.workspace = true
 

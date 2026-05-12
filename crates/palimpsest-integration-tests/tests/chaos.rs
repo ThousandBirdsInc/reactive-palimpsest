@@ -148,6 +148,7 @@ async fn slow_consumer_saturates_bounded_channel_into_resync() {
                 user_ctx: UserContext::new(std::iter::empty()),
                 schema: schema(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             &provider,
         )

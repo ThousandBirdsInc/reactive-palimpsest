@@ -81,6 +81,13 @@ pub struct SubscribeRequest<'a> {
     pub schema: SchemaDefinition,
     /// Optional resume LSN supplied by the client.
     pub resume_lsn: Option<Lsn>,
+    /// Compiled dataflow plan for the (permission-rewritten) query
+    /// graph. When present, the router runs the snapshot through the
+    /// dataflow and emits the aggregate result rather than the raw
+    /// table data. Absent for queries the compiler couldn't lower
+    /// (e.g. `Join`, set ops) — those still ship via the v1
+    /// pass-through path.
+    pub compiled_plan: Option<palimpsest_dataflow::palimpsest::CompiledPlan>,
 }
 
 /// Optional resume request supplied alongside a `subscribe` call.
@@ -167,6 +174,15 @@ impl SubscriptionRouter {
         inner.rules = rules;
     }
 
+    /// Returns a snapshot of the router's compiled permission rules.
+    /// The gRPC adapter uses this to apply rewriting *before*
+    /// `compile_mir` so the resulting dataflow plan already includes
+    /// the row-visibility filters.
+    #[must_use]
+    pub fn permission_rules(&self) -> Vec<CompiledRule> {
+        self.inner.lock().expect("router lock").rules.clone()
+    }
+
     /// Total active subscriptions.
     #[must_use]
     pub fn active_subscriptions(&self) -> usize {
@@ -192,6 +208,7 @@ impl SubscriptionRouter {
             user_ctx,
             schema,
             resume_lsn,
+            compiled_plan,
         } = request;
 
         let rules = self.inner.lock().expect("router lock").rules.clone();
@@ -215,11 +232,30 @@ impl SubscriptionRouter {
 
         match resume {
             ResumeDecision::FreshInitial { .. } => {
-                let rows: Vec<Row> = snapshot_batch
-                    .rows
-                    .iter()
-                    .flat_map(|table| table.rows.clone())
-                    .collect();
+                // If we have a compiled dataflow plan for this query,
+                // run the snapshot through it server-side so the
+                // `Initial` event ships the *query's* result rows —
+                // aggregate / filtered / projected — rather than the
+                // raw underlying tables. Falls back to the legacy
+                // pass-through for queries the compiler doesn't yet
+                // lower.
+                let rows: Vec<Row> = if let Some(plan) = &compiled_plan {
+                    let inputs: std::collections::HashMap<
+                        palimpsest_wal::TableId,
+                        Vec<Row>,
+                    > = snapshot_batch
+                        .rows
+                        .iter()
+                        .map(|table| (table.table, table.rows.clone()))
+                        .collect();
+                    palimpsest_dataflow::palimpsest::snapshot_run(plan, inputs)
+                } else {
+                    snapshot_batch
+                        .rows
+                        .iter()
+                        .flat_map(|table| table.rows.clone())
+                        .collect()
+                };
                 let initial = DiffEvent::Initial {
                     lsn: snapshot_lsn,
                     rows,
@@ -603,6 +639,7 @@ mod tests {
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
+                compiled_plan: None,
                 },
                 &provider,
             )
@@ -633,6 +670,7 @@ mod tests {
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: Some(Lsn::new(60)),
+                compiled_plan: None,
                 },
                 &provider,
             )
@@ -666,6 +704,7 @@ mod tests {
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
+                compiled_plan: None,
                 },
                 &provider,
             )
@@ -717,6 +756,7 @@ mod tests {
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
+                compiled_plan: None,
                 },
                 &provider,
             )
@@ -753,6 +793,7 @@ mod tests {
                     user_ctx: user_ctx.clone(),
                     schema: schema(),
                     resume_lsn: None,
+                compiled_plan: None,
                 },
                 &provider,
             )
@@ -767,6 +808,7 @@ mod tests {
                     user_ctx,
                     schema: schema(),
                     resume_lsn: None,
+                compiled_plan: None,
                 },
                 &provider,
             )
@@ -810,6 +852,7 @@ mod tests {
                     user_ctx: UserContext::new([("id".to_owned(), UserValue::Int(7))]),
                     schema: schema(),
                     resume_lsn: None,
+                compiled_plan: None,
                 },
                 &provider,
             )
@@ -851,6 +894,7 @@ mod tests {
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
+                compiled_plan: None,
                 },
                 &provider,
             )
@@ -865,6 +909,7 @@ mod tests {
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
+                compiled_plan: None,
                 },
                 &provider,
             )

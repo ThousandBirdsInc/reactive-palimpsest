@@ -91,6 +91,7 @@ async fn lifecycle_subscribe_pump_ack_unsubscribe() {
                 user_ctx: UserContext::new(std::iter::empty()),
                 schema: schema_for_posts(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             &provider,
         )
@@ -162,6 +163,7 @@ async fn saturated_channel_emits_resync_and_drains() {
                 user_ctx: UserContext::new(std::iter::empty()),
                 schema: schema_for_posts(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             &provider,
         )
@@ -213,6 +215,7 @@ async fn permission_subscriptions_with_different_user_context_split_subgraphs() 
                 user_ctx: UserContext::new([("id".to_owned(), UserValue::Int(1))]),
                 schema: schema_for_posts(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             &provider,
         )
@@ -227,6 +230,7 @@ async fn permission_subscriptions_with_different_user_context_split_subgraphs() 
                 user_ctx: UserContext::new([("id".to_owned(), UserValue::Int(2))]),
                 schema: schema_for_posts(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             &provider,
         )
@@ -250,6 +254,7 @@ async fn duplicate_client_label_within_connection_is_rejected() {
                 user_ctx: UserContext::new(std::iter::empty()),
                 schema: schema_for_posts(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             &provider,
         )
@@ -263,6 +268,7 @@ async fn duplicate_client_label_within_connection_is_rejected() {
             user_ctx: UserContext::new(std::iter::empty()),
             schema: schema_for_posts(),
             resume_lsn: None,
+                compiled_plan: None,
         },
         &provider,
     );
@@ -287,6 +293,7 @@ async fn ack_advances_compaction_frontier() {
                 user_ctx: UserContext::new(std::iter::empty()),
                 schema: schema_for_posts(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             &provider,
         )

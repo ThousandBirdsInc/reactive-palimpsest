@@ -2,7 +2,10 @@
 
 pub mod build_plan;
 pub mod compaction;
+pub mod compile_mir;
 pub mod cte;
+pub mod dataflow_host;
+pub mod eval;
 pub mod materialization;
 pub mod metrics;
 pub mod relational;
@@ -17,7 +20,13 @@ pub use build_plan::{
     BuildPlan, BuildPlanRegistry, PlanAlreadyRegistered, ProbeHandle, RegisteredPlan, TraceHandle,
 };
 pub use compaction::{LsnWatermarks, SubscriberId};
+pub use compile_mir::{compile_mir, install_plan, CompileError, CompiledPlan, NodeRecipe, TableSchemaLookup};
 pub use cte::{CteAlreadyRegistered, CteRegistry};
+pub use dataflow_host::{snapshot_run, AggregateDelta, PersistentHost};
+pub use eval::{
+    compile_int_extractor, compile_predicate, compile_scalar, EvalError, IntExtractor, PredicateFn,
+    ScalarFn, ScalarSchema,
+};
 pub use materialization::{
     ArrangementAlreadyTracked, BatchLookup, KeyStatus, LookupOutcome, MaterializationTracker,
     MaterializedKeys,

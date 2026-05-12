@@ -46,7 +46,10 @@ use crate::subscription::{
     ClientSubscriptionId, ColumnSpec, ConnectionId, QueryId, SchemaDefinition, SchemaId,
     SubscriptionId,
 };
+use crate::cursor::{LsnBatch, RawDiff};
 use crate::wal_runtime::WalRuntime;
+use palimpsest_dataflow::palimpsest::eval::ScalarSchema;
+use palimpsest_sql::ColumnType;
 
 /// Bounded depth for each gRPC connection's outbound mpsc.
 ///
@@ -63,6 +66,11 @@ pub struct SyncEngineService {
     schema_allocator: Arc<AtomicU64>,
     security: SecurityLimits,
     reconnect_tracker: Arc<ReconnectTracker>,
+    /// Long-lived host that drives compiled plans incrementally.
+    /// Shared by every subscription so refcounted plan reuse works
+    /// across connections; each subscription register_or_seed's its
+    /// canonical key and the cursor pump pushes WAL diffs through.
+    dataflow_host: Arc<palimpsest_dataflow::palimpsest::PersistentHost>,
 }
 
 impl SyncEngineService {
@@ -93,6 +101,7 @@ impl SyncEngineService {
             schema_allocator: Arc::new(AtomicU64::new(1)),
             security,
             reconnect_tracker: Arc::new(ReconnectTracker::new(security.reconnect_rate)),
+            dataflow_host: Arc::new(palimpsest_dataflow::palimpsest::PersistentHost::new()),
         }
     }
 
@@ -143,6 +152,7 @@ impl proto::sync_engine_server::SyncEngine for SyncEngineService {
         let wal = Arc::clone(&self.wal);
         let schemas = Arc::clone(&self.schema_allocator);
         let limiter = Arc::new(ConnectionLimiter::new(self.security));
+        let host = Arc::clone(&self.dataflow_host);
 
         tokio::spawn(connection_loop(
             connection,
@@ -153,6 +163,7 @@ impl proto::sync_engine_server::SyncEngine for SyncEngineService {
             wal,
             schemas,
             limiter,
+            host,
         ));
 
         let stream = ReceiverStream::new(outbound_rx);
@@ -174,6 +185,7 @@ async fn connection_loop(
     wal: Arc<dyn WalRuntime>,
     schemas: Arc<AtomicU64>,
     limiter: Arc<ConnectionLimiter>,
+    host: Arc<palimpsest_dataflow::palimpsest::PersistentHost>,
 ) {
     let mut state = ConnectionState::default();
 
@@ -190,6 +202,7 @@ async fn connection_loop(
                     schemas.as_ref(),
                     &mut state,
                     limiter.as_ref(),
+                    &host,
                 )
                 .await
                 {
@@ -287,11 +300,13 @@ async fn handle_client_message(
     schemas: &AtomicU64,
     state: &mut ConnectionState,
     limiter: &ConnectionLimiter,
+    host: &Arc<palimpsest_dataflow::palimpsest::PersistentHost>,
 ) -> Result<(), ChannelClosed> {
     match kind {
         proto::client_message::Kind::Subscribe(request) => {
             handle_subscribe(
-                connection, user_ctx, request, outbound, router, wal, schemas, state, limiter,
+                connection, user_ctx, request, outbound, router, wal, host, schemas, state,
+                limiter,
             )
             .await
         }
@@ -319,6 +334,7 @@ async fn handle_subscribe(
     outbound: &mpsc::Sender<Result<proto::ServerMessage, Status>>,
     router: &Arc<SubscriptionRouter>,
     wal: &Arc<dyn WalRuntime>,
+    host: &Arc<palimpsest_dataflow::palimpsest::PersistentHost>,
     schemas: &AtomicU64,
     state: &mut ConnectionState,
     limiter: &ConnectionLimiter,
@@ -329,7 +345,14 @@ async fn handle_subscribe(
     let mut admit_guard = AdmitGuard::new(limiter);
 
     let client_id = ClientSubscriptionId::new(request.client_subscription_id.clone());
-    let query = QueryId::new(request.client_subscription_id.clone());
+    // Use the SQL text as the `QueryId`. Two subscribers running the
+    // same query share a canonical subgraph key (subgraph reuse §11.4),
+    // and the WAL runtime can pattern-match the QueryId to route a
+    // snapshot/cursor to the right underlying table. Until the trait
+    // is extended to receive the lowered MIR directly, this is the
+    // sharpest signal a runtime gets about *what* the subscriber asked
+    // for.
+    let query = QueryId::new(request.sql.clone());
     let resume_lsn = request.resume_lsn.map(Lsn::new);
 
     let graph = match parse_and_lower_with_limits(&request.sql, QueryLimits::DEFAULT) {
@@ -363,9 +386,37 @@ async fn handle_subscribe(
         }
     };
 
-    let mut schema = match wal.query_schema(&query) {
-        Ok(schema) => schema,
-        Err(err) => {
+    // Try to compile the MIR into a dataflow plan. If the WAL
+    // runtime exposes typed table schemas (the post-v1 contract) and
+    // the query lowers cleanly, we run the snapshot through the
+    // dataflow so the client sees the query's *result* rows. If
+    // either is missing, fall back to the v1 pass-through path that
+    // ships raw table rows verbatim.
+    let table_lookup = WalTableLookup { wal: wal.as_ref() };
+    // Compile against the permission-rewritten graph so the dataflow
+    // honours row-visibility rules end-to-end. `router.subscribe`
+    // will re-run `install_permission_filters` on the original
+    // graph; the redundant work is cheap and the outputs match.
+    let rules_snapshot = router.permission_rules();
+    let rewritten_for_compile = palimpsest_permissions::rewrite(
+        &graph,
+        &rules_snapshot,
+        user_ctx,
+    )
+    .ok()
+    .map(|outcome| outcome.graph);
+    let compile_input = rewritten_for_compile.as_ref().unwrap_or(&graph);
+    let compiled_plan =
+        palimpsest_dataflow::palimpsest::compile_mir(compile_input, &table_lookup).ok();
+    let compiled_plan_for_host = compiled_plan.clone();
+
+    let mut schema = match (
+        compiled_plan.as_ref(),
+        wal.query_schema(&query),
+    ) {
+        (Some(plan), _) => schema_definition_from_plan(plan),
+        (None, Ok(schema)) => schema,
+        (None, Err(err)) => {
             return send_error(
                 outbound,
                 request.client_subscription_id,
@@ -386,6 +437,7 @@ async fn handle_subscribe(
             user_ctx: user_ctx.clone(),
             schema: schema.clone(),
             resume_lsn,
+            compiled_plan,
         },
         wal.as_ref(),
     );
@@ -439,8 +491,29 @@ async fn handle_subscribe(
         return Err(ChannelClosed);
     }
 
+    // Seed the persistent host with the same raw rows the router
+    // just shipped as `Initial` so its `last_output` matches the
+    // client's current view. Subsequent WAL diffs flow through the
+    // host's `push_table_batch` to produce *aggregate* deltas.
+    let host_key = host_canonical_key(server_id);
+    if let Some(plan) = compiled_plan_for_host.as_ref() {
+        let mut grouped: std::collections::HashMap<palimpsest_wal::TableId, Vec<palimpsest_dataflow::palimpsest::Row>> =
+            std::collections::HashMap::new();
+        for update in &response.seed_updates {
+            if update.diff > 0 {
+                grouped
+                    .entry(update.table)
+                    .or_default()
+                    .push(update.row.clone());
+            }
+        }
+        host.register_or_seed(&host_key, plan, grouped);
+    }
+
     let primary_key = schema.primary_key_columns.clone();
-    let cursor_query = QueryId::new(request.client_subscription_id.clone());
+    // Cursor pump uses the SQL-derived QueryId so it lands in the
+    // same WAL-runtime dispatch bucket as the snapshot fetched above.
+    let cursor_query = QueryId::new(request.sql.clone());
     let cursor_handle = spawn_cursor_pump(
         server_id,
         cursor_query,
@@ -448,6 +521,9 @@ async fn handle_subscribe(
         primary_key,
         Arc::clone(router),
         Arc::clone(wal),
+        Arc::clone(host),
+        host_key,
+        compiled_plan_for_host,
     );
     state.forwarders.push(cursor_handle);
 
@@ -474,6 +550,7 @@ async fn handle_subscribe(
 /// `None` between bursts. A proper notify-based wakeup belongs to a
 /// future cursor protocol (DESIGN.md §18.5); 50ms is a workable
 /// trade-off between latency and idle CPU for an in-process WAL.
+#[allow(clippy::too_many_arguments)]
 fn spawn_cursor_pump(
     sub_id: SubscriptionId,
     query: QueryId,
@@ -481,6 +558,9 @@ fn spawn_cursor_pump(
     primary_key: Vec<usize>,
     router: Arc<SubscriptionRouter>,
     wal: Arc<dyn WalRuntime>,
+    host: Arc<palimpsest_dataflow::palimpsest::PersistentHost>,
+    host_key: String,
+    plan: Option<palimpsest_dataflow::palimpsest::CompiledPlan>,
 ) -> tokio::task::JoinHandle<()> {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -493,30 +573,126 @@ fn spawn_cursor_pump(
             }
         };
         let mut tick = tokio::time::interval(POLL_INTERVAL);
-        // First tick fires immediately; we don't want a free pump
-        // before the snapshot is acknowledged. `tick.tick()` returns
-        // Ready instantly the first time, so the loop self-corrects
-        // — but skipping the first tick explicitly halves the worst-
-        // case latency.
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Single-table plans route raw WAL diffs through the
+        // persistent host so the dataflow re-aggregates and the
+        // client sees aggregate deltas (retract + assert of changed
+        // bucket rows) rather than raw rows from the underlying
+        // table. Multi-table plans aren't supported by the host
+        // yet, so they fall through to the v1 raw-row pump.
+        let route_through_host = plan
+            .as_ref()
+            .map_or(false, |p| p.inputs.len() == 1);
+        let table_id = plan
+            .as_ref()
+            .and_then(|p| p.inputs.first().copied());
 
         loop {
             tick.tick().await;
             while let Some(batch) = cursor.next_batch() {
-                match router.pump_batch(sub_id, batch, &primary_key) {
+                let to_pump = if route_through_host {
+                    let table_id = table_id.expect("checked above");
+                    let diffs: Vec<(
+                        palimpsest_wal::TableId,
+                        palimpsest_dataflow::palimpsest::Row,
+                        isize,
+                    )> = batch
+                        .diffs
+                        .iter()
+                        .map(|d| (table_id, d.row.clone(), d.diff as isize))
+                        .collect();
+                    let deltas = host.push_table_batch(&host_key, diffs, batch.lsn);
+                    LsnBatch {
+                        lsn: batch.lsn,
+                        diffs: deltas
+                            .into_iter()
+                            .map(|d| RawDiff {
+                                row: d.row,
+                                lsn: d.lsn,
+                                diff: i64::from(d.diff as i32),
+                            })
+                            .collect(),
+                    }
+                } else {
+                    batch
+                };
+                if to_pump.diffs.is_empty() {
+                    continue;
+                }
+                match router.pump_batch(sub_id, to_pump, &primary_key) {
                     Ok(()) => {}
                     Err(RouterError::UnknownSubscription(_)) => {
                         debug!(sub = sub_id.get(), "cursor pump: subscription gone, exiting");
+                        host.release(&host_key);
                         return;
                     }
                     Err(err) => {
                         warn!(sub = sub_id.get(), ?err, "cursor pump: pump_batch failed");
+                        host.release(&host_key);
                         return;
                     }
                 }
             }
         }
     })
+}
+
+/// Stable string key the persistent host uses to namespace each
+/// subscription's cumulative state.
+fn host_canonical_key(sub_id: SubscriptionId) -> String {
+    format!("sub-{}", sub_id.get())
+}
+
+/// Bridges the WAL runtime's `table_schema` lookup into the trait the
+/// MIR compiler consumes. Avoids leaking `WalRuntime` as a generic
+/// bound on the compiler's public surface.
+struct WalTableLookup<'a> {
+    wal: &'a dyn WalRuntime,
+}
+
+impl<'a> palimpsest_dataflow::palimpsest::TableSchemaLookup for WalTableLookup<'a> {
+    fn lookup(&self, table: &str) -> Option<(palimpsest_wal::TableId, ScalarSchema)> {
+        self.wal.table_schema(table)
+    }
+}
+
+/// Convert a `ScalarSchema` (the dataflow's typed schema) into a
+/// `SchemaDefinition` (the gRPC `Accepted` payload). PKs collapse to
+/// the first column — fine for aggregate output where `category_id`
+/// (or whatever the group key is) leads the row.
+fn schema_definition_from_plan(
+    plan: &palimpsest_dataflow::palimpsest::CompiledPlan,
+) -> SchemaDefinition {
+    let columns = plan
+        .output_schema
+        .columns()
+        .iter()
+        .map(|(name, ty)| ColumnSpec {
+            name: name.clone(),
+            datum_type: column_type_to_datum_type(*ty),
+            nullable: false,
+        })
+        .collect();
+    SchemaDefinition {
+        id: SchemaId::new(0),
+        columns,
+        primary_key_columns: vec![0],
+    }
+}
+
+fn column_type_to_datum_type(ty: ColumnType) -> DatumType {
+    match ty {
+        ColumnType::Bool => DatumType::Bool,
+        ColumnType::Int => DatumType::I64,
+        ColumnType::Float => DatumType::F64,
+        ColumnType::Text => DatumType::Text,
+        ColumnType::Timestamp => DatumType::Timestamp,
+        // `Unknown` is the catalog's "couldn't infer" type — picking
+        // Text is a defensive default that won't crash decoders that
+        // probe the schema.
+        ColumnType::Unknown => DatumType::Text,
+    }
 }
 
 fn check_limiter(limiter: &ConnectionLimiter) -> Option<(&'static str, &'static str)> {

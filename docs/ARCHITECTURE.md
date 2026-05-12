@@ -156,6 +156,8 @@ are documented in
 
 - [USER-GUIDE.md](USER-GUIDE.md) — how to author queries.
 - [OPERATOR-GUIDE.md](OPERATOR-GUIDE.md) — deploy and tune.
+- [DATABASE-MIGRATION-RESILIENCE.md](DATABASE-MIGRATION-RESILIENCE.md) —
+  design for schema changes and high-volume data backfills.
 - [PERMISSIONS.md](PERMISSIONS.md) — rule DSL.
 - [WASM-CLIENT.md](WASM-CLIENT.md) — browser quickstart.
 - [DESIGN.md](../DESIGN.md) — full design with phasing, open

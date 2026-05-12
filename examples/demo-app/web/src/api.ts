@@ -13,8 +13,40 @@ export interface Post {
   published: boolean;
 }
 
+export interface BulkAddEventsResponse {
+  inserted: number;
+  category_id: number;
+  total_rows: number;
+}
+
+export interface DemoUser {
+  id: string;
+  display_name: string;
+  is_admin: boolean;
+}
+
+export interface TokenResponse {
+  token: string;
+  user: DemoUser;
+}
+
 export class ApiClient {
   constructor(public readonly base = DEFAULT_API_URL) {}
+
+  async listUsers(): Promise<DemoUser[]> {
+    const res = await fetch(`${this.base}/api/users`);
+    if (!res.ok) throw new Error(`listUsers: ${res.status}`);
+    const body = (await res.json()) as { users: DemoUser[] };
+    return body.users;
+  }
+
+  async fetchToken(userId: string): Promise<TokenResponse> {
+    const res = await fetch(
+      `${this.base}/api/token?user=${encodeURIComponent(userId)}`,
+    );
+    if (!res.ok) throw new Error(`fetchToken(${userId}): ${res.status}`);
+    return (await res.json()) as TokenResponse;
+  }
 
   async createPost(title: string, published = true): Promise<Post> {
     const res = await fetch(`${this.base}/api/posts`, {
@@ -41,6 +73,24 @@ export class ApiClient {
       method: "DELETE",
     });
     if (!res.ok && res.status !== 404) throw new Error(`deletePost: ${res.status}`);
+  }
+
+  async bulkAddEvents(
+    categoryId: number,
+    count: number,
+    baseValue = 100,
+  ): Promise<BulkAddEventsResponse> {
+    const res = await fetch(`${this.base}/api/events/bulk-add`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        category_id: categoryId,
+        count,
+        base_value: baseValue,
+      }),
+    });
+    if (!res.ok) throw new Error(`bulkAddEvents: ${res.status}`);
+    return (await res.json()) as BulkAddEventsResponse;
   }
 }
 

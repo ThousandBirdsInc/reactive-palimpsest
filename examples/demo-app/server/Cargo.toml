@@ -45,6 +45,19 @@ prost        = "0.13"
 futures      = "0.3"
 tokio-stream = "0.1"
 
+# JWT minting for the user picker. The demo signs tokens locally with
+# an HMAC secret and `JwtAuthenticator` on the server side verifies
+# them — the same flow a real deployment would use, just with the
+# secret material baked into the binary instead of read from a vault.
+jsonwebtoken = "9"
+
+# Postgres: the demo's source of truth. The write API issues SQL
+# directly; a background consumer tails the logical replication slot
+# and feeds DecodedEvents into the in-memory mirror that the
+# WalRuntime exposes to Palimpsest.
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+bytes = "1"
+
 [lints.rust]
 unsafe_code = "forbid"
 

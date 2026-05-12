@@ -1,26 +1,40 @@
 //! Demo backend: an axum write API on :3000 and a Palimpsest gRPC-Web
-//! service on :50051, sharing one in-memory `posts` store.
+//! service on :50051, both driven by a Postgres logical-replication
+//! slot.
 //!
-//! The Rust side is a single-binary example of the production topology:
-//! one process owns the application's write surface *and* embeds
-//! Palimpsest as a library. The browser subscribes via gRPC-Web; the
-//! same browser session POSTs writes to the HTTP API.
+//! Topology (single binary, three concurrent tasks):
+//!
+//! 1. **Postgres consumer** — tails the `palimpsest_demo` slot,
+//!    decodes pgoutput frames, mirrors `posts` + `events` in-memory,
+//!    and appends to the per-table journals the WAL runtime cursor
+//!    consumes.
+//! 2. **Write API (axum)** — issues SQL through tokio-postgres;
+//!    Postgres writes the WAL, the consumer picks the changes up
+//!    after a ~100ms hop, and subscribers see them via the dataflow.
+//! 3. **gRPC-Web (Palimpsest)** — reads from the same in-memory
+//!    mirror via the `WalRuntime` trait. Permissions + dataflow
+//!    execution are unchanged from the in-memory demo.
 
 mod api;
+mod auth;
+mod db;
 mod state;
 mod ws;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use palimpsest_server::{AnonymousAuthenticator, Palimpsest};
+use palimpsest_permissions::{compile_rules, PermissionRule, UserContextSchema};
+use palimpsest_server::{JwtAuthenticator, Palimpsest};
+use palimpsest_sql::{Catalog, ColumnType};
+use palimpsest_wal::TableId;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::api::{router, AppState};
-use crate::state::{DemoWalRuntime, Post, Store};
+use crate::state::{DemoWalRuntime, EventStore, Store};
 
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:3000";
 const DEFAULT_GRPC_ADDR: &str = "0.0.0.0:50051";
@@ -34,32 +48,12 @@ fn addr_from_env(var: &str, default: &str) -> SocketAddr {
         .expect("valid SocketAddr")
 }
 
-fn seed_posts() -> Vec<Post> {
-    vec![
-        Post {
-            id: 1,
-            title: "Welcome to Palimpsest".to_owned(),
-            published: true,
-        },
-        Post {
-            id: 2,
-            title: "Subscribe to a live SQL view".to_owned(),
-            published: true,
-        },
-        Post {
-            id: 3,
-            title: "Draft: in-progress writeup".to_owned(),
-            published: false,
-        },
-    ]
-}
-
-/// Bare-bones `--healthcheck` shortcut so the Docker healthcheck doesn't
-/// need curl/wget in the runtime image. Probes the HTTP API and exits
-/// 0/1 based on a TCP connect.
+/// Bare-bones `--healthcheck` shortcut so the Docker healthcheck
+/// doesn't need curl/wget in the runtime image.
 async fn run_healthcheck() -> std::process::ExitCode {
     use tokio::io::AsyncWriteExt;
-    let target = std::env::var("HEALTHCHECK_TARGET").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
+    let target =
+        std::env::var("HEALTHCHECK_TARGET").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
     match tokio::net::TcpStream::connect(&target).await {
         Ok(mut stream) => {
             let _ = stream
@@ -88,14 +82,81 @@ async fn main() -> std::process::ExitCode {
         .with_target(false)
         .init();
 
-    let store = Arc::new(Store::with_seed(seed_posts()));
+    // -------------------------------------------------------------
+    // Postgres bootstrap: schema, publication, slot, seed, snapshot.
+    // Everything downstream depends on this being done before we
+    // start accepting subscribers.
+    // -------------------------------------------------------------
+    let pg = match db::bootstrap().await {
+        Ok(pg) => pg,
+        Err(err) => {
+            error!(%err, "postgres bootstrap failed");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    let posts_snapshot = match db::snapshot_posts(&pg.client).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            error!(%err, "posts snapshot failed");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let events_snapshot = match db::snapshot_events(&pg.client).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            error!(%err, "events snapshot failed");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    info!(
+        posts = posts_snapshot.len(),
+        events = events_snapshot.len(),
+        "initial snapshot loaded from postgres",
+    );
+
+    let store = Arc::new(Store::from_snapshot(posts_snapshot));
+    let event_store = Arc::new(EventStore::from_snapshot(events_snapshot));
+
+    // -------------------------------------------------------------
+    // Start consuming the replication slot. The consumer owns its
+    // own Postgres connection so the write client isn't blocked.
+    // -------------------------------------------------------------
+    let _consumer = db::spawn_consumer(
+        pg.settings.clone(),
+        pg.posts_oid,
+        pg.events_oid,
+        Arc::clone(&store),
+        Arc::clone(&event_store),
+    );
 
     let grpc_addr = addr_from_env("PALIMPSEST_DEMO_GRPC_ADDR", DEFAULT_GRPC_ADDR);
     let http_addr = addr_from_env("PALIMPSEST_DEMO_HTTP_ADDR", DEFAULT_HTTP_ADDR);
 
+    let user_schema = UserContextSchema::new([
+        ("id".to_owned(), ColumnType::Text),
+        ("is_admin".to_owned(), ColumnType::Bool),
+    ]);
+    let permission_rules = compile_rules(
+        &[PermissionRule::new(
+            "posts_visibility",
+            "posts",
+            "published = true OR $user.is_admin = true",
+        )],
+        &Catalog::demo(),
+        &user_schema,
+    )
+    .expect("compile permission rules");
+
     let palimpsest = Palimpsest::builder()
-        .with_wal(DemoWalRuntime::new(Arc::clone(&store)))
-        .with_auth(AnonymousAuthenticator)
+        .with_wal(DemoWalRuntime::new(
+            Arc::clone(&store),
+            Arc::clone(&event_store),
+            TableId::new(pg.posts_oid),
+            TableId::new(pg.events_oid),
+        ))
+        .with_auth(JwtAuthenticator::new(auth::jwt_auth_config()))
+        .with_permissions(permission_rules)
         .with_grpc_addr(grpc_addr)
         .with_metrics_addr(None)
         .build()
@@ -117,7 +178,9 @@ async fn main() -> std::process::ExitCode {
     });
 
     let http_state = AppState {
+        pg: Arc::clone(&pg.client),
         store: Arc::clone(&store),
+        events: Arc::clone(&event_store),
     };
     let http_handle = tokio::spawn(async move {
         info!(%http_addr, "write API listening");

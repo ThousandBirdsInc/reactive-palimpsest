@@ -1,68 +1,78 @@
-//! In-memory `posts` table plus a `WalRuntime` adapter that exposes
-//! that state to Palimpsest's snapshot path *and* a per-mutation
-//! journal that drives live diffs.
+//! In-memory mirror of the Postgres-backed `posts` + `events` tables,
+//! plus the `WalRuntime` adapter Palimpsest reads through.
 //!
-//! In a real deployment this is replaced by a Postgres logical-decoding
-//! runtime; for the demo we just hold rows in a `Mutex<Vec>`, bump a
-//! monotonic LSN counter on every write, and append `RawDiff` entries
-//! to a shared journal. The Palimpsest server spawns a per-subscription
-//! task that drains the journal via `open_cursor` and pumps batches
-//! into the router so every active subscription sees the change.
+//! Writes do **not** flow through here — HTTP handlers go straight
+//! to Postgres via tokio-postgres. The logical-replication consumer
+//! (see `db.rs`) tails the slot, decodes pgoutput frames into
+//! `DecodedEvent::Row { op, old, new }`, and pipes those into
+//! `Store::apply_*` / `EventStore::apply_*`. The mirror keeps the
+//! "current snapshot" in lock-step with the database, and the
+//! journal of `RawDiff`s drives the live-diff cursor the dataflow
+//! consumes.
+//!
+//! Two `Store` shapes (posts vs events) instead of one generic
+//! type so the row constructors stay tightly typed — the demo only
+//! needs these two surfaces and a generic event-keyed store would
+//! cost more in plumbing than it pays back in flexibility.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use palimpsest_dataflow::palimpsest::{Lsn, Row};
+use palimpsest_dataflow::palimpsest::eval::ScalarSchema;
+use palimpsest_dataflow::palimpsest::Lsn;
 use palimpsest_server::cursor::RawDiff;
 use palimpsest_server::snapshot::{SnapshotBatch, SnapshotTableRows};
 use palimpsest_server::subscription::{ColumnSpec, QueryId, SchemaDefinition, SchemaId};
 use palimpsest_server::wal_runtime::WalRuntime;
 use palimpsest_server::TraceCursor;
-use palimpsest_wal::{Datum, DatumType, TableId};
+use palimpsest_sql::ColumnType;
+use palimpsest_wal::{DatumType, TableId};
 use serde::Serialize;
-use smallvec::smallvec;
 
-/// Postgres-style relation id we report for the synthetic `posts` table.
-/// The actual value is irrelevant — palimpsest doesn't dereference it,
-/// it's just an opaque key on the snapshot side.
-const POSTS_TABLE_ID: u32 = 16384;
+use crate::db::{event_to_row, post_to_row};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Post {
     pub id: i64,
     pub title: String,
     pub published: bool,
 }
 
-impl Post {
-    /// Build the row vector palimpsest sees for this post. Column
-    /// order must match [`DemoWalRuntime::query_schema`].
-    fn to_row(&self) -> Row {
-        smallvec![
-            Datum::I64(self.id),
-            Datum::Text(self.title.clone().into_bytes().into()),
-            Datum::Bool(self.published),
-        ]
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Event {
+    pub id: i64,
+    pub category_id: i64,
+    pub value: i64,
+}
+
+// -----------------------------------------------------------------------------
+// Posts mirror — populated from `SELECT * FROM posts` on boot, then
+// updated by the replication consumer.
+// -----------------------------------------------------------------------------
+
+/// One row change to apply at a transaction boundary.
+#[derive(Debug, Clone)]
+pub enum PostChange {
+    Insert(Post),
+    Update { prev: Post, curr: Post },
+    Delete(Post),
 }
 
 pub struct Store {
     rows: Mutex<Vec<Post>>,
-    next_id: AtomicU64,
+    /// Monotonic clock the journal anchors on. Bumped once per
+    /// applied Postgres transaction (one Begin/Commit pair), so a
+    /// bulk INSERT that touches 1000 rows produces one cursor-pump
+    /// wakeup, not 1000. Deliberately not derived from Postgres LSN
+    /// (sparse, not contiguous).
     lsn: AtomicU64,
-    /// Append-only diff journal. Every mutation pushes one entry per
-    /// row delta (an update emits a -1 + +1 pair at the same LSN).
-    /// Grows unbounded for the demo — real deployments compact behind
-    /// the global ack watermark.
     journal: Arc<Mutex<Vec<RawDiff>>>,
 }
 
 impl Store {
-    pub fn with_seed(seed: Vec<Post>) -> Self {
-        let next_id = seed.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+    pub fn from_snapshot(snapshot: Vec<Post>) -> Self {
         Self {
-            rows: Mutex::new(seed),
-            next_id: AtomicU64::new(u64::try_from(next_id).unwrap_or(1)),
+            rows: Mutex::new(snapshot),
             lsn: AtomicU64::new(1),
             journal: Arc::new(Mutex::new(Vec::new())),
         }
@@ -84,139 +94,283 @@ impl Store {
         Arc::clone(&self.journal)
     }
 
-    fn record(&self, lsn: Lsn, row: Row, diff: i64) {
-        self.journal
-            .lock()
-            .expect("journal poisoned")
-            .push(RawDiff { row, lsn, diff });
-    }
-
-    pub fn create(&self, title: String, published: bool) -> Post {
-        let id = i64::try_from(self.next_id.fetch_add(1, Ordering::SeqCst))
-            .expect("id within i64 range");
-        let post = Post {
-            id,
-            title,
-            published,
-        };
-        self.rows.lock().expect("store poisoned").push(post.clone());
-        let lsn = self.bump_lsn();
-        self.record(lsn, post.to_row(), 1);
-        post
-    }
-
-    pub fn set_published(&self, id: i64, published: bool) -> Option<Post> {
-        let mut rows = self.rows.lock().expect("store poisoned");
-        let row = rows.iter_mut().find(|p| p.id == id)?;
-        let old = row.clone();
-        row.published = published;
-        let updated = row.clone();
-        drop(rows);
-        let lsn = self.bump_lsn();
-        // Update = retract old + assert new at the same LSN; the router
-        // pairs them into a `RowChange::Update` keyed by the primary
-        // key column(s).
-        self.record(lsn, old.to_row(), -1);
-        self.record(lsn, updated.to_row(), 1);
-        Some(updated)
-    }
-
-    pub fn delete(&self, id: i64) -> bool {
-        let mut rows = self.rows.lock().expect("store poisoned");
-        let removed = rows
-            .iter()
-            .position(|p| p.id == id)
-            .map(|idx| rows.remove(idx));
-        drop(rows);
-        match removed {
-            Some(post) => {
-                let lsn = self.bump_lsn();
-                self.record(lsn, post.to_row(), -1);
-                true
+    /// Apply every row change in a Postgres transaction at one LSN.
+    /// No-op if `changes` is empty so Begin/Commit pairs that don't
+    /// touch this table don't bump the journal.
+    pub fn apply_txn(&self, changes: &[PostChange]) {
+        if changes.is_empty() {
+            return;
+        }
+        {
+            let mut rows = self.rows.lock().expect("store poisoned");
+            for change in changes {
+                match change {
+                    PostChange::Insert(post) => rows.push(post.clone()),
+                    PostChange::Update { curr, .. } => {
+                        if let Some(slot) = rows.iter_mut().find(|p| p.id == curr.id) {
+                            *slot = curr.clone();
+                        }
+                    }
+                    PostChange::Delete(prev) => {
+                        if let Some(idx) = rows.iter().position(|p| p.id == prev.id) {
+                            rows.remove(idx);
+                        }
+                    }
+                }
             }
-            None => false,
+        }
+        let lsn = self.bump_lsn();
+        let mut journal = self.journal.lock().expect("journal poisoned");
+        for change in changes {
+            match change {
+                PostChange::Insert(post) => journal.push(RawDiff {
+                    row: post_to_row(post),
+                    lsn,
+                    diff: 1,
+                }),
+                PostChange::Update { prev, curr } => {
+                    journal.push(RawDiff {
+                        row: post_to_row(prev),
+                        lsn,
+                        diff: -1,
+                    });
+                    journal.push(RawDiff {
+                        row: post_to_row(curr),
+                        lsn,
+                        diff: 1,
+                    });
+                }
+                PostChange::Delete(prev) => journal.push(RawDiff {
+                    row: post_to_row(prev),
+                    lsn,
+                    diff: -1,
+                }),
+            }
         }
     }
 }
 
-/// `WalRuntime` adapter over [`Store`]. Returns the current rows as the
-/// snapshot for every query (the demo wires a single `SELECT … FROM
-/// posts` subscription on the frontend); reports a fixed three-column
-/// schema; and exposes the Store's journal as a [`JournalCursor`] so
-/// the server can stream live diffs.
+// -----------------------------------------------------------------------------
+// Events mirror — same shape as Store, different row type.
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum EventChange {
+    Insert(Event),
+    Update { prev: Event, curr: Event },
+    Delete(Event),
+}
+
+pub struct EventStore {
+    rows: Mutex<Vec<Event>>,
+    lsn: AtomicU64,
+    journal: Arc<Mutex<Vec<RawDiff>>>,
+}
+
+impl EventStore {
+    pub fn from_snapshot(snapshot: Vec<Event>) -> Self {
+        Self {
+            rows: Mutex::new(snapshot),
+            lsn: AtomicU64::new(1),
+            journal: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<Event> {
+        self.rows.lock().expect("events poisoned").clone()
+    }
+
+    pub fn current_lsn(&self) -> Lsn {
+        Lsn::new(self.lsn.load(Ordering::SeqCst))
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.rows.lock().expect("events poisoned").len()
+    }
+
+    fn bump_lsn(&self) -> Lsn {
+        Lsn::new(self.lsn.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    fn journal_handle(&self) -> Arc<Mutex<Vec<RawDiff>>> {
+        Arc::clone(&self.journal)
+    }
+
+    /// Apply all event-row changes in one Postgres transaction at a
+    /// single LSN. See `Store::apply_txn` for why batching matters.
+    pub fn apply_txn(&self, changes: &[EventChange]) {
+        if changes.is_empty() {
+            return;
+        }
+        {
+            let mut rows = self.rows.lock().expect("events poisoned");
+            for change in changes {
+                match change {
+                    EventChange::Insert(ev) => rows.push(ev.clone()),
+                    EventChange::Update { curr, .. } => {
+                        if let Some(slot) = rows.iter_mut().find(|e| e.id == curr.id) {
+                            *slot = curr.clone();
+                        }
+                    }
+                    EventChange::Delete(prev) => {
+                        if let Some(idx) = rows.iter().position(|e| e.id == prev.id) {
+                            rows.remove(idx);
+                        }
+                    }
+                }
+            }
+        }
+        let lsn = self.bump_lsn();
+        let mut journal = self.journal.lock().expect("events journal poisoned");
+        for change in changes {
+            match change {
+                EventChange::Insert(ev) => journal.push(RawDiff {
+                    row: event_to_row(ev),
+                    lsn,
+                    diff: 1,
+                }),
+                EventChange::Update { prev, curr } => {
+                    journal.push(RawDiff {
+                        row: event_to_row(prev),
+                        lsn,
+                        diff: -1,
+                    });
+                    journal.push(RawDiff {
+                        row: event_to_row(curr),
+                        lsn,
+                        diff: 1,
+                    });
+                }
+                EventChange::Delete(prev) => journal.push(RawDiff {
+                    row: event_to_row(prev),
+                    lsn,
+                    diff: -1,
+                }),
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Adapter that exposes both mirrors as a single `WalRuntime`.
+// -----------------------------------------------------------------------------
+
 pub struct DemoWalRuntime {
-    store: Arc<Store>,
+    posts: Arc<Store>,
+    events: Arc<EventStore>,
+    posts_table_id: TableId,
+    events_table_id: TableId,
 }
 
 impl DemoWalRuntime {
-    pub fn new(store: Arc<Store>) -> Self {
-        Self { store }
+    pub fn new(
+        posts: Arc<Store>,
+        events: Arc<EventStore>,
+        posts_table_id: TableId,
+        events_table_id: TableId,
+    ) -> Self {
+        Self {
+            posts,
+            events,
+            posts_table_id,
+            events_table_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Posts,
+    EventsAggregate,
+}
+
+/// Pick a target table from the SQL we packed into the QueryId.
+/// Anything referencing `events` lands on the events mirror; the
+/// rest go to posts. Case-insensitive.
+fn classify(query: &QueryId) -> Target {
+    let sql = query.as_str().to_ascii_lowercase();
+    if sql.contains("from events") {
+        Target::EventsAggregate
+    } else {
+        Target::Posts
     }
 }
 
 impl WalRuntime for DemoWalRuntime {
-    fn fetch_snapshot(&self, _query: &QueryId) -> Result<SnapshotBatch, String> {
-        let posts = self.store.snapshot();
-        let rows = posts
-            .into_iter()
-            .map(|post| post.to_row())
-            .collect();
-        Ok(SnapshotBatch {
-            snapshot_lsn: self.store.current_lsn(),
-            rows: vec![SnapshotTableRows {
-                table: TableId::new(POSTS_TABLE_ID),
-                rows,
-            }],
-        })
+    fn fetch_snapshot(&self, query: &QueryId) -> Result<SnapshotBatch, String> {
+        match classify(query) {
+            Target::Posts => {
+                let rows = self.posts.snapshot().iter().map(post_to_row).collect();
+                Ok(SnapshotBatch {
+                    snapshot_lsn: self.posts.current_lsn(),
+                    rows: vec![SnapshotTableRows {
+                        table: self.posts_table_id,
+                        rows,
+                    }],
+                })
+            }
+            Target::EventsAggregate => {
+                let rows = self.events.snapshot().iter().map(event_to_row).collect();
+                Ok(SnapshotBatch {
+                    snapshot_lsn: self.events.current_lsn(),
+                    rows: vec![SnapshotTableRows {
+                        table: self.events_table_id,
+                        rows,
+                    }],
+                })
+            }
+        }
     }
 
-    fn query_schema(&self, _query: &QueryId) -> Result<SchemaDefinition, String> {
+    fn query_schema(&self, query: &QueryId) -> Result<SchemaDefinition, String> {
         Ok(SchemaDefinition {
-            id: SchemaId::new(0), // overwritten by the router
-            columns: vec![
-                ColumnSpec {
-                    name: "id".to_owned(),
-                    datum_type: DatumType::I64,
-                    nullable: false,
-                },
-                ColumnSpec {
-                    name: "title".to_owned(),
-                    datum_type: DatumType::Text,
-                    nullable: false,
-                },
-                ColumnSpec {
-                    name: "published".to_owned(),
-                    datum_type: DatumType::Bool,
-                    nullable: false,
-                },
-            ],
+            id: SchemaId::new(0),
+            columns: schema_for(query),
             primary_key_columns: vec![0],
         })
     }
 
     fn open_cursor(
         &self,
-        _query: &QueryId,
+        query: &QueryId,
         from_lsn: Lsn,
     ) -> Result<Box<dyn TraceCursor + Send>, String> {
-        // The cursor is anchored by LSN, not by index, so a write that
-        // landed between `fetch_snapshot` returning and us reading the
-        // journal is handled correctly — its entry has lsn > from_lsn
-        // and gets re-emitted as a live diff. Entries already covered
-        // by the snapshot (lsn ≤ from_lsn) are skipped.
+        let journal = match classify(query) {
+            Target::Posts => self.posts.journal_handle(),
+            Target::EventsAggregate => self.events.journal_handle(),
+        };
         Ok(Box::new(JournalCursor {
-            journal: self.store.journal_handle(),
+            journal,
             next_index: 0,
             from_lsn,
         }))
     }
+
+    fn table_schema(&self, table: &str) -> Option<(TableId, ScalarSchema)> {
+        match table {
+            "posts" => Some((
+                self.posts_table_id,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("title".to_owned(), ColumnType::Text),
+                    ("published".to_owned(), ColumnType::Bool),
+                ]),
+            )),
+            "events" => Some((
+                self.events_table_id,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("category_id".to_owned(), ColumnType::Int),
+                    ("value".to_owned(), ColumnType::Int),
+                ]),
+            )),
+            _ => None,
+        }
+    }
 }
 
-/// Live cursor over [`Store`]'s diff journal.
-///
-/// Holds a shared handle to the journal vector plus a per-cursor read
-/// index. `next_diff` skips entries with `lsn <= from_lsn` so the
-/// initial snapshot isn't re-emitted as diffs.
+/// Cursor over a per-table diff journal. Anchored by LSN so a
+/// write that races `fetch_snapshot` re-surfaces as a live diff.
 struct JournalCursor {
     journal: Arc<Mutex<Vec<RawDiff>>>,
     next_index: usize,
@@ -245,5 +399,49 @@ impl TraceCursor for JournalCursor {
             idx += 1;
         }
         None
+    }
+}
+
+/// Per-target output column schema. Matches what
+/// `WalRuntime::query_schema` advertises in the gRPC `Accepted`
+/// payload — though for compiled aggregate queries the dataflow's
+/// `CompiledPlan::output_schema` overrides this in
+/// `palimpsest_server::handle_subscribe`.
+fn schema_for(query: &QueryId) -> Vec<ColumnSpec> {
+    match classify(query) {
+        Target::Posts => vec![
+            ColumnSpec {
+                name: "id".to_owned(),
+                datum_type: DatumType::I64,
+                nullable: false,
+            },
+            ColumnSpec {
+                name: "title".to_owned(),
+                datum_type: DatumType::Text,
+                nullable: false,
+            },
+            ColumnSpec {
+                name: "published".to_owned(),
+                datum_type: DatumType::Bool,
+                nullable: false,
+            },
+        ],
+        Target::EventsAggregate => vec![
+            ColumnSpec {
+                name: "id".to_owned(),
+                datum_type: DatumType::I64,
+                nullable: false,
+            },
+            ColumnSpec {
+                name: "category_id".to_owned(),
+                datum_type: DatumType::I64,
+                nullable: false,
+            },
+            ColumnSpec {
+                name: "value".to_owned(),
+                datum_type: DatumType::I64,
+                nullable: false,
+            },
+        ],
     }
 }

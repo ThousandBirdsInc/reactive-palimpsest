@@ -19,8 +19,9 @@
 use std::net::SocketAddr;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::IntoResponse;
+use serde::Deserialize;
 use futures::{SinkExt, StreamExt};
 use palimpsest_proto::palimpsest::sync::v1::sync_engine_client::SyncEngineClient;
 use palimpsest_proto::palimpsest::sync::v1::{ClientMessage, ServerMessage};
@@ -42,16 +43,27 @@ pub struct WsState {
     pub grpc_addr: SocketAddr,
 }
 
+/// Query parameters accepted on the WS upgrade URL. Today this is
+/// just `?token=<jwt>`; browsers can't set `Authorization` headers on
+/// a WebSocket handshake, so we accept the token in the URL and
+/// forward it as gRPC metadata on the inner subscribe.
+#[derive(Deserialize, Default)]
+pub struct WsQuery {
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
 /// Axum handler: upgrade an HTTP request to a WebSocket, then run the
 /// bridge for the lifetime of the connection.
 pub async fn ws_subscribe(
     State(state): State<WsState>,
+    Query(q): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle(state, socket))
+    ws.on_upgrade(move |socket| handle(state, q.token, socket))
 }
 
-async fn handle(state: WsState, socket: WebSocket) {
+async fn handle(state: WsState, token: Option<String>, socket: WebSocket) {
     let url = format!("http://{}", state.grpc_addr);
     let endpoint = match tonic::transport::Endpoint::from_shared(url.clone()) {
         Ok(e) => e,
@@ -69,22 +81,65 @@ async fn handle(state: WsState, socket: WebSocket) {
     };
     let client = SyncEngineClient::new(channel);
 
-    if let Err(err) = run(client, socket).await {
+    if let Err(err) = run(client, token, socket).await {
         debug!(?err, "ws bridge: session ended");
     }
 }
 
+/// WS close codes the bridge sends so the wasm client can classify
+/// failure modes (auth vs transient). Values per RFC 6455 §7.4.
+const CLOSE_POLICY_VIOLATION: u16 = 1008;
+
 async fn run(
     mut client: SyncEngineClient<Channel>,
+    token: Option<String>,
     socket: WebSocket,
 ) -> Result<(), BridgeError> {
     let (mut ws_sink, mut ws_stream) = socket.split();
     let (out_tx, out_rx) = mpsc::channel::<ClientMessage>(OUTBOUND_CAPACITY);
 
-    let response = client
-        .subscribe(tonic::Request::new(ReceiverStream::new(out_rx)))
-        .await
-        .map_err(BridgeError::GrpcCall)?;
+    // Forward the browser's bearer token (received via `?token=` on
+    // the WS upgrade URL) as gRPC `Authorization` metadata so the
+    // SyncEngine's `JwtAuthenticator` can verify it on the inbound
+    // side. No token → anonymous gRPC call → server rejects with
+    // Unauthenticated (which is the right behaviour now that the
+    // demo configures JWT auth).
+    let mut request = tonic::Request::new(ReceiverStream::new(out_rx));
+    if let Some(token) = token {
+        match format!("Bearer {token}").parse() {
+            Ok(value) => {
+                request.metadata_mut().insert("authorization", value);
+            }
+            Err(err) => {
+                warn!(?err, "ws bridge: token rejected by tonic metadata");
+                return Err(BridgeError::GrpcCall(tonic::Status::unauthenticated(
+                    "invalid token",
+                )));
+            }
+        }
+    }
+
+    let response = match client.subscribe(request).await {
+        Ok(response) => response,
+        Err(status) => {
+            // Auth failures need to be visible to the client as a
+            // distinct WS close code so its reconnect logic doesn't
+            // treat them like a transient network hiccup and retry
+            // forever. Other gRPC errors are bubbled up as
+            // `BridgeError::GrpcCall` for the caller's debug log.
+            if matches!(
+                status.code(),
+                tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+            ) {
+                let close = axum::extract::ws::CloseFrame {
+                    code: CLOSE_POLICY_VIOLATION,
+                    reason: status.message().to_owned().into(),
+                };
+                let _ = ws_sink.send(Message::Close(Some(close))).await;
+            }
+            return Err(BridgeError::GrpcCall(status));
+        }
+    };
     let mut grpc_stream = response.into_inner();
     info!("ws bridge: subscribe stream opened");
 

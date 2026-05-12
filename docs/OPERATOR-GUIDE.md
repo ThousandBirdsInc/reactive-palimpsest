@@ -166,6 +166,8 @@ without a sharing dimension).
 
 - [`RUNBOOK.md`](RUNBOOK.md) covers slot stuck, channel saturation,
   client-side resync storms.
+- [`DATABASE-MIGRATION-RESILIENCE.md`](DATABASE-MIGRATION-RESILIENCE.md)
+  covers planned DDL and high-volume data backfills.
 - [`SECURITY-PROCESS.md`](SECURITY-PROCESS.md) covers vuln intake and
   the weekly RustSec sweep.
 - [`THREAT-MODEL.md`](THREAT-MODEL.md) covers the threat surface.

@@ -14,8 +14,9 @@
 //! traffic without an upstream Postgres. The CLI uses it for dev mode
 //! and the integration tests use it to drive the gRPC bidi loop.
 
+use palimpsest_dataflow::palimpsest::eval::ScalarSchema;
 use palimpsest_dataflow::palimpsest::Lsn;
-use palimpsest_wal::DatumType;
+use palimpsest_wal::{DatumType, TableId};
 
 use crate::cursor::{TraceCursor, VecCursor};
 use crate::snapshot::{SnapshotBatch, SnapshotProvider};
@@ -51,6 +52,14 @@ pub trait WalRuntime: Send + Sync + 'static {
         query: &QueryId,
         from_lsn: Lsn,
     ) -> Result<Box<dyn TraceCursor + Send>, String>;
+
+    /// Resolve `table` to its `(TableId, ScalarSchema)` pair. Used by
+    /// the MIR compiler to bind `BaseTable` nodes to typed inputs.
+    /// Default returns `None`, which preserves the legacy raw-row
+    /// path for runtimes that don't yet expose typed table schemas.
+    fn table_schema(&self, _table: &str) -> Option<(TableId, ScalarSchema)> {
+        None
+    }
 }
 
 /// Bridge that lets a [`WalRuntime`] satisfy the

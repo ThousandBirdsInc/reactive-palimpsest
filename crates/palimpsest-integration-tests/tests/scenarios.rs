@@ -103,6 +103,7 @@ fn subscribe<P: SnapshotProvider + ?Sized>(
                 user_ctx,
                 schema: schema(),
                 resume_lsn: None,
+                compiled_plan: None,
             },
             provider,
         )

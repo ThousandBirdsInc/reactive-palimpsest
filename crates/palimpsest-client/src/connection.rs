@@ -213,6 +213,21 @@ impl ConnectionTask {
                     match msg {
                         Some(Ok(server_msg)) => self.dispatch_server(server_msg).await,
                         Some(Err(status)) => {
+                            // Auth failures should NOT trigger
+                            // exponential-backoff reconnects — the
+                            // token isn't going to become valid by
+                            // itself, and the wasm transport would
+                            // otherwise hammer the bridge forever.
+                            // Tear all subscriptions down with the
+                            // auth status so callers see the cause.
+                            if matches!(
+                                status.code(),
+                                tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+                            ) {
+                                warn!(?status, "stream auth failure; shutting down");
+                                self.fail_all(&ClientError::Grpc(status));
+                                return RunOutcome::Shutdown;
+                            }
                             warn!(?status, "stream error; reconnecting");
                             return RunOutcome::Reconnect;
                         }
