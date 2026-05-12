@@ -1,0 +1,1 @@
+SELECT tenant_id, COUNT(*) FROM invoices GROUP BY tenant_id

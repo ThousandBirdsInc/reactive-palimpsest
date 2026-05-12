@@ -1,0 +1,19 @@
+---
+source: crates/palimpsest-permissions/tests/snapshots.rs
+expression: "render(&rules,\n\"SELECT posts.id\n             FROM posts JOIN authors ON posts.author_id = authors.id\",\n&alice(),)"
+---
+rules:
+  - name=posts_owner table=posts mode=Both predicate=author_id = $user.id
+  - name=authors_self table=authors mode=Both predicate=id = $user.id
+
+query:
+  SELECT posts.id
+             FROM posts JOIN authors ON posts.author_id = authors.id
+
+canonical_before:
+  project:posts.id[input:join:Inner:[(ColumnRef { relation: Some("posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input:base:authors:[][],input:base:posts:[][]]]
+
+canonical_after:
+  project:posts.id[input:join:Inner:[(ColumnRef { relation: Some("posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input:filter:id = 42[input:base:authors:[][]],input:filter:author_id = 42[input:base:posts:[][]]]]
+
+stats: RewriteStats { base_tables_visited: 2, filters_inserted: 2, rules_elided: 0 }

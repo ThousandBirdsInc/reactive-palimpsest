@@ -1,6 +1,11 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Errors surfaced by the WAL ingest path. Variants are direct mirrors
+//! of underlying I/O / decode failures.
+
+#![allow(missing_docs)]
+
 use std::{io, num::ParseIntError, str::Utf8Error};
 
 use thiserror::Error;

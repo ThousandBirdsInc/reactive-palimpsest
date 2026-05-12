@@ -1,6 +1,11 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Replication-stream consumer: connects to Postgres, owns the
+//! `START_REPLICATION` cursor, and yields decoded events upstream.
+
+#![allow(missing_docs)]
+
 use std::{
     collections::VecDeque,
     fs,

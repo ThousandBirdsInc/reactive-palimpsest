@@ -1,0 +1,7 @@
+[
+  {"typname": "bool", "typtype": "b", "typcategory": "B"},
+  {"typname": "int4", "typtype": "b", "typcategory": "N"},
+  {"typname": "int8", "typtype": "b", "typcategory": "N"},
+  {"typname": "text", "typtype": "b", "typcategory": "S"},
+  {"typname": "timestamptz", "typtype": "b", "typcategory": "D"}
+]

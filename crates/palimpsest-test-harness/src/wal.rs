@@ -1,6 +1,10 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Synthetic WAL event generator used by the Postgres-free test harness.
+
+#![allow(missing_docs)]
+
 use std::collections::{BTreeMap, HashSet};
 
 use bytes::{BufMut, Bytes, BytesMut};

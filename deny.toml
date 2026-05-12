@@ -10,7 +10,15 @@ confidence-threshold = 0.8
 
 [advisories]
 version = 2
+# Vulnerabilities and unmaintained crates are hard failures; the CI
+# job (`.github/workflows/ci.yml::deny`) blocks merges on either.
 yanked = "deny"
+# `ignore` is intentionally empty: every advisory we know about must be
+# fixed (or the dependency replaced), not silenced. If you genuinely
+# need to grant a temporary exception, list the RUSTSEC id here with a
+# short justification *and* an expiry comment, and open a tracking
+# issue.
+ignore = []
 
 [bans]
 multiple-versions = "warn"

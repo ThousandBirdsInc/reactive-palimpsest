@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 #![doc = "Postgres-free test harness pieces for Palimpsest."]
+#![warn(missing_docs)]
 
 pub mod harness;
 pub mod mock_postgres;

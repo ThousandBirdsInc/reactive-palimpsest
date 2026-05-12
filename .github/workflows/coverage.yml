@@ -1,0 +1,67 @@
+name: coverage
+
+# Tracks per-crate line + branch coverage across the workspace and
+# uploads results so PRs can show deltas. The numeric target lives in
+# `xtask check-coverage` so it is enforced both locally and in CI.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  llvm-cov:
+    name: cargo-llvm-cov
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-cov-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-cov-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ubuntu-stable-cov-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-cov-target-
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run coverage
+        run: |
+          cargo llvm-cov --workspace \
+            --exclude palimpsest-client-js \
+            --lcov --output-path lcov.info \
+            --ignore-filename-regex 'crates/palimpsest-proto/src/generated' \
+            --branch
+
+      - name: Enforce coverage budget
+        run: cargo run -p xtask -- check-coverage --lcov lcov.info
+
+      - name: Upload to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false

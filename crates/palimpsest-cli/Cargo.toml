@@ -1,0 +1,35 @@
+[package]
+name = "palimpsest-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Standalone CLI that runs the embedded Palimpsest server."
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "palimpsest"
+path = "src/main.rs"
+
+[features]
+default = []
+slot-info = ["dep:tokio-postgres"]
+
+[dependencies]
+palimpsest-permissions = { path = "../palimpsest-permissions" }
+palimpsest-server = { path = "../palimpsest-server" }
+palimpsest-sql = { path = "../palimpsest-sql" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tokio-postgres = { version = "0.7", optional = true, default-features = false, features = ["runtime"] }
+toml.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

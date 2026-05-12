@@ -1,0 +1,13 @@
+apiVersion: v2
+name: palimpsest
+description: Postgres WAL-backed live query sync engine
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - postgres
+  - live-query
+  - sync
+maintainers:
+  - name: Thousand Birds
+    email: colton@thousandbirds.ai

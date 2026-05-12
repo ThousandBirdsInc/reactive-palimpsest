@@ -1,6 +1,9 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Statement normalization (alias removal, catalog binding) used by
+//! the canonical-form / dedup paths.
+
 use std::collections::BTreeMap;
 
 use sqlparser::ast::{
@@ -35,11 +38,22 @@ struct NormalizeContext {
     ctes: BTreeMap<String, QueryShape>,
 }
 
+/// Parses `sql` and returns a normalized statement (alias removal,
+/// catalog-driven type binding) suitable for stable canonical-form
+/// comparisons.
+///
+/// # Errors
+/// Surfaces parse, validation, and normalization errors.
 pub fn parse_and_normalize(sql: &str, catalog: &Catalog) -> Result<Statement, SqlError> {
     let statement = parse_select(sql)?;
     normalize_statement(&statement, catalog)
 }
 
+/// Normalizes an already-parsed `Statement` against `catalog`.
+///
+/// # Errors
+/// [`SqlError::UnsupportedStatement`] on non-`SELECT` input, or any
+/// catalog-validation error.
 pub fn normalize_statement(
     statement: &Statement,
     catalog: &Catalog,
@@ -53,6 +67,11 @@ pub fn normalize_statement(
     Ok(Statement::Query(query))
 }
 
+/// Convenience wrapper: normalizes `statement` against `catalog`
+/// purely for the side-effect of catalog validation.
+///
+/// # Errors
+/// As [`normalize_statement`].
 pub fn validate_statement_against_catalog(
     statement: &Statement,
     catalog: &Catalog,

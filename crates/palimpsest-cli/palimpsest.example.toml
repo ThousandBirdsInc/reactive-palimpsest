@@ -1,0 +1,33 @@
+# Example palimpsest-cli configuration. Copy to `palimpsest.toml`
+# (or pass as the first CLI argument) and adapt as needed.
+
+[grpc]
+addr = "0.0.0.0:50051"
+
+[metrics]
+addr = "127.0.0.1:9090"
+
+[auth]
+kind = "anonymous"
+# kind = "jwt"
+# secret = "super-secret"
+# issuer = "palimpsest"
+# audience = "clients"
+# [auth.claim_to_field]
+# sub = "id"
+# org = "org_id"
+
+[permissions.user_schema]
+# id = "int"
+
+# [[permissions.rules]]
+# name = "posts_owner"
+# table = "posts"
+# predicate = "author_id = $user.id"
+
+# Optional upstream Postgres connection. Required for `slot-info` and
+# (later) for the real WAL runtime.
+# [upstream]
+# url = "postgres://palimpsest:secret@localhost:5432/app"
+# slot_name = "palimpsest"
+# publication = "palimpsest_pub"

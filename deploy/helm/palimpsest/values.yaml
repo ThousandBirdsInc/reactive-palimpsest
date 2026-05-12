@@ -1,0 +1,54 @@
+# Default values for palimpsest.
+# Skeleton chart (§18.14, post-v1 polish target). Adapt to your cluster.
+
+image:
+  repository: ghcr.io/thousandbirds/palimpsest
+  tag: ""  # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  grpcPort: 50051
+  metricsPort: 9090
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# Inline TOML config. Reference fields exactly as documented in
+# crates/palimpsest-cli/palimpsest.example.toml.
+config: |
+  [grpc]
+  addr = "0.0.0.0:50051"
+
+  [metrics]
+  addr = "0.0.0.0:9090"
+
+  [auth]
+  kind = "anonymous"
+
+# Liveness/readiness use the metrics sidecar's /healthz and /readyz
+# endpoints (see palimpsest-server::metrics_endpoint).
+probes:
+  enabled: true
+  livenessPath: /healthz
+  readinessPath: /readyz
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

@@ -1,6 +1,8 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! SQL parsing entry points (Postgres dialect).
+
 use core::ops::ControlFlow;
 
 use sqlparser::{
@@ -12,9 +14,26 @@ use sqlparser::{
     parser::Parser,
 };
 
-use crate::SqlError;
+use crate::{limits::enforce_input_size, QueryLimits, SqlError};
 
+/// Parses a single `SELECT` statement under the default
+/// [`QueryLimits`].
+///
+/// # Errors
+/// Returns [`SqlError`] if the input fails parsing, validation, or
+/// size limits.
 pub fn parse_select(sql: &str) -> Result<Statement, SqlError> {
+    parse_select_with_limits(sql, QueryLimits::DEFAULT)
+}
+
+/// Like [`parse_select`] but with a caller-supplied [`QueryLimits`].
+///
+/// # Errors
+/// Returns [`SqlError::QueryTooLarge`] before invoking the parser if
+/// the input exceeds `limits.max_input_bytes`; otherwise propagates
+/// any parse / validation error.
+pub fn parse_select_with_limits(sql: &str, limits: QueryLimits) -> Result<Statement, SqlError> {
+    enforce_input_size(sql, limits)?;
     let dialect = PostgreSqlDialect {};
     let mut statements = Parser::parse_sql(&dialect, sql)?;
 
@@ -31,6 +50,12 @@ pub fn parse_select(sql: &str) -> Result<Statement, SqlError> {
     Ok(statement)
 }
 
+/// Walks a parsed query tree and rejects features outside the v1
+/// supported surface (recursive CTEs, ORDER BY without LIMIT, etc).
+///
+/// # Errors
+/// Returns [`SqlError::UnsupportedFeature`] (or related variants) on
+/// the first construct that lies outside the supported surface.
 pub fn validate_query(query: &Query) -> Result<(), SqlError> {
     if let Some(with) = &query.with {
         if with.recursive {
@@ -42,9 +67,11 @@ pub fn validate_query(query: &Query) -> Result<(), SqlError> {
         }
     }
 
-    if query.order_by.is_some() && query.limit.is_none() {
-        return Err(SqlError::UnsupportedFeature("ORDER BY without LIMIT"));
-    }
+    // ORDER BY without LIMIT is allowed: the lowerer plans it as a
+    // `TopK` with `limit = usize::MAX`, i.e. "sort the whole result
+    // set." Cheap for the small result-sets typical of live
+    // subscriptions; the QueryLimits node-count budget is the real
+    // ceiling on how big a sort the server will accept.
 
     validate_expression_surface(query)?;
     validate_set_expr(&query.body)
@@ -190,11 +217,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_order_by_without_limit() {
-        let err = parse_select("SELECT id FROM posts ORDER BY created_at")
-            .expect_err("unbounded ordering should be rejected");
-
-        assert!(err.to_string().contains("ORDER BY without LIMIT"));
+    fn accepts_order_by_without_limit() {
+        // Lowered as TopK { limit: usize::MAX } — "sort the whole
+        // result set." See `lower.rs::lower_query_with_context`.
+        parse_select("SELECT id FROM posts ORDER BY created_at")
+            .expect("ORDER BY without LIMIT is supported");
     }
 
     #[test]

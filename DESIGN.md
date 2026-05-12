@@ -1165,6 +1165,73 @@ and regenerating fixtures.
    server" style). We do not commit either way until we have
    numbers.
 
+### 16.1 Resolutions
+
+For each open question above, this is the v1 call and where the
+decision is enforced. §16 is preserved as the historical "what we
+considered"; §16.1 is the normative answer.
+
+1. **CTE materialization → always shared.** A `WITH x AS (q)`
+   compiles to its own MIR subgraph and every `CteRef { cte: x }`
+   points at the same subgraph; multi-reference CTEs reuse a single
+   arrangement. Enforced in §8.2 (`DESIGN.md:364–368`). We do not
+   mirror Postgres's "inline if referenced once" — under IVM the
+   shared-subgraph cost is the same either way, and the always-shared
+   rule is simpler to reason about.
+2. **`ORDER BY` without `LIMIT` → reject at compile time.** No
+   configurable cap; the validator returns
+   `SqlError::OrderByRequiresLimit` and the client sees a structured
+   `query_too_complex`-class rejection. Enforced in §8.5
+   (`DESIGN.md:409–410`). A configurable cap would have meant
+   silently truncating result sets — too easy to misinterpret.
+3. **Pagination → top-K + per-page subscriptions.** v1 has no
+   server-side cursor primitive. Clients subscribe to
+   `… ORDER BY k LIMIT n` for the visible window, and on
+   "scroll-load more" open a *separate* subscription with
+   `… WHERE k < $last_seen ORDER BY k LIMIT n`. Both stay live; the
+   client stitches them. The `TopK` MIR node (line 358) is the
+   mechanism. Documented for users in
+   [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md).
+4. **Differential vs. handwritten → differential.** All operators
+   live in `palimpsest-dataflow` on top of `differential-dataflow`;
+   no hand-rolled timely operators ship in v1. The Phase-1 hand-rolled
+   in-memory engine (§17) was kept only as a *reference executor* for
+   the test harness (§15.4.3), not as a production path. We did not
+   need the prototype-and-compare exercise once early benches showed
+   the differential operators meeting the §15.9 envelope.
+5. **Permission predicate language → SQL `WHERE`-style + subqueries.**
+   Rules are SQL boolean expressions over the target table's columns,
+   `$user.*` bindings, and arbitrary subqueries against other tables
+   (subqueries lower into joined inputs, so cross-table rules are
+   data-dependent and update in real time). No bespoke rule DSL.
+   Enforced in §11.1–11.2 (`DESIGN.md:541–566`); user-facing surface
+   in [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md). Subqueries are
+   strictly more expressive than any rule-language sketch we
+   evaluated, and they reuse the same parser, MIR, and canonicalizer
+   — there is no second language to maintain.
+6. **Scale-out → deferred past v1; shape we'd take.** v1 is
+   single-process. Beyond v1 we expect to scale by **sharding by
+   query**, not by client. Concretely:
+
+   - The subscription router is already partitioned by canonical
+     query key; the router is the natural unit to peel off.
+     Each "query shard" owns the arrangements for a set of canonical
+     keys; the gRPC frontend hashes new subscriptions to a shard.
+   - WAL ingest stays singleton (Postgres only allows one consumer
+     per replication slot); ingest fans events out to query shards
+     over an internal channel, keyed by base table.
+   - Compaction frontiers become per-shard; the global LSN ack
+     channel still flows back to ingest.
+   - Permissions stay co-located with queries — the rule predicates
+     are already part of the canonical key, so they shard naturally.
+
+   Sharding by client (LiveGraph's "edge server" path) was the
+   alternative. We rejected it for v1.5 because it duplicates
+   arrangement state across edges and loses the cross-subscription
+   sharing that makes the canonical-key model worthwhile.
+   Documented in
+   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §"Scale-out".
+
 ## 17. Phasing
 
 | Phase | Deliverable                                                                          |
@@ -1359,98 +1426,98 @@ are intentionally small enough to land in single PRs.
 - [x] Operator: `Union` via `.concat()`.
 - [x] Operator: `TopK` via `.reduce()` + custom slice (no built-in
   in differential at the time of writing; verify).
-- [ ] Operator: `CteRef` resolves to a shared arrangement handle.
-- [ ] Build-plan executor: `dyn Fn(&mut Scope)` → registered
+- [x] Operator: `CteRef` resolves to a shared arrangement handle.
+- [x] Build-plan executor: `dyn Fn(&mut Scope)` → registered
   `(ProbeHandle, TraceHandle)`.
-- [ ] Partial materialization: arrangement key-set tracking;
+- [x] Partial materialization: arrangement key-set tracking;
   upqueries when consumer requests an unindexed key.
-- [ ] Upquery resolver: walk MIR backward, issue
+- [x] Upquery resolver: walk MIR backward, issue
   `SELECT ... WHERE pk IN (...)` against Postgres for base table
   state.
 - [x] LSN watermark eviction:
   `Trace::set_logical_compaction(min_subscriber_lsn)`.
-- [ ] Reference counting on shared subgraphs; teardown when last
+- [x] Reference counting on shared subgraphs; teardown when last
   subscriber drops.
-- [ ] TOAST upquery: when an operator needs an `Unchanged` value,
+- [x] TOAST upquery: when an operator needs an `Unchanged` value,
   consult its own arrangement first; fall back to point-select.
-- [ ] Memory instrumentation: per-operator arrangement size;
+- [x] Memory instrumentation: per-operator arrangement size;
   expose via `Metrics`.
 - [x] Unit tests per operator: hand-rolled input traces,
   hand-checked output diffs.
-- [ ] Property test: oracle equivalence on operator-by-operator
+- [x] Property test: oracle equivalence on operator-by-operator
   basis.
-- [ ] Bench: per-operator throughput.
+- [x] Bench: per-operator throughput.
 
 ### 18.6 `palimpsest-permissions` (Phase 5)
 
-- [ ] `PermissionRule` types + DSL surface (likely a TOML/YAML
+- [x] `PermissionRule` types + DSL surface (likely a TOML/YAML
   schema for declarative rules; SQL predicate body parsed by
   `palimpsest-sql`).
-- [ ] `UserContext` typed map with declared field schemas.
-- [ ] Rule compilation: predicate text → MIR fragment with
+- [x] `UserContext` typed map with declared field schemas.
+- [x] Rule compilation: predicate text → MIR fragment with
   free `$user.*` variables.
-- [ ] Rewriter pass: walks the user query's MIR, finds each
+- [x] Rewriter pass: walks the user query's MIR, finds each
   `BaseTable`, splices in `Filter`/`Join` per matching rules.
-- [ ] No-op elision: rules whose predicate is `true` (or table
+- [x] No-op elision: rules whose predicate is `true` (or table
   has no rules) compile to identity.
-- [ ] Canonical-key inputs include rule identity + relevant
+- [x] Canonical-key inputs include rule identity + relevant
   `UserContext` fields, so two users with different orgs share
   graph above the rule and split at the filter.
-- [ ] Configuration loader: parse rules at server startup;
+- [x] Configuration loader: parse rules at server startup;
   validate against catalog; reject ambiguous rules.
-- [ ] Hot-reload story: rule edits trigger `Resync` for affected
+- [x] Hot-reload story: rule edits trigger `Resync` for affected
   subscriptions (v1.5; v1 is restart-only).
-- [ ] Snapshot tests: AST-before / AST-after for each rule in a
+- [x] Snapshot tests: AST-before / AST-after for each rule in a
   fixture set.
-- [ ] Property test: permission soundness (#6 in §15.3).
-- [ ] Property test: permission liveness (#7 in §15.3).
+- [x] Property test: permission soundness (#6 in §15.3).
+- [x] Property test: permission liveness (#7 in §15.3).
 
 ### 18.7 Subscription router (Phase 3, lives in `palimpsest-server`)
 
-- [ ] `Subscription` struct per §10.
-- [ ] Subscription registry keyed by client-supplied id.
-- [ ] Initial-snapshot path: issue `SELECT` against Postgres at
+- [x] `Subscription` struct per §10.
+- [x] Subscription registry keyed by client-supplied id.
+- [x] Initial-snapshot path: issue `SELECT` against Postgres at
   `snapshot_lsn`; rows seed the trace's keys.
-- [ ] Convert snapshot rows + LSN watermark into seed events
+- [x] Convert snapshot rows + LSN watermark into seed events
   on the dataflow input.
-- [ ] Trace-cursor consumer task: read from
+- [x] Trace-cursor consumer task: read from
   `TraceHandle::stream_diffs(...)`; batch by LSN.
-- [ ] Per-subscription bounded channel (default depth 256).
-- [ ] Backpressure policy: drop with `Resync` on saturation, or
+- [x] Per-subscription bounded channel (default depth 256).
+- [x] Backpressure policy: drop with `Resync` on saturation, or
   switch to coalesced mode for small result sets (config flag).
-- [ ] Permission filter applied before send.
-- [ ] Diff serialization: bincode `Row` arrays, schema reference
+- [x] Permission filter applied before send.
+- [x] Diff serialization: bincode `Row` arrays, schema reference
   in `Accepted`.
-- [ ] LSN ack handling: advance `cursor_lsn`, contribute to
+- [x] LSN ack handling: advance `cursor_lsn`, contribute to
   global compaction frontier.
-- [ ] Resume path: client provides `resume_lsn`; if within
+- [x] Resume path: client provides `resume_lsn`; if within
   compaction window, replay diffs since; else re-issue
   `Initial`.
-- [ ] Subscription teardown: drop refcounts on shared
+- [x] Subscription teardown: drop refcounts on shared
   subgraphs; evict zero-ref keys within one tick.
-- [ ] Metrics: subscriptions in flight, p50/p99 fan-out latency,
+- [x] Metrics: subscriptions in flight, p50/p99 fan-out latency,
   channel-full events.
 
 ### 18.8 `palimpsest-server` — gRPC service (Phase 3)
 
-- [ ] `tonic` server with `tonic-web` middleware.
-- [ ] Service per `palimpsest-proto` definitions.
-- [ ] Bidi stream multiplexing per §13.
-- [ ] Auth middleware: pluggable trait
+- [x] `tonic` server with `tonic-web` middleware.
+- [x] Service per `palimpsest-proto` definitions.
+- [x] Bidi stream multiplexing per §13.
+- [x] Auth middleware: pluggable trait
   `fn (Headers) -> Result<UserContext>`; default impl reads a
   signed JWT from `Authorization` header.
-- [ ] Connection lifecycle: on disconnect, drop all
+- [x] Connection lifecycle: on disconnect, drop all
   subscriptions for that connection.
-- [ ] Health check endpoint (`grpc.health.v1`).
-- [ ] Metrics: Prometheus endpoint via `axum` sidecar on a
+- [x] Health check endpoint (`grpc.health.v1`).
+- [x] Metrics: Prometheus endpoint via `axum` sidecar on a
   separate port.
-- [ ] Tracing: `tracing` + `tracing-subscriber`; structured logs
+- [x] Tracing: `tracing` + `tracing-subscriber`; structured logs
   with subscription/connection IDs.
-- [ ] Embeddable API: `Palimpsest::builder()` with `.with_wal()`,
+- [x] Embeddable API: `Palimpsest::builder()` with `.with_wal()`,
   `.with_permissions()`, `.with_auth()`, `.serve()`.
-- [ ] Standalone CLI: `palimpsest-cli` reads a TOML config and
+- [x] Standalone CLI: `palimpsest-cli` reads a TOML config and
   starts the embedded server.
-- [ ] Graceful shutdown: drain subscriptions with `Resync`,
+- [x] Graceful shutdown: drain subscriptions with `Resync`,
   flush LSN ack, close upstream.
 
 ### 18.9 `palimpsest-proto` — wire protocol (Phase 3)
@@ -1458,145 +1525,147 @@ are intentionally small enough to land in single PRs.
 - [x] `.proto` file per §13: `SyncEngine` service,
   `ClientMessage`, `ServerMessage`, `Diff`.
 - [x] `tonic-build` integration (build.rs).
-- [ ] Manual `Row` codec: bincode payload referenced by
+- [x] Manual `Row` codec: bincode payload referenced by
   `schema_id` from `Accepted`.
-- [ ] Wire-format snapshot tests against captured byte fixtures.
-- [ ] Versioning policy: additive-only changes; major bump
+- [x] Wire-format snapshot tests against captured byte fixtures.
+- [x] Versioning policy: additive-only changes; major bump
   forces re-subscribe.
 
 ### 18.10 `palimpsest-client` — native Rust client (Phase 3)
 
-- [ ] `Client::connect(url, auth) -> Result<Self>`.
-- [ ] `subscribe(query, vars) -> impl Stream<Item = Diff>`.
-- [ ] `update(sub, vars)`.
-- [ ] `unsubscribe(sub)`.
-- [ ] Reconnect with exponential backoff; resubscribe with
+- [x] `Client::connect(url, auth) -> Result<Self>`.
+- [x] `subscribe(query, vars) -> impl Stream<Item = Diff>`.
+- [x] `update(sub, vars)`.
+- [x] `unsubscribe(sub)`.
+- [x] Reconnect with exponential backoff; resubscribe with
   `last_acked_lsn` as resume token.
-- [ ] Local primary-key cache (default on; opt-out).
-- [ ] Diff application to local cache.
-- [ ] LSN dedupe.
-- [ ] Tests: drive against `palimpsest-server` in same process.
+- [x] Local primary-key cache (default on; opt-out).
+- [x] Diff application to local cache.
+- [x] LSN dedupe.
+- [x] Tests: drive against `palimpsest-server` in same process.
 
 ### 18.11 `palimpsest-client` — WASM target (Phase 4)
 
-- [ ] Add `wasm32-unknown-unknown` build job.
-- [ ] Replace tokio runtime with `wasm-bindgen-futures` executor.
-- [ ] Use `tonic-web-wasm-client` for transport.
-- [ ] Strip `serde_json`; use `bincode` exclusively over the
+- [x] Add `wasm32-unknown-unknown` build job.
+- [x] Replace tokio runtime with `wasm-bindgen-futures` executor.
+- [x] Use `tonic-web-wasm-client` for transport.
+- [x] Strip `serde_json`; use `bincode` exclusively over the
   wire.
-- [ ] `wee_alloc` global allocator behind a feature flag.
-- [ ] Dedicated release profile `release-wasm` with
+- [x] `wee_alloc` global allocator behind a feature flag.
+- [x] Dedicated release profile `release-wasm` with
   `opt-level = "z"`, `lto = true`, `codegen-units = 1`.
-- [ ] Size budget guard: `xtask check-wasm-size` fails CI if
+- [x] Size budget guard: `xtask check-wasm-size` fails CI if
   gz > 500 KB.
-- [ ] `wasm-bindgen-test` headless smoke test through the
+- [x] `wasm-bindgen-test` headless smoke test through the
   full WASM build path.
-- [ ] JS-friendly wrapper crate (`palimpsest-client-js`) with
+- [x] JS-friendly wrapper crate (`palimpsest-client-js`) with
   `wasm-bindgen` exports for `subscribe`, `update`, `on_diff`.
-- [ ] React hook example in `examples/react-hello`.
+- [x] React hook example in `examples/react-hello`.
 
 ### 18.12 Testing layers (cross-cutting, Phase 5+)
 
-- [ ] Establish coverage targets and `cargo-llvm-cov` job in CI.
-- [ ] Insta snapshot CI gate: `cargo insta test --unreferenced
+- [x] Establish coverage targets and `cargo-llvm-cov` job in CI.
+- [x] Insta snapshot CI gate: `cargo insta test --unreferenced
   reject`.
-- [ ] Proptest CI job: default budget on PRs,
+- [x] Proptest CI job: default budget on PRs,
   `PROPTEST_CASES=4096` nightly.
-- [ ] Implement each property in §15.3 (1–8) as a separate
+- [x] Implement each property in §15.3 (1–8) as a separate
   `#[test]` for clarity.
-- [ ] `cargo-fuzz` targets: pgoutput decoder, SQL parser, wire
+- [x] `cargo-fuzz` targets: pgoutput decoder, SQL parser, wire
   decoder. 30-minute nightly budget per target. Corpora
   checked in.
-- [ ] Fuzz crash → autofile GitHub issue with seed.
-- [ ] Integration scenarios listed in §15.6 — each as a single
+- [x] Fuzz crash → autofile GitHub issue with seed.
+- [x] Integration scenarios listed in §15.6 — each as a single
   `#[tokio::test]`.
-- [ ] Chaos `Fault` cases listed in §15.7 — each as a single
+- [x] Chaos `Fault` cases listed in §15.7 — each as a single
   test.
-- [ ] Soak harness: standalone binary that runs against a
+- [x] Soak harness: standalone binary that runs against a
   random workload generator for 72 h.
-- [ ] Soak failure capture: dump shrunk repro + state into a
+- [x] Soak failure capture: dump shrunk repro + state into a
   `soak-failures/` directory.
-- [ ] Load harness: replay recorded production-shaped trace at
+- [x] Load harness: replay recorded production-shaped trace at
   10k writes/s × 1k subscribers; measure latency and memory.
-- [ ] `criterion` benches: parse, MIR build, per-operator
+- [x] `criterion` benches: parse, MIR build, per-operator
   throughput, WAL decode, end-to-end commit→client latency.
-- [ ] Bench dashboard publication step (cargo-criterion + a
+- [x] Bench dashboard publication step (cargo-criterion + a
   static site or codspeed.io).
-- [ ] PR regression gate: > 10% bench regression blocks merge.
+- [x] PR regression gate: > 10% bench regression blocks merge.
 
 ### 18.13 Real-Postgres conformance (nightly only)
 
-- [ ] `palimpsest-conformance` crate; opt-in via cargo feature.
-- [ ] Postgres-version matrix: 16, 17.
-- [ ] Wire-byte conformance: real-PG capture vs. `WalGenerator`
+- [x] `palimpsest-conformance` crate; opt-in via cargo feature.
+- [x] Postgres-version matrix: 16, 17.
+- [x] Wire-byte conformance: real-PG capture vs. `WalGenerator`
   output for a fixed catalog of operations.
-- [ ] Catalog-response conformance: real-PG SELECTs vs. canned
+- [x] Catalog-response conformance: real-PG SELECTs vs. canned
   fixtures; regenerator script.
-- [ ] Oracle conformance: real-PG vs. `ReferenceExecutor` for
+- [x] Oracle conformance: real-PG vs. `ReferenceExecutor` for
   the full property-test query corpus.
-- [ ] Real-replication smoke: a subset of §15.6 scenarios re-run
+- [x] Real-replication smoke: a subset of §15.6 scenarios re-run
   end-to-end against real PG.
-- [ ] Failures auto-file P1 issues; never block PRs.
+- [x] Failures auto-file P1 issues; never block PRs.
 
 ### 18.14 Operations (Phase 6)
 
-- [ ] `palimpsest-cli` binary: subcommands `serve`,
+- [x] `palimpsest-cli` binary: subcommands `serve`,
   `validate-config`, `dump-catalog`, `slot-info`.
-- [ ] TOML config schema: upstream connection, replication slot,
+- [x] TOML config schema: upstream connection, replication slot,
   permission rules path, listen address, auth.
-- [ ] `tracing` integration with JSON output for production.
-- [ ] Prometheus metrics:
+- [x] `tracing` integration with JSON output for production.
+- [x] Prometheus metrics:
   - subscription count,
   - WAL lag (current LSN − applied LSN),
   - per-operator memory bytes,
   - per-subscription channel depth,
   - bytes sent per client,
   - resync events.
-- [ ] OpenTelemetry trace export (optional feature).
-- [ ] Health endpoints: `/healthz` (process up),
+- [x] OpenTelemetry trace export (optional feature).
+- [x] Health endpoints: `/healthz` (process up),
   `/readyz` (caught up to a freshness threshold).
-- [ ] Dockerfile (multi-stage; final image ≤ 30 MB).
-- [ ] Helm chart skeleton (optional, post-v1).
-- [ ] Runbook: slot-stuck, slow-consumer, schema-drift recovery.
+- [x] Dockerfile (multi-stage; final image ≤ 30 MB).
+- [x] Helm chart skeleton (optional, post-v1).
+- [x] Runbook: slot-stuck, slow-consumer, schema-drift recovery.
 
 ### 18.15 Security and hardening
 
-- [ ] Auth integration test matrix: missing token, expired,
+- [x] Auth integration test matrix: missing token, expired,
   wrong audience, malformed.
-- [ ] Rate-limit subscription creation per connection.
-- [ ] Rate-limit reconnect attempts per IP.
-- [ ] Bound query size (parser input length, MIR node count).
-- [ ] Bound number of subscriptions per connection.
-- [ ] Bound permission-rule evaluation depth.
-- [ ] TLS termination story (likely upstream proxy; document).
-- [ ] `cargo deny` advisories check in CI; pin RustSec audit
+- [x] Rate-limit subscription creation per connection.
+- [x] Rate-limit reconnect attempts per IP.
+- [x] Bound query size (parser input length, MIR node count).
+- [x] Bound number of subscriptions per connection.
+- [x] Bound permission-rule evaluation depth.
+- [x] TLS termination story (likely upstream proxy; document).
+- [x] `cargo deny` advisories check in CI; pin RustSec audit
   schedule.
-- [ ] Threat model document (what happens if a client lies
+- [x] Threat model document (what happens if a client lies
   about user ID? If permissions misconfigure? If WAL stalls?).
 
 ### 18.16 Documentation
 
-- [ ] API rustdoc with `#![warn(missing_docs)]` on public
+- [x] API rustdoc with `#![warn(missing_docs)]` on public
   crates.
-- [ ] User guide: how to author queries, supported SQL surface,
+- [x] User guide: how to author queries, supported SQL surface,
   CTE recipes.
-- [ ] Operator guide: deploying, configuring, tuning.
-- [ ] Permissions guide: rule DSL, examples, common pitfalls.
-- [ ] Architecture overview (export of this design doc to the
+- [x] Operator guide: deploying, configuring, tuning.
+- [x] Permissions guide: rule DSL, examples, common pitfalls.
+- [x] Architecture overview (export of this design doc to the
   public site).
-- [ ] WASM client guide: minimal HTML+JS quickstart.
-- [ ] Migration guide from "polling REST" to Palimpsest.
-- [ ] Troubleshooting matrix mapping symptom → metric → action.
+- [x] WASM client guide: minimal HTML+JS quickstart.
+- [x] Migration guide from "polling REST" to Palimpsest.
+- [x] Troubleshooting matrix mapping symptom → metric → action.
 
 ### 18.17 Open-question resolutions (must-decide before v1)
 
-- [ ] Pick a CTE materialization policy (§16 #1).
-- [ ] Decide `ORDER BY` without `LIMIT` policy (§16 #2).
-- [ ] Pagination model decision (§16 #3).
-- [ ] Differential vs. handwritten operators decision (§16 #4) —
+All six picks are recorded in §16.1.
+
+- [x] Pick a CTE materialization policy (§16 #1).
+- [x] Decide `ORDER BY` without `LIMIT` policy (§16 #2).
+- [x] Pagination model decision (§16 #3).
+- [x] Differential vs. handwritten operators decision (§16 #4) —
   dependent on early bench results.
-- [ ] Permission predicate language scope (§16 #5).
-- [ ] Scale-out path (§16 #6) — defer past v1, but document the
+- [x] Permission predicate language scope (§16 #5).
+- [x] Scale-out path (§16 #6) — defer past v1, but document the
   shape we'd take.
 
 ### 18.18 Release readiness

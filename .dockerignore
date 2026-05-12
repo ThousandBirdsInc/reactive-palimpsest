@@ -1,0 +1,10 @@
+target
+.git
+.github
+crates/palimpsest-client-js/node_modules
+crates/palimpsest-client-js/dist
+**/*.log
+**/.DS_Store
+**/coverage
+**/*.profraw
+**/*.profdata

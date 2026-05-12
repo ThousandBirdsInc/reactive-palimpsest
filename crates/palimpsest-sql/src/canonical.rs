@@ -1,6 +1,11 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Canonical-form fingerprint and reused-subgraph collapsing. Internal
+//! to MIR processing — exposed for callers that compare/dedupe graphs.
+
+#![allow(missing_docs)]
+
 use std::{
     collections::{HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},

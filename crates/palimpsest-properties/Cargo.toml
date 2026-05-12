@@ -1,0 +1,32 @@
+[package]
+name = "palimpsest-properties"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Property tests asserting Palimpsest's IVM-correctness invariants (§15.3)."
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+# Empty by design — this crate is test-only. Generators and oracles
+# come from `palimpsest-test-harness` and the engine crates.
+
+[dev-dependencies]
+palimpsest-dataflow = { path = "../palimpsest-dataflow" }
+palimpsest-permissions = { path = "../palimpsest-permissions" }
+palimpsest-server = { path = "../palimpsest-server" }
+palimpsest-sql = { path = "../palimpsest-sql" }
+palimpsest-test-harness = { path = "../palimpsest-test-harness" }
+palimpsest-wal = { path = "../palimpsest-wal" }
+proptest.workspace = true
+smallvec.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-stream.workspace = true
+
+[lints]
+workspace = true

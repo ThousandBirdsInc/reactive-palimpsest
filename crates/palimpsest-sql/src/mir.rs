@@ -1,9 +1,18 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Mid-level IR.
+//!
+//! Each variant of [`MirNode`] corresponds to a relational operator
+//! the dataflow engine knows how to instantiate. Internal — consumers
+//! should treat the graph as opaque and only inspect it through the
+//! helpers re-exported from the crate root.
+
+#![allow(missing_docs)]
+
 use std::collections::HashMap;
 
-use petgraph::{graph::NodeIndex, visit::EdgeRef, Graph};
+use petgraph::{graph::NodeIndex, visit::EdgeRef, Direction, Graph};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinKind {
@@ -163,5 +172,51 @@ impl MirGraph {
         root: NodeIndex,
     ) -> Self {
         Self { graph, root }
+    }
+
+    /// Inserts `kind` immediately above `target`, redirecting every
+    /// outgoing edge from `target` (i.e. each consumer that read from
+    /// `target`) to read from the newly-spliced node instead. The new
+    /// node receives a single incoming `Input` edge from `target`.
+    ///
+    /// If `target` was the graph root, the spliced node becomes the new
+    /// root.
+    ///
+    /// Returns the index of the newly-inserted node.
+    pub fn splice_above(&mut self, target: NodeIndex, kind: MirNodeKind) -> NodeIndex {
+        let inserted = self.graph.add_node(kind);
+
+        let outgoing: Vec<_> = self
+            .graph
+            .edges_directed(target, Direction::Outgoing)
+            .map(|edge| (edge.id(), edge.target(), *edge.weight()))
+            .collect();
+        for (edge_id, consumer, weight) in outgoing {
+            self.graph.remove_edge(edge_id);
+            self.graph.add_edge(inserted, consumer, weight);
+        }
+
+        self.graph.add_edge(target, inserted, MirEdgeKind::Input);
+
+        if self.root == target {
+            self.root = inserted;
+        }
+
+        inserted
+    }
+
+    /// Returns every node index whose payload is a `BaseTable`.
+    #[must_use]
+    pub fn base_table_indices(&self) -> Vec<NodeIndex> {
+        self.graph
+            .node_indices()
+            .filter(|index| matches!(self.graph[*index], MirNodeKind::BaseTable { .. }))
+            .collect()
+    }
+
+    /// Returns the kind stored at `index`.
+    #[must_use]
+    pub fn node_kind(&self, index: NodeIndex) -> &MirNodeKind {
+        &self.graph[index]
     }
 }

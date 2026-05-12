@@ -1,0 +1,160 @@
+// Typed wrapper over the wasm-bindgen `Client`/`Subscription`.
+//
+// One PalimpsestClient = one underlying gRPC-Web connection. The client
+// is cheap to share; pass it around components rather than calling
+// connect() in every hook.
+
+import { decodeRows, type RowDecoderOptions } from "./codec.js";
+import {
+  diffOpFromRaw,
+  schemaFromRaw,
+  type ConnectOptions,
+  type DiffEvent,
+  type Schema,
+  type SubscribeOptions,
+} from "./types.js";
+import type {
+  RawDiffEvent,
+  WasmClient,
+  WasmModule,
+  WasmSubscription,
+} from "./wasm.js";
+
+let initPromise: Promise<unknown> | null = null;
+
+async function ensureInit(wasm: WasmModule): Promise<void> {
+  if (!initPromise) {
+    initPromise = wasm.default();
+  }
+  await initPromise;
+}
+
+/**
+ * Subscribed live query. `T` is the row type the caller declared on
+ * `client.subscribe<T>(...)`.
+ *
+ * The subscription owns one wasm `Subscription` handle. `unsubscribe()`
+ * is idempotent; calling it twice is safe.
+ */
+export class TypedSubscription<T> {
+  private decodedSchema: Schema | null = null;
+  private closed = false;
+
+  constructor(
+    private readonly wasmSub: WasmSubscription,
+    private readonly decoderOptions: RowDecoderOptions,
+  ) {}
+
+  /**
+   * Register a callback for every event (accepted / diff / resync / error).
+   *
+   * Calling `onEvent` twice replaces the previous callback — only the
+   * most recent registration receives events.
+   */
+  onEvent(callback: (event: DiffEvent<T>) => void): void {
+    this.wasmSub.onDiff((raw: RawDiffEvent) => {
+      callback(this.translate(raw));
+    });
+  }
+
+  /** Push a fresh `vars` map; triggers a server-side resubscribe. */
+  async update(vars: Record<string, string>): Promise<void> {
+    await this.wasmSub.update(vars);
+  }
+
+  /** Ack the given server LSN. Used as `resume_lsn` after reconnect. */
+  async ack(lsn: bigint): Promise<void> {
+    await this.wasmSub.ack(lsn);
+  }
+
+  /** Tear the subscription down. Safe to call multiple times. */
+  async unsubscribe(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    await this.wasmSub.unsubscribe();
+  }
+
+  private translate(raw: RawDiffEvent): DiffEvent<T> {
+    switch (raw.kind) {
+      case "accepted": {
+        const schema = schemaFromRaw(raw.schema);
+        this.decodedSchema = schema;
+        return {
+          kind: "accepted",
+          schemaId: raw.schemaId,
+          snapshotLsn: raw.snapshotLsn,
+          schema,
+        };
+      }
+      case "diff": {
+        if (!this.decodedSchema) {
+          // Defensive: a diff before accepted shouldn't happen, but if
+          // it does we surface it as an error rather than corrupt the
+          // typed output.
+          return {
+            kind: "error",
+            code: "protocol",
+            message: "diff received before accepted",
+          };
+        }
+        return {
+          kind: "diff",
+          lsn: raw.lsn,
+          op: diffOpFromRaw(raw.op),
+          rows: decodeRows<T>(raw.rows, this.decodedSchema, this.decoderOptions),
+        };
+      }
+      case "resync":
+        return { kind: "resync", reason: raw.reason, message: raw.message };
+      case "error":
+        return { kind: "error", code: raw.code, message: raw.message };
+    }
+  }
+}
+
+export interface ClientOptions extends ConnectOptions {
+  /** wasm-bindgen module produced by `wasm-pack build --target web`. */
+  wasm: WasmModule;
+  /** Row-decoder overrides applied to every subscription on this client. */
+  decoder?: RowDecoderOptions;
+}
+
+/**
+ * Type-safe wrapper around the wasm `Client`. Construct via
+ * `PalimpsestClient.connect(...)`; reuse for many subscriptions.
+ */
+export class PalimpsestClient {
+  private constructor(
+    private readonly wasmClient: WasmClient,
+    private readonly defaultDecoder: RowDecoderOptions,
+  ) {}
+
+  static async connect(options: ClientOptions): Promise<PalimpsestClient> {
+    await ensureInit(options.wasm);
+    const token = options.token ?? null;
+    const wasmClient = await options.wasm.Client.connect(options.url, token);
+    return new PalimpsestClient(wasmClient, options.decoder ?? {});
+  }
+
+  /**
+   * Open a subscription. `T` is the row shape the caller expects.
+   *
+   * The returned subscription doesn't deliver events until you call
+   * `.onEvent(...)`.
+   */
+  async subscribe<T>(
+    sql: string,
+    options: SubscribeOptions & { decoder?: RowDecoderOptions } = {},
+  ): Promise<TypedSubscription<T>> {
+    const wasmSub = await this.wasmClient.subscribe(sql, options.vars ?? {});
+    return new TypedSubscription<T>(wasmSub, {
+      ...this.defaultDecoder,
+      ...(options.decoder ?? {}),
+    });
+  }
+
+  /** Close the underlying connection. */
+  async shutdown(): Promise<void> {
+    await this.wasmClient.shutdown();
+  }
+}

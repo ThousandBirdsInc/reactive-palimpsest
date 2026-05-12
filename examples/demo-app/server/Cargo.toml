@@ -1,0 +1,53 @@
+[package]
+name = "palimpsest-demo-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82.0"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Demo write-API + Palimpsest gRPC-Web embed (examples/demo-app/server)."
+
+# Empty `[workspace]` makes this a standalone Cargo workspace so it
+# doesn't try to attach to the main palimpsest workspace via path
+# discovery. Path deps below still resolve into the sibling workspace.
+[workspace]
+
+[[bin]]
+name = "palimpsest-demo-server"
+path = "src/main.rs"
+
+[dependencies]
+# Palimpsest crates (path deps into the parent workspace).
+palimpsest-server     = { path = "../../../crates/palimpsest-server" }
+palimpsest-permissions = { path = "../../../crates/palimpsest-permissions" }
+palimpsest-sql        = { path = "../../../crates/palimpsest-sql" }
+palimpsest-wal        = { path = "../../../crates/palimpsest-wal" }
+palimpsest-dataflow   = { path = "../../../crates/palimpsest-dataflow" }
+
+# Web stack.
+axum         = { version = "0.7", features = ["http1", "macros", "tokio", "ws"] }
+tokio        = { version = "1.40", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tower-http   = { version = "0.5", features = ["cors", "trace"] }
+serde        = { version = "1.0", features = ["derive"] }
+serde_json   = "1.0"
+smallvec     = "1.13"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# WS ↔ gRPC bridge for the browser. Firefox/Safari can't speak the
+# bidi-streaming Subscribe RPC over gRPC-Web (no fetch upload streams),
+# so the demo exposes a WebSocket endpoint that carries the same
+# ClientMessage/ServerMessage protobufs and proxies them to the
+# in-process tonic SyncEngine on 127.0.0.1.
+palimpsest-proto = { path = "../../../crates/palimpsest-proto" }
+tonic        = "0.12"
+prost        = "0.13"
+futures      = "0.3"
+tokio-stream = "0.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

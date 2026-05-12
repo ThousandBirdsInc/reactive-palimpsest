@@ -1,6 +1,8 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Lowering from sqlparser AST into [`MirGraph`].
+
 use std::collections::HashMap;
 
 use sqlparser::ast::{
@@ -10,15 +12,42 @@ use sqlparser::ast::{
 };
 
 use crate::{
+    limits::{enforce_graph_size, QueryLimits},
     mir::{AggExpr, ColumnRef, JoinKind, MirGraph, MirNodeKind, OrderKey, SetQuantifierKind},
-    parse_select, SqlError,
+    SqlError,
 };
 
+/// Parses `sql` and lowers it into an [`MirGraph`] under the default
+/// [`QueryLimits`].
+///
+/// # Errors
+/// Surfaces parse, validation, and size-bound errors.
 pub fn parse_and_lower(sql: &str) -> Result<MirGraph, SqlError> {
-    let statement = parse_select(sql)?;
-    lower_select_statement(&statement)
+    parse_and_lower_with_limits(sql, QueryLimits::DEFAULT)
 }
 
+/// Parse + lower while enforcing both `max_input_bytes` and
+/// `max_mir_nodes` from `limits`.
+///
+/// # Errors
+/// Surfaces [`SqlError::QueryTooLarge`] / [`SqlError::QueryTooComplex`]
+/// in addition to the usual parse/lower errors.
+pub fn parse_and_lower_with_limits(sql: &str, limits: QueryLimits) -> Result<MirGraph, SqlError> {
+    let statement = crate::parser::parse_select_with_limits(sql, limits)?;
+    let graph = lower_select_statement(&statement)?;
+    enforce_graph_size(graph.node_count(), limits)?;
+    Ok(graph)
+}
+
+/// Lowers an already-parsed `SELECT` [`Statement`] into an [`MirGraph`].
+///
+/// Skips the byte-budget check (the input is no longer textual at this
+/// point) but still produces graphs that should be size-checked by the
+/// caller via [`enforce_graph_size`].
+///
+/// # Errors
+/// [`SqlError::UnsupportedStatement`] on non-`SELECT` input, plus any
+/// downstream lowering error.
 pub fn lower_select_statement(statement: &Statement) -> Result<MirGraph, SqlError> {
     let Statement::Query(query) = statement else {
         return Err(SqlError::UnsupportedStatement);
@@ -44,11 +73,16 @@ fn lower_query_with_context(query: &Query, context: &LowerContext) -> Result<Mir
     let mut graph = lower_set_expr(&query.body, context)?;
 
     if let Some(order_by) = &query.order_by {
+        // ORDER BY without LIMIT plans as a sort over the whole input —
+        // represented in the MIR as `TopK` with `usize::MAX` so we
+        // don't need a separate node kind. Downstream operators see
+        // "ordered, unbounded" and can pick the right physical plan.
         let limit = query
             .limit
             .as_ref()
-            .ok_or(SqlError::UnsupportedFeature("ORDER BY without LIMIT"))
-            .and_then(literal_usize)?;
+            .map(literal_usize)
+            .transpose()?
+            .unwrap_or(usize::MAX);
         let offset = query
             .offset
             .as_ref()

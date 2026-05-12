@@ -1,6 +1,14 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Postgres column-value decoding.
+//!
+//! Type OIDs and the [`Datum`] enum are direct mirrors of the upstream
+//! protocol; documenting every variant individually adds noise without
+//! adding information.
+
+#![allow(missing_docs)]
+
 use bytes::{Buf, Bytes};
 
 use crate::{Result, WalError};

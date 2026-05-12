@@ -1,0 +1,5 @@
+[
+  {"name": "max_replication_slots", "setting": "<int>"},
+  {"name": "max_wal_senders", "setting": "<int>"},
+  {"name": "wal_level", "setting": "logical"}
+]

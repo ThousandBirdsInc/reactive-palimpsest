@@ -1,0 +1,47 @@
+name: RustSec audit
+
+on:
+  schedule:
+    # Mondays at 13:00 UTC (~09:00 ET, ~06:00 PT). The cadence is
+    # weekly: cargo-deny on PR catches advisories that already exist in
+    # Cargo.lock, but new advisories land continuously upstream and we
+    # want to learn about them within a working week.
+    - cron: "0 13 * * 1"
+  # Also runnable on demand from the Actions tab.
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-cargo-audit-
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # `--deny warnings` so even informational advisories (e.g.
+      # unmaintained crates) fail the job — the goal is a single
+      # weekly signal that something deserves a look.
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Run cargo deny advisories
+        run: cargo deny check advisories

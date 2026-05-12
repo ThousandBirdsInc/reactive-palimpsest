@@ -1,0 +1,35 @@
+[package]
+name = "palimpsest-soak"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Soak + load harness binaries per §15.8 / §18.12."
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+palimpsest-dataflow = { path = "../palimpsest-dataflow" }
+palimpsest-permissions = { path = "../palimpsest-permissions" }
+palimpsest-server = { path = "../palimpsest-server" }
+palimpsest-sql = { path = "../palimpsest-sql" }
+palimpsest-test-harness = { path = "../palimpsest-test-harness" }
+palimpsest-wal = { path = "../palimpsest-wal" }
+smallvec.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-stream.workspace = true
+
+[[bin]]
+name = "palimpsest-soak"
+path = "src/soak.rs"
+
+[[bin]]
+name = "palimpsest-load"
+path = "src/load.rs"
+
+[lints]
+workspace = true

@@ -1,6 +1,15 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! `pgoutput` logical-replication protocol decoding.
+//!
+//! Wire-shape types (Begin, Commit, Insert, Update, Delete, Truncate,
+//! Origin, etc.) are direct mirrors of the upstream protocol; the
+//! variants and fields are documented in the Postgres logical-replication
+//! reference rather than re-stated here.
+
+#![allow(missing_docs)]
+
 use bytes::{Buf, Bytes};
 
 use crate::{

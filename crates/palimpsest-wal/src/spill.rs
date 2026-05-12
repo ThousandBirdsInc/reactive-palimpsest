@@ -1,6 +1,10 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Backpressure-aware spill buffer for streaming WAL events.
+
+#![allow(missing_docs)]
+
 use std::{
     collections::VecDeque,
     fs::{self, File, OpenOptions},

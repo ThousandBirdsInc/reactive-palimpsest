@@ -1,6 +1,11 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Reference relational executor used as the source of truth for
+//! conformance and property tests.
+
+#![allow(missing_docs)]
+
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap},

@@ -1,6 +1,11 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! End-to-end test harness wiring: spins up a mock Postgres, drives
+//! WAL events, and produces an executable subscription pipeline.
+
+#![allow(missing_docs)]
+
 use std::{io, sync::Arc};
 
 use crate::{

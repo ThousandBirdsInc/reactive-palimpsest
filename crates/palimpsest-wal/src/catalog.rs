@@ -1,6 +1,14 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Mutable in-memory catalog tracked alongside replication.
+//!
+//! The catalog is populated by probing `pg_catalog` and updated as
+//! `pgoutput` Relation messages arrive; entries are pure data
+//! mirrors of the upstream Postgres metadata.
+
+#![allow(missing_docs)]
+
 use std::collections::BTreeMap;
 
 use crate::{stock_postgres_16_type, ColumnDef, Result, TableId, WalError};

@@ -1,0 +1,87 @@
+name: proptest
+
+# Two budgets: PR uses the proptest default (256 cases) so the gate
+# stays under a couple of minutes; nightly bumps PROPTEST_CASES to
+# 4096 to catch shrinkable failures the small budget misses.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # 03:30 UTC every night.
+    - cron: '30 3 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pr-budget:
+    name: properties (default budget)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-prop-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-prop-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ubuntu-stable-prop-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-prop-target-
+
+      - name: Run property tests
+        run: cargo test -p palimpsest-properties --release
+
+  nightly-budget:
+    name: properties (PROPTEST_CASES=4096)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PROPTEST_CASES: '4096'
+      PROPTEST_MAX_SHRINK_ITERS: '8192'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-prop-nightly-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-prop-nightly-cargo-
+
+      - name: Run extended property tests
+        run: cargo test -p palimpsest-properties --release
+
+      - name: Upload regressions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proptest-regressions
+          path: |
+            crates/palimpsest-properties/proptest-regressions/**
+          if-no-files-found: ignore

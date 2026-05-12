@@ -1,6 +1,11 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! In-process mock Postgres TCP server used to drive the WAL ingest
+//! crate without a real database.
+
+#![allow(missing_docs)]
+
 use std::{
     collections::{BTreeMap, VecDeque},
     io::{self, ErrorKind, Read, Write},

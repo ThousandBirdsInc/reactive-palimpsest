@@ -1,0 +1,45 @@
+[package]
+name = "palimpsest-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# `cargo-fuzz` insists on a separate Cargo workspace boundary because
+# the fuzz harness uses libFuzzer. This crate is intentionally NOT in
+# the workspace `members` list — see the explicit `[workspace]` below.
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+palimpsest-sql = { path = "../crates/palimpsest-sql" }
+palimpsest-wal = { path = "../crates/palimpsest-wal" }
+palimpsest-server = { path = "../crates/palimpsest-server" }
+bytes = "1.7"
+
+[lib]
+path = "fuzz_targets/lib.rs"
+
+[[bin]]
+name = "pgoutput_decoder"
+path = "fuzz_targets/pgoutput_decoder.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sql_parser"
+path = "fuzz_targets/sql_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wire_decoder"
+path = "fuzz_targets/wire_decoder.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1

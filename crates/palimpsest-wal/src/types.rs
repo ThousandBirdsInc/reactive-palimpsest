@@ -1,6 +1,10 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Core wire-shape types used across the WAL ingest path.
+
+#![allow(missing_docs)]
+
 use smallvec::SmallVec;
 
 use crate::{Datum, DatumType};

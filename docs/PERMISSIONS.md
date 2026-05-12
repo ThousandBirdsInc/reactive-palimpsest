@@ -1,0 +1,205 @@
+# Permissions Guide
+
+Palimpsest enforces row-level access through a TOML rule DSL evaluated
+at subscribe time and folded into every diff. Rules are compiled
+against the catalog and the user-context schema; ambiguous,
+under-specified, or pathological rules are rejected at load time so
+the rewriter never sees them.
+
+## What a rule looks like
+
+```toml
+[[user_context]]
+name = "id"
+type = "int"
+
+[[user_context]]
+name = "org_id"
+type = "int"
+
+[[user_context]]
+name = "is_admin"
+type = "bool"
+
+[[rule]]
+name = "posts_in_org"
+table = "posts"
+mode = "both"
+predicate = "org_id = $user.org_id"
+
+[[rule]]
+name = "comments_by_author"
+table = "comments"
+predicate = "author_id = $user.id"
+
+[[rule]]
+name = "authors_self_or_admin"
+table = "authors"
+predicate = "id = $user.id OR $user.is_admin"
+```
+
+## Field meanings
+
+- **`[[user_context]]`** — declares the shape of the `UserContext`
+  attached to each subscription. Every `$user.<name>` referenced from
+  any rule must appear here, with the right type. Fields are typed as
+  `bool` / `int` / `float` / `text` / `timestamp`.
+
+- **`[[rule]]`** — a row-visibility / subscribe-authorization predicate
+  applied to a specific table.
+
+  - `name` — stable identifier, must be unique. Used in error messages
+    and metrics.
+  - `table` — the table the rule guards.
+  - `predicate` — a SQL boolean expression over columns of `table` and
+    `$user.<field>`. Same supported subset as query predicates: `AND`,
+    `OR`, `NOT`, `=`, `<>`, `<`, `<=`, `>`, `>=`, `IS NULL`,
+    `IS NOT NULL`, `IN (...)` (with constants only), parenthesisation.
+  - `mode` — one of `row_visibility`, `subscribe`, or `both` (default).
+
+## Modes — what gets gated
+
+| Mode | Subscribe-time check | Row visibility filter |
+| --- | --- | --- |
+| `row_visibility` | ❌ | ✅ |
+| `subscribe` | ✅ | ❌ |
+| `both` (default) | ✅ | ✅ |
+
+`row_visibility` is the bread-and-butter mode: rejected rows simply
+never appear in the diff stream. `subscribe` lets you reject the
+*subscription itself* if the user has no possible access (e.g. rule
+is `false` after substitution). `both` is conservative and the right
+default.
+
+## How rules compose
+
+If multiple rules cover the same table, **a row is visible iff at
+least one rule's predicate evaluates to `true`** (the rules are
+disjunctive). This matches Postgres RLS's `PERMISSIVE` semantics.
+
+Two rules over the same table whose canonical predicates are
+**identical** are rejected at load time (`AmbiguousRule`). This
+catches accidental duplication. If you want overlapping rules with
+different names, vary the predicate text (semantic difference, not
+just whitespace — the canonical-form pass strips trivial differences).
+
+A table with **no rule** is visible to everyone — there is no implicit
+deny. Rule absence means "no policy"; if you want a default-deny
+posture, add `predicate = "false"` for tables you haven't reviewed.
+
+## Examples
+
+### Per-tenant isolation
+
+```toml
+[[rule]]
+name = "tenant_isolation"
+table = "documents"
+predicate = "tenant_id = $user.tenant_id"
+```
+
+### Owner or admin
+
+```toml
+[[rule]]
+name = "owner_or_admin"
+table = "secret_notes"
+predicate = "owner_id = $user.id OR $user.is_admin"
+```
+
+### Soft delete + visibility window
+
+```toml
+[[rule]]
+name = "live_only"
+table = "posts"
+predicate = "deleted_at IS NULL AND published_at <= $user.now"
+```
+
+The `now` field is a `timestamp` declared in `[[user_context]]`; the
+client sends a freshly-generated value at subscribe time. (Don't use
+`now()` in the predicate — Palimpsest predicates must be deterministic.)
+
+### Scoped read with admin override
+
+```toml
+[[rule]]
+name = "team_read"
+table = "tasks"
+mode = "row_visibility"
+predicate = "team_id = ANY($user.team_ids) OR $user.is_admin"
+```
+
+## Common pitfalls
+
+### ❌ Forgetting to declare a `$user.*` field
+
+```toml
+[[rule]]
+name = "x"
+table = "posts"
+predicate = "author_id = $user.author_id"   # NOT in user_context
+```
+
+Compile-time error: `UnknownUserField`. Add the corresponding
+`[[user_context]]` block.
+
+### ❌ Predicate references a column that doesn't exist
+
+```toml
+[[rule]]
+predicate = "author_idd = $user.id"   # typo
+```
+
+Compile-time error: `UnknownColumn`.
+
+### ❌ Pathologically nested predicates
+
+```toml
+predicate = "((((((... 33+ levels deep ...))))))"
+```
+
+Compile-time error: `PredicateTooDeep`. The default cap is 32. If you
+genuinely need deeper nesting, you almost certainly want a CTE-based
+view shape instead.
+
+### ❌ Trying to filter by a derived column
+
+```toml
+predicate = "EXTRACT(year FROM created_at) = $user.year"
+```
+
+Function calls in predicates are not supported. Move the derivation
+into the row itself (a generated column or a view) and filter on the
+materialized form.
+
+### ❌ Using `now()` or `random()` in a predicate
+
+```toml
+predicate = "created_at > now() - interval '1 day'"
+```
+
+Predicates must be deterministic over their inputs. Pass the
+"as-of" timestamp through `$user.<field>` instead.
+
+### ✅ Default-deny for unfamiliar tables
+
+```toml
+[[rule]]
+name = "deny_internal_audit"
+table = "internal_audit_log"
+predicate = "false"
+```
+
+Stops *anyone* from subscribing until you write a real rule.
+
+## Operational notes
+
+- Rule changes require a server restart in v1; hot reload is on the
+  roadmap.
+- The full rule set is hashed into the canonical-form key, so two
+  servers with diverging rule sets will produce diverging canonical
+  keys — don't let configurations drift.
+- Watch `palimpsest_subscribe_rejected_total{reason="permissions"}`;
+  a sudden surge after a rule edit usually means you tightened the
+  predicate further than intended.

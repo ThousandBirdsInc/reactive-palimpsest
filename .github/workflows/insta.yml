@@ -1,0 +1,50 @@
+name: insta
+
+# Snapshot gate. `--unreferenced reject` ensures every checked-in
+# snapshot is exercised by at least one test, so dead snapshots cannot
+# accumulate.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  INSTA_FORCE_PASS: '0'
+
+jobs:
+  snapshots:
+    name: cargo insta test --unreferenced reject
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-insta-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-insta-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ubuntu-stable-insta-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-insta-target-
+
+      - name: Install cargo-insta
+        run: cargo install cargo-insta --locked
+
+      - name: Reject unreferenced snapshots
+        run: cargo insta test --unreferenced reject --workspace

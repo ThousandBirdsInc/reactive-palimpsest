@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "palimpsest.fullname" . }}
+  labels:
+    {{- include "palimpsest.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+      appProtocol: grpc
+    - name: metrics
+      port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+  selector:
+    {{- include "palimpsest.selectorLabels" . | nindent 4 }}

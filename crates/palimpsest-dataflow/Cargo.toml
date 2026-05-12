@@ -15,8 +15,10 @@ categories.workspace = true
 columnar = { version = "0.11", default-features = false }
 columnation = "0.1"
 fnv = "1.0"
+palimpsest-sql = { path = "../palimpsest-sql" }
 palimpsest-wal = { path = "../palimpsest-wal" }
 paste = "1.0"
+petgraph.workspace = true
 serde = { workspace = true, features = ["derive"] }
 smallvec.workspace = true
 timely.workspace = true
@@ -24,10 +26,20 @@ tokio.workspace = true
 
 [dev-dependencies]
 bytemuck = "1.18"
+criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support"] }
 graph_map = "0.1"
 itertools = "0.13"
 mimalloc = "0.1"
+proptest.workspace = true
 rand = "0.4"
 
 [features]
 default = ["timely/getopts"]
+
+[[bench]]
+name = "operator_throughput"
+harness = false
+
+[[bench]]
+name = "operator_criterion"
+harness = false

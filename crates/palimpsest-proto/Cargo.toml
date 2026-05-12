@@ -12,8 +12,20 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+bincode.workspace = true
 prost.workspace = true
-tonic.workspace = true
+serde = { workspace = true }
+thiserror.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tonic = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# On wasm32 we drop tonic's `transport` feature (hyper/tokio-net would
+# pull mio, which doesn't compile for wasm32-unknown-unknown).
+# `tonic-build` still produces the same client/server stubs because
+# they only need `prost` + `codegen`.
+tonic = { version = "0.12", default-features = false, features = ["prost", "codegen"] }
 
 [build-dependencies]
 tonic-build.workspace = true

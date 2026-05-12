@@ -1,0 +1,87 @@
+name: wasm
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-size:
+    name: wasm32-unknown-unknown
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-wasm-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-wasm-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ubuntu-stable-wasm-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-wasm-target-
+
+      - name: Build palimpsest-client (wasm)
+        run: cargo build -p palimpsest-client --target wasm32-unknown-unknown
+
+      - name: Build palimpsest-client-js (wasm)
+        run: cargo build -p palimpsest-client-js --target wasm32-unknown-unknown
+
+      - name: Compile-check wasm tests
+        run: cargo build -p palimpsest-client --target wasm32-unknown-unknown --tests
+
+      - name: Clippy on wasm target
+        run: cargo clippy -p palimpsest-client -p palimpsest-client-js --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      - name: Size budget guard (xtask check-wasm-size)
+        run: cargo run -p xtask -- check-wasm-size
+
+  wasm-bindgen-tests:
+    name: wasm-bindgen-test (chrome)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-wasmtest-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-wasmtest-cargo-
+
+      - name: Run headless wasm-bindgen-test
+        run: wasm-pack test --headless --chrome crates/palimpsest-client

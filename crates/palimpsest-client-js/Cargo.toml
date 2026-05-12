@@ -1,0 +1,41 @@
+[package]
+name = "palimpsest-client-js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "wasm-bindgen JS wrapper around palimpsest-client (browser SDK)."
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+palimpsest-client = { path = "../palimpsest-client" }
+
+# Only built when targeting wasm32 — keeps `cargo build -p
+# palimpsest-client-js` on native a no-op (the cdylib has nothing to
+# link). Still listed under [dependencies] (not target-gated) so the
+# crate appears in `cargo doc` and `cargo test` runs that don't pass
+# `--target`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+tokio = { version = "1.40", default-features = false, features = ["sync"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+# Optional global allocator. ~10 KB code-size win, but it has been
+# in maintenance mode for a while; opt-in only.
+wee_alloc = { version = "0.4", optional = true }
+
+[features]
+default = []
+# Enable the `wee_alloc` global allocator. Trades a small amount of
+# performance for a smaller `.wasm` payload.
+wee_alloc = ["dep:wee_alloc"]
+
+[lints]
+workspace = true

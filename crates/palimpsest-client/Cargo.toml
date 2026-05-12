@@ -1,0 +1,55 @@
+[package]
+name = "palimpsest-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native and WASM Rust client for the Palimpsest sync engine."
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+http.workspace = true
+palimpsest-proto = { path = "../palimpsest-proto" }
+thiserror.workspace = true
+tracing.workspace = true
+
+# `tokio::sync` and `tokio::select!` are runtime-agnostic, so they
+# stay in the cross-target dep list. Anything that needs an actual
+# runtime (`rt`, `time`) goes in the per-target sections below.
+# We declare tokio directly (not via workspace inheritance) because
+# the wasm target needs `default-features = false` and Cargo refuses
+# to override default-features on a workspace dep that didn't set it.
+tokio = { version = "1.40", default-features = false, features = ["macros", "sync"] }
+tokio-stream = { version = "0.1", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.40", default-features = false, features = ["macros", "rt", "sync", "time"] }
+tonic = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-net = { version = "0.6", default-features = false, features = ["websocket"] }
+gloo-timers = { version = "0.3", default-features = false, features = ["futures"] }
+js-sys = "0.3"
+prost = "0.13"
+tonic = { version = "0.12", default-features = false, features = ["prost", "codegen"] }
+wasm-bindgen-futures = "0.4"
+
+# Native-only — these pull tokio with `rt-multi-thread`, axum, hyper,
+# etc., none of which compile for `wasm32-unknown-unknown`.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+jsonwebtoken.workspace = true
+palimpsest-server = { path = "../palimpsest-server" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[lints]
+workspace = true

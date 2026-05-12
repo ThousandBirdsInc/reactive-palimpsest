@@ -1,0 +1,158 @@
+name: conformance
+
+# Real-Postgres conformance tests (§18.13). Runs the
+# `palimpsest-conformance` crate against Postgres 16 and 17 every
+# night. Failures auto-file a P1 issue; nightly failures **never block
+# PRs** — that is enforced structurally because this workflow only
+# runs on schedule + workflow_dispatch and is not in any required
+# status check list.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      pg_version:
+        description: 'Specific Postgres version to run (16, 17, or all)'
+        required: false
+        default: 'all'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  conformance:
+    name: pg${{ matrix.pg }} conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [16, 17]
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_USER: palimpsest
+          POSTGRES_PASSWORD: palimpsest
+          POSTGRES_DB: palimpsest
+        ports:
+          - 5432:5432
+        # `wal_level=logical` is required for §18.13.3 (replication)
+        # and §18.13.6 (replication smoke). The other settings just
+        # raise the slot/sender counts so the harness can run idempotent
+        # drop+create cycles.
+        options: >-
+          --health-cmd "pg_isready -U palimpsest -d palimpsest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          -c wal_level=logical
+          -c max_replication_slots=8
+          -c max_wal_senders=8
+    env:
+      PALIMPSEST_PG_URL: postgres://palimpsest:palimpsest@localhost:5432/palimpsest
+    steps:
+      - name: Skip non-matching version on dispatch
+        if: >-
+          github.event_name == 'workflow_dispatch'
+          && github.event.inputs.pg_version != 'all'
+          && github.event.inputs.pg_version != format('{0}', matrix.pg)
+        run: |
+          echo "Skipping pg${{ matrix.pg }} (dispatch asked for ${{ github.event.inputs.pg_version }})"
+          exit 0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-conformance-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-conformance-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ubuntu-stable-conformance-target-pg${{ matrix.pg }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-conformance-target-pg${{ matrix.pg }}-
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U palimpsest; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Postgres did not become ready"
+          exit 1
+
+      - name: Show Postgres version + replication settings
+        run: |
+          PGPASSWORD=palimpsest psql -h localhost -U palimpsest -d palimpsest \
+            -c 'SELECT version();' \
+            -c 'SHOW wal_level;' \
+            -c 'SHOW max_replication_slots;'
+
+      - name: Run conformance suite
+        id: run
+        continue-on-error: true
+        run: |
+          cargo test -p palimpsest-conformance --features real-postgres -- --nocapture
+
+      - name: Upload logs on failure
+        if: steps.run.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-logs-pg${{ matrix.pg }}
+          path: |
+            target/debug/deps/*.log
+            target/debug/deps/*.txt
+          if-no-files-found: ignore
+
+      - name: File P1 tracking issue on failure
+        if: steps.run.outcome == 'failure'
+        uses: actions/github-script@v7
+        env:
+          PG_VERSION: ${{ matrix.pg }}
+        with:
+          script: |
+            const pg = process.env.PG_VERSION;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[conformance] pg${pg} nightly failed in ${context.sha.slice(0,7)}`,
+              labels: ['conformance', 'P1'],
+              body:
+                `Nightly Postgres ${pg} conformance run failed.\n\n` +
+                `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+                `Reproduce locally:\n\n` +
+                '```bash\n' +
+                `docker run -d --rm --name palimpsest-pg -p 5432:5432 \\\n` +
+                `  -e POSTGRES_USER=palimpsest -e POSTGRES_PASSWORD=palimpsest \\\n` +
+                `  -e POSTGRES_DB=palimpsest postgres:${pg} \\\n` +
+                `  -c wal_level=logical -c max_replication_slots=8 -c max_wal_senders=8\n\n` +
+                `PALIMPSEST_PG_URL=postgres://palimpsest:palimpsest@localhost:5432/palimpsest \\\n` +
+                `  cargo test -p palimpsest-conformance --features real-postgres\n` +
+                '```\n\n' +
+                `Failures from this workflow are P1 but **must not block PRs**. ` +
+                `Confirm before merging that the broken behavior is reproducible ` +
+                `against the matching Postgres version locally.`,
+            });
+
+      - name: Mark step status
+        if: steps.run.outcome == 'failure'
+        run: |
+          echo "::warning::pg${{ matrix.pg }} conformance failed (issue auto-filed). Nightly only — does not block PRs."

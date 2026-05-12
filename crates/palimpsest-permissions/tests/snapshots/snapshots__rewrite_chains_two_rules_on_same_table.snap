@@ -1,0 +1,18 @@
+---
+source: crates/palimpsest-permissions/tests/snapshots.rs
+expression: "render(&rules, \"SELECT id FROM posts\", &alice())"
+---
+rules:
+  - name=posts_owner table=posts mode=Both predicate=author_id = $user.id
+  - name=posts_org table=posts mode=Both predicate=author_id = $user.org_id
+
+query:
+  SELECT id FROM posts
+
+canonical_before:
+  project:id[input:base:posts:[][]]
+
+canonical_after:
+  project:id[input:filter:author_id = 7[input:filter:author_id = 42[input:base:posts:[][]]]]
+
+stats: RewriteStats { base_tables_visited: 1, filters_inserted: 2, rules_elided: 0 }

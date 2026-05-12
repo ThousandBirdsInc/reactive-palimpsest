@@ -1,0 +1,103 @@
+name: bench
+
+# Criterion-driven benchmark gate. Runs the full bench suite on each
+# PR, baselines against `main`, and fails the PR if any tracked metric
+# regresses by more than 10%. Nightly publishes a long-lived dashboard
+# (cargo-criterion JSON → static site).
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PALIMPSEST_BENCH_REGRESSION_PCT: '10'
+
+jobs:
+  pr-regression:
+    name: criterion regression gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout PR with merge base
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-bench-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-bench-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ubuntu-stable-bench-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-bench-target-
+
+      - name: Baseline (main)
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          git checkout origin/${{ github.base_ref }}
+          cargo bench --workspace --no-fail-fast -- --save-baseline main
+
+      - name: Compare (PR head)
+        run: |
+          git checkout ${{ github.sha }}
+          cargo bench --workspace --no-fail-fast -- --baseline main
+
+      - name: Enforce regression budget
+        run: cargo run -p xtask -- check-bench-regression --threshold ${{ env.PALIMPSEST_BENCH_REGRESSION_PCT }}
+
+  publish:
+    name: cargo-criterion → dashboard
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-criterion
+        run: cargo install cargo-criterion --locked
+
+      - name: Run benchmarks (machine-readable)
+        run: cargo criterion --workspace --message-format json > criterion.ndjson
+
+      - name: Render static dashboard
+        run: cargo run -p xtask -- render-bench-dashboard --input criterion.ndjson --out site/
+
+      - name: Upload site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-dashboard
+          path: site/
+
+      - name: Deploy to GitHub Pages
+        if: github.event_name == 'schedule'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: site
+          publish_branch: gh-pages
+          destination_dir: bench
+          keep_files: true
