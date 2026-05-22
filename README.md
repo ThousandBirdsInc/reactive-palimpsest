@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/palimpsest-header.svg" alt="Palimpsest" width="720" />
+  <img src=".github/palimpsest-banner.svg" alt="Palimpsest" width="720" />
 </p>
 
 <h1 align="center">Palimpsest</h1>
