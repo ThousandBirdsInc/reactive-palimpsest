@@ -49,7 +49,7 @@ sharing, ordered exactly-once delivery, and server-side permission filtering.
 
 ## 3. Prior art
 
-### 3.1 Noria (`/Users/coltonpierson/workspace/reference/noria`)
+### 3.1 Noria
 
 Noria is the closest academic precedent: a Rust dataflow engine that compiles
 SQL into a graph of stateful operators and serves materialized views. The
@@ -82,7 +82,7 @@ What Noria does *not* give us:
   and get an eviction error if their key was thrown out
   (`noria/src/view.rs:117-142`). We need long-lived streaming subscriptions.
 
-### 3.2 timely-dataflow (`/Users/coltonpierson/workspace/reference/timely-dataflow`)
+### 3.2 timely-dataflow
 
 Timely is the execution substrate. Its **capability/frontier** progress system
 is exactly what we need to map LSNs to logical time:
@@ -107,7 +107,7 @@ Timely alone does not provide retractions or arrangements; **differential-
 dataflow** (a separate crate built on timely) does. We use differential as
 the operator library.
 
-### 3.3 pg-walstream (`/Users/coltonpierson/workspace/reference/pg-walstream`)
+### 3.3 pg-walstream
 
 Already speaks the Postgres logical replication protocol (pgoutput, v1–v4)
 with streaming and two-phase commit support. Provides:
@@ -152,7 +152,7 @@ Lessons we adopt directly:
 - Reported throughput: ~10k writes/sec per instance, ms-scale propagation
   latency. We target the same envelope.
 
-### 3.5 GlueSQL (`/Users/coltonpierson/workspace/reference/gluesql`)
+### 3.5 GlueSQL
 
 GlueSQL is an embeddable SQL library — a `sqlparser-rs`-based frontend
 plus a row-at-a-time Volcano executor with pluggable storage backends
