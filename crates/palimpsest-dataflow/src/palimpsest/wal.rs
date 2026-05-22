@@ -67,6 +67,21 @@ pub struct WalUpdate {
     pub diff: isize,
 }
 
+/// WAL-derived updates that belong to one committed Postgres transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalTransaction {
+    /// PostgreSQL transaction id, when the WAL stream provided one.
+    pub xid: Option<u32>,
+    /// LSN observed at the begin marker, when present.
+    pub begin_lsn: Option<Lsn>,
+    /// Commit LSN shared by every update in this transaction.
+    pub commit_lsn: Lsn,
+    /// WAL end LSN after the commit.
+    pub end_lsn: Lsn,
+    /// Row-level updates produced by the transaction.
+    pub updates: Vec<WalUpdate>,
+}
+
 impl WalUpdate {
     /// Creates a WAL-derived update.
     #[must_use]
@@ -83,7 +98,7 @@ impl WalUpdate {
 /// Transaction-aware converter from decoded WAL events to dataflow updates.
 #[derive(Debug, Clone, Default)]
 pub struct WalSourceState {
-    transaction_lsn: Option<Lsn>,
+    transaction_xid: Option<u32>,
     pending: Vec<PendingRow>,
 }
 
@@ -92,17 +107,23 @@ impl WalSourceState {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            transaction_lsn: None,
+            transaction_xid: None,
             pending: Vec::new(),
         }
     }
 
     /// Applies a decoded WAL event and returns updates ready to enter dataflow.
     pub fn apply(&mut self, event: DecodedEvent) -> Vec<WalUpdate> {
+        self.apply_transaction(event)
+            .map_or_else(Vec::new, |transaction| transaction.updates)
+    }
+
+    /// Applies a decoded WAL event and returns a complete transaction at commit.
+    pub fn apply_transaction(&mut self, event: DecodedEvent) -> Option<WalTransaction> {
         match event {
-            DecodedEvent::Begin { commit_lsn, .. } => {
-                self.transaction_lsn = Some(Lsn::from(commit_lsn));
-                Vec::new()
+            DecodedEvent::Begin { xid, .. } => {
+                self.transaction_xid = Some(xid);
+                None
             }
             DecodedEvent::Row {
                 table,
@@ -116,15 +137,45 @@ impl WalSourceState {
                     old: old.map(tuple_to_row),
                     new: new.map(tuple_to_row),
                 });
-                Vec::new()
+                None
             }
-            DecodedEvent::Commit { commit_lsn, .. } => {
+            DecodedEvent::Commit {
+                commit_lsn,
+                end_lsn,
+            } => {
                 let time = Lsn::from(commit_lsn);
-                self.transaction_lsn = None;
-                self.drain_pending(time)
+                let transaction = WalTransaction {
+                    xid: self.transaction_xid.take(),
+                    begin_lsn: None,
+                    commit_lsn: time,
+                    end_lsn: Lsn::from(end_lsn),
+                    updates: self.drain_pending(time),
+                };
+                Some(transaction)
             }
-            DecodedEvent::Stream(palimpsest_wal::StreamAction::Commit { commit_lsn, .. }) => {
-                self.drain_pending(Lsn::from(commit_lsn))
+            DecodedEvent::Stream(palimpsest_wal::StreamAction::Commit {
+                xid,
+                commit_lsn,
+                end_lsn,
+            }) => {
+                let time = Lsn::from(commit_lsn);
+                let transaction = WalTransaction {
+                    xid: self.transaction_xid.take().or(Some(xid)),
+                    begin_lsn: None,
+                    commit_lsn: time,
+                    end_lsn: Lsn::from(end_lsn),
+                    updates: self.drain_pending(time),
+                };
+                Some(transaction)
+            }
+            DecodedEvent::Stream(palimpsest_wal::StreamAction::Start { xid, .. }) => {
+                self.transaction_xid = Some(xid);
+                None
+            }
+            DecodedEvent::Stream(palimpsest_wal::StreamAction::Abort { .. }) => {
+                self.transaction_xid = None;
+                self.pending.clear();
+                None
             }
             DecodedEvent::Heartbeat { .. }
             | DecodedEvent::Schema { .. }
@@ -133,7 +184,7 @@ impl WalSourceState {
             | DecodedEvent::Truncate(_)
             | DecodedEvent::Origin(_)
             | DecodedEvent::Stream(_)
-            | DecodedEvent::TwoPhase(_) => Vec::new(),
+            | DecodedEvent::TwoPhase(_) => None,
         }
     }
 
@@ -233,6 +284,39 @@ mod tests {
                 1
             )]
         );
+    }
+
+    #[test]
+    fn wal_source_emits_complete_transaction_at_commit() {
+        let mut source = WalSourceState::new();
+        assert!(source
+            .apply_transaction(DecodedEvent::Begin {
+                xid: 7,
+                commit_lsn: WalLsn::new(10),
+            })
+            .is_none());
+        assert!(source
+            .apply_transaction(DecodedEvent::Row {
+                table: TableId::new(7),
+                op: RowOp::Insert,
+                old: None,
+                new: Some(smallvec::smallvec![Datum::I32(1)]),
+            })
+            .is_none());
+
+        let transaction = source
+            .apply_transaction(DecodedEvent::Commit {
+                commit_lsn: WalLsn::new(12),
+                end_lsn: WalLsn::new(13),
+            })
+            .expect("transaction");
+
+        assert_eq!(transaction.xid, Some(7));
+        assert_eq!(transaction.begin_lsn, None);
+        assert_eq!(transaction.commit_lsn, Lsn::new(12));
+        assert_eq!(transaction.end_lsn, Lsn::new(13));
+        assert_eq!(transaction.updates.len(), 1);
+        assert_eq!(transaction.updates[0].time, Lsn::new(12));
     }
 
     #[test]

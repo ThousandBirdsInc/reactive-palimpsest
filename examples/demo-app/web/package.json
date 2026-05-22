@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@palimpsest/client": "file:../../../packages/palimpsest-client-typescript",
+    "motion": "^12.38.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -20,7 +21,7 @@
     "@vitejs/plugin-react": "^4.3.1",
     "typescript": "^5.5.3",
     "vite": "^5.4.2",
-    "vite-plugin-wasm": "^3.3.0",
-    "vite-plugin-top-level-await": "^1.4.4"
+    "vite-plugin-top-level-await": "^1.4.4",
+    "vite-plugin-wasm": "^3.3.0"
   }
 }

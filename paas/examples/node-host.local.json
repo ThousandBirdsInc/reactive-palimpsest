@@ -1,0 +1,14 @@
+{
+  "host_id": "local-dev-host",
+  "region": "local",
+  "failure_domain": "local-dev",
+  "data_root": "/tmp/palimpsest-paas-smoke/postgres",
+  "first_port": 55000,
+  "state": "active",
+  "capacity": {
+    "max_clusters": 16,
+    "assigned_clusters": 0,
+    "storage_gib": 1024,
+    "used_storage_gib": 0
+  }
+}

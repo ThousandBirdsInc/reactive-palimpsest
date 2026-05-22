@@ -1,0 +1,14 @@
+{
+  "artifact_id": "backup_artifact_1779125000000000000",
+  "backup_id": "backup_1779124957424164000",
+  "cluster_id": "cluster_123",
+  "provider": "local_fs",
+  "object_uri": "file:///var/lib/palimpsest/backups/cluster_123/backup_1779124957424164000",
+  "manifest_path": "/var/lib/palimpsest/backups/cluster_123/backup_1779124957424164000/manifest.json",
+  "manifest_sha256": "sha256:example",
+  "size_bytes": 4096,
+  "status": "available",
+  "created_at": "2026-05-18 17:30:00+00",
+  "updated_at": "2026-05-18 17:30:00+00",
+  "error_message": null
+}

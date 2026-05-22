@@ -33,9 +33,7 @@ use palimpsest_proto::palimpsest::sync::v1 as proto;
 use palimpsest_proto::palimpsest::sync::v1::sync_engine_client::SyncEngineClient;
 use palimpsest_server::cursor::RawDiff;
 use palimpsest_server::snapshot::{SnapshotBatch, SnapshotTableRows};
-use palimpsest_server::subscription::{
-    ColumnSpec, QueryId, SchemaDefinition, SchemaId,
-};
+use palimpsest_server::subscription::{ColumnSpec, QueryId, SchemaDefinition, SchemaId};
 use palimpsest_server::wal_runtime::WalRuntime;
 use palimpsest_server::{AnonymousAuthenticator, Palimpsest, TraceCursor};
 use palimpsest_sql::{Catalog, ColumnSchema, ColumnType, TableSchema};
@@ -77,14 +75,11 @@ impl TestEventsWal {
         drop(lsn_guard);
 
         self.rows.lock().expect("rows lock").push(row.clone());
-        self.journal
-            .lock()
-            .expect("journal lock")
-            .push(RawDiff {
-                row,
-                lsn: new_lsn,
-                diff: 1,
-            });
+        self.journal.lock().expect("journal lock").push(RawDiff {
+            row,
+            lsn: new_lsn,
+            diff: 1,
+        });
     }
 }
 
@@ -253,8 +248,7 @@ impl AggregateHarness {
 }
 
 fn bind_ephemeral() -> SocketAddr {
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
     listener.set_nonblocking(true).expect("nonblocking");
     let addr = listener.local_addr().expect("addr");
     drop(listener);
@@ -301,6 +295,35 @@ fn decode_diff_rows(diff: &proto::Diff, schema: &proto::Schema) -> Vec<Row> {
     let wire_rows = registry.decode(diff).expect("decode diff");
     wire_rows
         .into_iter()
+        .map(|wire_row| {
+            wire_row
+                .into_iter()
+                .map(|wd| match wd {
+                    WireDatum::Bool(b) => Datum::Bool(b),
+                    WireDatum::I16(v) => Datum::I16(v),
+                    WireDatum::I32(v) => Datum::I32(v),
+                    WireDatum::I64(v) => Datum::I64(v),
+                    WireDatum::F32(v) => Datum::F32(v),
+                    WireDatum::F64(v) => Datum::F64(v),
+                    WireDatum::Text(b) => Datum::Text(b.into()),
+                    WireDatum::Null => Datum::Null,
+                    other => panic!("unexpected wire datum in test: {other:?}"),
+                })
+                .collect::<Row>()
+        })
+        .collect()
+}
+
+fn decode_transaction_rows(update: &proto::TransactionUpdate, schema: &proto::Schema) -> Vec<Row> {
+    use palimpsest_proto::wire::{SchemaRegistry, WireDatum};
+    let mut registry = SchemaRegistry::new();
+    registry.register(update.schema_id, schema.clone());
+    let changes = registry
+        .decode_transaction(update)
+        .expect("decode transaction");
+    changes
+        .into_iter()
+        .filter_map(|change| change.new.or(change.old))
         .map(|wire_row| {
             wire_row
                 .into_iter()
@@ -446,8 +469,8 @@ async fn permission_filter_threads_through_to_aggregate() {
     // through the same compiled filter.
     let rule = PermissionRule::new("events_min_value", "events", "value >= 50");
     let user_schema = UserContextSchema::default();
-    let rules = compile_rules(&[rule], &events_catalog(), &user_schema)
-        .expect("compile permission rule");
+    let rules =
+        compile_rules(&[rule], &events_catalog(), &user_schema).expect("compile permission rule");
 
     let seed = vec![
         event_row(1, 7, 100), // counted
@@ -528,18 +551,18 @@ async fn permission_filter_threads_through_to_aggregate() {
 
     // Push an event ABOVE the threshold — should change the aggregate.
     harness.wal.push_event(event_row(6, 9, 200));
-    let diff_msg = loop {
+    let update_msg = loop {
         let msg = tokio::time::timeout(Duration::from_secs(3), response.next())
             .await
             .expect("diff timeout")
             .expect("stream closed")
             .expect("status");
         match msg.kind.expect("diff kind") {
-            proto::server_message::Kind::Diff(d) => break d,
+            proto::server_message::Kind::TransactionUpdate(update) => break update,
             other => panic!("unexpected message: {other:?}"),
         }
     };
-    let updated = decode_diff_rows(&diff_msg, &schema);
+    let updated = decode_transaction_rows(&update_msg, &schema);
     let new_cat_9 = updated
         .iter()
         .find(|r| matches!(r.get(0), Some(Datum::I64(9))))
@@ -572,7 +595,9 @@ async fn two_subscribers_on_same_sql_both_see_live_diffs() {
         .await
         .expect("send a");
     let mut resp_a = client_a
-        .subscribe(Request::new(tokio_stream::wrappers::ReceiverStream::new(rx_a)))
+        .subscribe(Request::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx_a,
+        )))
         .await
         .expect("sub a")
         .into_inner();
@@ -582,7 +607,9 @@ async fn two_subscribers_on_same_sql_both_see_live_diffs() {
         .await
         .expect("send b");
     let mut resp_b = client_b
-        .subscribe(Request::new(tokio_stream::wrappers::ReceiverStream::new(rx_b)))
+        .subscribe(Request::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx_b,
+        )))
         .await
         .expect("sub b")
         .into_inner();
@@ -609,7 +636,7 @@ async fn two_subscribers_on_same_sql_both_see_live_diffs() {
         ));
     }
 
-    // Single mutation — both subscribers should observe a Diff event.
+    // Single mutation — both subscribers should observe a transaction event.
     harness.wal.push_event(event_row(3, 7, 200));
 
     let next_a = tokio::time::timeout(Duration::from_secs(3), resp_a.next())
@@ -624,14 +651,14 @@ async fn two_subscribers_on_same_sql_both_see_live_diffs() {
         .expect("b status");
     for msg in [next_a, next_b] {
         match msg.kind.expect("diff kind") {
-            proto::server_message::Kind::Diff(d) => {
+            proto::server_message::Kind::TransactionUpdate(update) => {
                 // Both subscribers see the cat-7 update.
-                assert!(
-                    d.op == proto::DiffOp::Update as i32
-                        || d.op == proto::DiffOp::Insert as i32
-                );
+                assert!(update.changes.iter().any(|change| {
+                    change.op == proto::DiffOp::Update as i32
+                        || change.op == proto::DiffOp::Insert as i32
+                }));
             }
-            other => panic!("expected Diff, got {other:?}"),
+            other => panic!("expected TransactionUpdate, got {other:?}"),
         }
     }
 
@@ -657,7 +684,9 @@ async fn unsubscribe_resubscribe_rebuilds_host_state() {
             .await
             .expect("send first");
         let mut resp = client
-            .subscribe(Request::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            .subscribe(Request::new(tokio_stream::wrappers::ReceiverStream::new(
+                rx,
+            )))
             .await
             .expect("sub first")
             .into_inner();
@@ -683,7 +712,9 @@ async fn unsubscribe_resubscribe_rebuilds_host_state() {
         .await
         .expect("send second");
     let mut resp = client
-        .subscribe(Request::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        .subscribe(Request::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
         .await
         .expect("sub second")
         .into_inner();
@@ -763,24 +794,26 @@ async fn wal_diff_produces_aggregate_update() {
     harness.wal.push_event(event_row(3, 9, 100));
 
     // Wait for the next Diff event (cursor polls every 50ms).
-    let diff_msg = loop {
+    let update_msg = loop {
         let msg = tokio::time::timeout(Duration::from_secs(3), response.next())
             .await
             .expect("diff timeout")
             .expect("stream closed")
             .expect("status");
         match msg.kind.expect("diff kind") {
-            proto::server_message::Kind::Diff(d) => break d,
-            other => panic!("unexpected message between Initial and Diff: {other:?}"),
+            proto::server_message::Kind::TransactionUpdate(update) => break update,
+            other => panic!("unexpected message between Initial and TransactionUpdate: {other:?}"),
         }
     };
 
-    assert_eq!(
-        diff_msg.op,
-        proto::DiffOp::Update as i32,
+    assert!(
+        update_msg
+            .changes
+            .iter()
+            .any(|change| change.op == proto::DiffOp::Update as i32),
         "cat-9 retract+assert pair should collapse to UPDATE",
     );
-    let rows = decode_diff_rows(&diff_msg, &schema);
+    let rows = decode_transaction_rows(&update_msg, &schema);
     let new_cat_9 = rows
         .iter()
         .find(|r| matches!(r.get(0), Some(Datum::I64(9))))

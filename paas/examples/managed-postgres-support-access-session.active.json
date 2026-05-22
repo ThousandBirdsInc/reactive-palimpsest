@@ -1,0 +1,17 @@
+{
+  "session_id": "support_access_123",
+  "cluster_id": "cluster_123",
+  "organization_id": "org_123",
+  "project_id": "project_123",
+  "environment_id": "env_123",
+  "requested_by": "support:incident-commander",
+  "approved_by": "api_key:key_admin",
+  "revoked_by": null,
+  "reason": "Investigate customer-approved production incident INC-1234.",
+  "ticket_ref": "INC-1234",
+  "status": "active",
+  "requested_at": "2026-05-18 12:00:00+00",
+  "approved_at": "2026-05-18 12:01:00+00",
+  "expires_at": "2026-05-18 13:00:00+00",
+  "revoked_at": null
+}

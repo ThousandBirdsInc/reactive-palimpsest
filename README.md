@@ -37,6 +37,7 @@ for known operational failure modes.
 | `crates/palimpsest-soak` | Soak and load-test binaries. |
 | `examples/demo-app` | Dockerized React + WASM + Rust end-to-end demo. |
 | `docs` | Architecture, user, operator, security, TLS, migration, and runbook docs. |
+| `paas` | Managed Postgres + Palimpsest platform design and implementation plan. |
 | `xtask` | Project maintenance commands. |
 
 ## Quick Start: Demo App
@@ -106,6 +107,9 @@ Supported commands:
 | `serve [config]` | Run the embedded server. This is the default command. |
 | `validate-config <config>` | Parse TOML config and compile permission rules. |
 | `dump-catalog [config]` | Print the configured catalog as JSON. |
+| `dev up\|down\|reset\|status\|env` | Manage the local PostgreSQL 18 + Palimpsest PaaS stack. |
+| `db create` | Create a SQL-backed managed PostgreSQL 18+ cluster intent. |
+| `db psql` | Open `psql` against the local stack or a configured database URL. |
 | `slot-info <config>` | Print replication slot status when built with `--features slot-info`. |
 
 Example config:
@@ -118,6 +122,24 @@ Validate it with:
 
 ```sh
 cargo run -p palimpsest-cli -- validate-config crates/palimpsest-cli/palimpsest.example.toml
+```
+
+Start the local PaaS stack with PostgreSQL 18:
+
+```sh
+cargo run -p palimpsest-cli -- dev up
+```
+
+Print `.env`-compatible local settings with:
+
+```sh
+cargo run -p palimpsest-cli -- dev env
+```
+
+Open a local database shell with:
+
+```sh
+cargo run -p palimpsest-cli -- db psql --local
 ```
 
 ## Clients
@@ -159,6 +181,9 @@ Operational docs live under `docs/`:
 - [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)
 - [docs/SECURITY-PROCESS.md](docs/SECURITY-PROCESS.md)
 - [docs/MIGRATION-FROM-REST.md](docs/MIGRATION-FROM-REST.md)
+- [docs/PAAS-DESIGN.md](docs/PAAS-DESIGN.md)
+- [paas/IMPLEMENTATION-PLAN.md](paas/IMPLEMENTATION-PLAN.md)
+- [paas/MANAGED-POSTGRES-DESIGN.md](paas/MANAGED-POSTGRES-DESIGN.md)
 
 ## Maintenance Commands
 

@@ -85,6 +85,7 @@ async fn lifecycle_subscribe_pump_ack_unsubscribe() {
         .subscribe(
             SubscribeRequest {
                 connection: ConnectionId::new(1),
+                subscription_id: router.allocate_subscription_id(),
                 client_id: ClientSubscriptionId::new("posts.recent"),
                 query: QueryId::new("posts.recent"),
                 query_graph: &graph,
@@ -92,6 +93,7 @@ async fn lifecycle_subscribe_pump_ack_unsubscribe() {
                 schema: schema_for_posts(),
                 resume_lsn: None,
                 compiled_plan: None,
+                prerun_initial: None,
             },
             &provider,
         )
@@ -118,10 +120,15 @@ async fn lifecycle_subscribe_pump_ack_unsubscribe() {
         .unwrap();
 
     let update = stream.next().await.unwrap();
-    let DiffEvent::Update { changes, lsn } = update else {
-        panic!("expected update");
+    let DiffEvent::TransactionUpdate {
+        changes,
+        commit_lsn,
+        ..
+    } = update
+    else {
+        panic!("expected transaction update");
     };
-    assert_eq!(lsn, Lsn::new(110));
+    assert_eq!(commit_lsn, Lsn::new(110));
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].op, DiffOp::Insert);
 
@@ -157,6 +164,7 @@ async fn saturated_channel_emits_resync_and_drains() {
         .subscribe(
             SubscribeRequest {
                 connection: ConnectionId::new(1),
+                subscription_id: router.allocate_subscription_id(),
                 client_id: ClientSubscriptionId::new("posts"),
                 query: QueryId::new("posts"),
                 query_graph: &graph,
@@ -164,6 +172,7 @@ async fn saturated_channel_emits_resync_and_drains() {
                 schema: schema_for_posts(),
                 resume_lsn: None,
                 compiled_plan: None,
+                prerun_initial: None,
             },
             &provider,
         )
@@ -209,6 +218,7 @@ async fn permission_subscriptions_with_different_user_context_split_subgraphs() 
         .subscribe(
             SubscribeRequest {
                 connection: ConnectionId::new(1),
+                subscription_id: router.allocate_subscription_id(),
                 client_id: ClientSubscriptionId::new("posts"),
                 query: QueryId::new("posts"),
                 query_graph: &graph,
@@ -216,6 +226,7 @@ async fn permission_subscriptions_with_different_user_context_split_subgraphs() 
                 schema: schema_for_posts(),
                 resume_lsn: None,
                 compiled_plan: None,
+                prerun_initial: None,
             },
             &provider,
         )
@@ -224,6 +235,7 @@ async fn permission_subscriptions_with_different_user_context_split_subgraphs() 
         .subscribe(
             SubscribeRequest {
                 connection: ConnectionId::new(2),
+                subscription_id: router.allocate_subscription_id(),
                 client_id: ClientSubscriptionId::new("posts"),
                 query: QueryId::new("posts"),
                 query_graph: &graph,
@@ -231,6 +243,7 @@ async fn permission_subscriptions_with_different_user_context_split_subgraphs() 
                 schema: schema_for_posts(),
                 resume_lsn: None,
                 compiled_plan: None,
+                prerun_initial: None,
             },
             &provider,
         )
@@ -248,6 +261,7 @@ async fn duplicate_client_label_within_connection_is_rejected() {
         .subscribe(
             SubscribeRequest {
                 connection: ConnectionId::new(1),
+                subscription_id: router.allocate_subscription_id(),
                 client_id: ClientSubscriptionId::new("posts"),
                 query: QueryId::new("posts"),
                 query_graph: &graph,
@@ -255,6 +269,7 @@ async fn duplicate_client_label_within_connection_is_rejected() {
                 schema: schema_for_posts(),
                 resume_lsn: None,
                 compiled_plan: None,
+                prerun_initial: None,
             },
             &provider,
         )
@@ -262,13 +277,15 @@ async fn duplicate_client_label_within_connection_is_rejected() {
     let result = router.subscribe(
         SubscribeRequest {
             connection: ConnectionId::new(1),
+            subscription_id: router.allocate_subscription_id(),
             client_id: ClientSubscriptionId::new("posts"),
             query: QueryId::new("posts"),
             query_graph: &graph,
             user_ctx: UserContext::new(std::iter::empty()),
             schema: schema_for_posts(),
             resume_lsn: None,
-                compiled_plan: None,
+            compiled_plan: None,
+            prerun_initial: None,
         },
         &provider,
     );
@@ -287,6 +304,7 @@ async fn ack_advances_compaction_frontier() {
         .subscribe(
             SubscribeRequest {
                 connection: ConnectionId::new(1),
+                subscription_id: router.allocate_subscription_id(),
                 client_id: ClientSubscriptionId::new("posts"),
                 query: QueryId::new("posts"),
                 query_graph: &graph,
@@ -294,6 +312,7 @@ async fn ack_advances_compaction_frontier() {
                 schema: schema_for_posts(),
                 resume_lsn: None,
                 compiled_plan: None,
+                prerun_initial: None,
             },
             &provider,
         )

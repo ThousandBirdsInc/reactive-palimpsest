@@ -51,6 +51,19 @@ pub enum DiffEvent {
         /// Per-row changes.
         changes: Vec<RowChange>,
     },
+    /// Complete live update for one upstream transaction.
+    TransactionUpdate {
+        /// PostgreSQL transaction id, when known.
+        transaction_id: Option<u32>,
+        /// Begin marker LSN, when known.
+        begin_lsn: Option<Lsn>,
+        /// Commit LSN for this complete transaction.
+        commit_lsn: Lsn,
+        /// End marker LSN, when known.
+        end_lsn: Option<Lsn>,
+        /// Per-row changes caused by the transaction.
+        changes: Vec<RowChange>,
+    },
     /// The router cannot deliver in-order diffs anymore; client must
     /// reconcile.
     Resync {

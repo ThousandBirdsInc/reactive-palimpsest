@@ -1,0 +1,24 @@
+{
+  "deployment_id": "sync_123",
+  "environment_id": "env_123",
+  "region": "us-east-1",
+  "shard_id": "shard_0",
+  "config_version": "config_001",
+  "database": {
+    "url": "postgres://palimpsest_repl:palimpsest_repl@postgres:5432/palimpsest_dev",
+    "slot_name": "palimpsest",
+    "publication": "palimpsest_pub"
+  },
+  "sync": {
+    "grpc_addr": "0.0.0.0:50051",
+    "metrics_addr": "0.0.0.0:9090",
+    "auth": {
+      "kind": "anonymous"
+    }
+  },
+  "telemetry": {
+    "organization_id": "org_123",
+    "project_id": "project_123",
+    "extra": {}
+  }
+}

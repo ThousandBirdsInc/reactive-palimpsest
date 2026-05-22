@@ -31,7 +31,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::palimpsest::sync::v1::{DatumType, Diff, Schema};
+use crate::palimpsest::sync::v1::{
+    DatumType, Diff, DiffOp, RowChange as ProtoRowChange, Schema,
+    TransactionUpdate as ProtoTransactionUpdate,
+};
 
 /// Wire-safe representation of one column value.
 ///
@@ -73,6 +76,17 @@ pub enum WireDatum {
 /// associated schema's column order.
 pub type WireRow = Vec<WireDatum>;
 
+/// Decoded row-level change from a transaction envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireRowChange {
+    /// Operation kind for this row.
+    pub op: DiffOp,
+    /// Pre-image, present for deletes and updates.
+    pub old: Option<WireRow>,
+    /// Post-image, present for inserts and updates.
+    pub new: Option<WireRow>,
+}
+
 /// Failures that can occur encoding or decoding a row payload.
 #[derive(Debug, Error)]
 pub enum CodecError {
@@ -88,6 +102,14 @@ pub enum CodecError {
         /// Column count from the schema.
         expected: usize,
         /// Column count present in the payload.
+        actual: usize,
+    },
+    /// A transaction row-change payload did not contain exactly one row.
+    #[error("row count mismatch: expected {expected}, got {actual}")]
+    RowCount {
+        /// Expected row count.
+        expected: usize,
+        /// Actual decoded row count.
         actual: usize,
     },
     /// Decoded datum variant is incompatible with the schema's
@@ -138,6 +160,54 @@ pub fn decode_diff(diff: &Diff, schema: &Schema) -> Result<Vec<WireRow>, CodecEr
         validate_row(row, schema)?;
     }
     Ok(rows)
+}
+
+/// Decodes and validates every row change in a transaction update.
+///
+/// # Errors
+/// Returns the same validation failures as [`decode_diff`] for any
+/// encoded old/new row payload.
+pub fn decode_transaction_update(
+    update: &ProtoTransactionUpdate,
+    schema: &Schema,
+) -> Result<Vec<WireRowChange>, CodecError> {
+    update
+        .changes
+        .iter()
+        .map(|change| decode_row_change(change, schema))
+        .collect()
+}
+
+fn decode_row_change(
+    change: &ProtoRowChange,
+    schema: &Schema,
+) -> Result<WireRowChange, CodecError> {
+    let op = DiffOp::try_from(change.op).unwrap_or(DiffOp::Unspecified);
+    Ok(WireRowChange {
+        op,
+        old: decode_optional_single_row(change.old_row.as_deref(), schema)?,
+        new: decode_optional_single_row(change.new_row.as_deref(), schema)?,
+    })
+}
+
+fn decode_optional_single_row(
+    bytes: Option<&[u8]>,
+    schema: &Schema,
+) -> Result<Option<WireRow>, CodecError> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let mut rows = decode_rows(bytes)?;
+    for row in &rows {
+        validate_row(row, schema)?;
+    }
+    if rows.len() != 1 {
+        return Err(CodecError::RowCount {
+            expected: 1,
+            actual: rows.len(),
+        });
+    }
+    Ok(rows.pop())
 }
 
 fn validate_row(row: &WireRow, schema: &Schema) -> Result<(), CodecError> {
@@ -252,12 +322,33 @@ impl SchemaRegistry {
             .ok_or(CodecError::UnknownSchema(diff.schema_id))?;
         decode_diff(diff, schema)
     }
+
+    /// Decodes a [`ProtoTransactionUpdate`] using its registered schema.
+    ///
+    /// # Errors
+    /// * [`CodecError::UnknownSchema`] if the schema id has not been
+    ///   registered.
+    /// * Anything [`decode_transaction_update`] can return.
+    pub fn decode_transaction(
+        &self,
+        update: &ProtoTransactionUpdate,
+    ) -> Result<Vec<WireRowChange>, CodecError> {
+        let schema = self
+            .get(update.schema_id)
+            .ok_or(CodecError::UnknownSchema(update.schema_id))?;
+        decode_transaction_update(update, schema)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_diff, decode_rows, encode_rows, CodecError, SchemaRegistry, WireDatum};
-    use crate::palimpsest::sync::v1::{Column, DatumType, Diff, DiffOp, Schema};
+    use super::{
+        decode_diff, decode_rows, decode_transaction_update, encode_rows, CodecError,
+        SchemaRegistry, WireDatum,
+    };
+    use crate::palimpsest::sync::v1::{
+        Column, DatumType, Diff, DiffOp, RowChange, Schema, TransactionUpdate,
+    };
 
     fn posts_schema() -> Schema {
         Schema {
@@ -391,6 +482,43 @@ mod tests {
         };
         let err = reg.decode(&stale).unwrap_err();
         assert!(matches!(err, CodecError::UnknownSchema(99)));
+    }
+
+    #[test]
+    fn transaction_update_preserves_per_row_ops() {
+        let old = vec![WireDatum::I64(1), WireDatum::Text(b"old".to_vec())];
+        let new = vec![WireDatum::I64(1), WireDatum::Text(b"new".to_vec())];
+        let update = TransactionUpdate {
+            subscription_id: "posts".into(),
+            commit_lsn: 10,
+            begin_lsn: Some(8),
+            end_lsn: Some(11),
+            transaction_id: Some(99),
+            schema_id: 7,
+            chunk_index: 0,
+            chunk_count: 1,
+            changes: vec![
+                RowChange {
+                    op: DiffOp::Update.into(),
+                    old_row: Some(encode_rows(std::slice::from_ref(&old)).unwrap()),
+                    new_row: Some(encode_rows(std::slice::from_ref(&new)).unwrap()),
+                },
+                RowChange {
+                    op: DiffOp::Delete.into(),
+                    old_row: Some(encode_rows(std::slice::from_ref(&old)).unwrap()),
+                    new_row: None,
+                },
+            ],
+        };
+
+        let decoded = decode_transaction_update(&update, &posts_schema()).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].op, DiffOp::Update);
+        assert_eq!(decoded[0].old.as_ref(), Some(&old));
+        assert_eq!(decoded[0].new.as_ref(), Some(&new));
+        assert_eq!(decoded[1].op, DiffOp::Delete);
+        assert_eq!(decoded[1].old.as_ref(), Some(&old));
+        assert!(decoded[1].new.is_none());
     }
 
     #[test]

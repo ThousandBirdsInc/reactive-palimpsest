@@ -196,9 +196,8 @@ mod wasm {
         })?;
         let (mut ws_sink, mut ws_stream) = ws.split();
 
-        let (inbound_tx, inbound_rx) = mpsc::channel::<Result<ServerMessage, tonic::Status>>(
-            inbound_capacity,
-        );
+        let (inbound_tx, inbound_rx) =
+            mpsc::channel::<Result<ServerMessage, tonic::Status>>(inbound_capacity);
 
         // browser → server: drain outbound_rx, encode ClientMessage,
         // ship as a binary WS frame.
@@ -226,10 +225,11 @@ mod wasm {
         spawn_local(async move {
             while let Some(item) = ws_stream.next().await {
                 let res = match item {
-                    Ok(WsMessage::Bytes(bytes)) => ServerMessage::decode(bytes.as_slice())
-                        .map_err(|err| {
+                    Ok(WsMessage::Bytes(bytes)) => {
+                        ServerMessage::decode(bytes.as_slice()).map_err(|err| {
                             tonic::Status::data_loss(format!("decode ServerMessage: {err}"))
-                        }),
+                        })
+                    }
                     Ok(WsMessage::Text(_)) => {
                         Err(tonic::Status::data_loss("unexpected ws text frame"))
                     }
@@ -326,13 +326,9 @@ mod wasm {
         let mut out = String::with_capacity(input.len());
         for byte in input.bytes() {
             match byte {
-                b'A'..=b'Z'
-                | b'a'..=b'z'
-                | b'0'..=b'9'
-                | b'-'
-                | b'_'
-                | b'.'
-                | b'~' => out.push(byte as char),
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(byte as char)
+                }
                 _ => out.push_str(&format!("%{byte:02X}")),
             }
         }

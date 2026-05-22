@@ -85,6 +85,7 @@ async fn parallel_subscriptions_receive_same_sequence() {
         .subscribe(
             SubscribeRequest {
                 connection: ConnectionId::new(1),
+                subscription_id: router.allocate_subscription_id(),
                 client_id: ClientSubscriptionId::new("a"),
                 query: QueryId::new("posts.recent"),
                 query_graph: &graph,
@@ -92,6 +93,7 @@ async fn parallel_subscriptions_receive_same_sequence() {
                 schema: schema(),
                 resume_lsn: None,
                 compiled_plan: None,
+                prerun_initial: None,
             },
             &provider_a,
         )
@@ -100,6 +102,7 @@ async fn parallel_subscriptions_receive_same_sequence() {
         .subscribe(
             SubscribeRequest {
                 connection: ConnectionId::new(2),
+                subscription_id: router.allocate_subscription_id(),
                 client_id: ClientSubscriptionId::new("b"),
                 query: QueryId::new("posts.recent"),
                 query_graph: &graph,
@@ -107,6 +110,7 @@ async fn parallel_subscriptions_receive_same_sequence() {
                 schema: schema(),
                 resume_lsn: None,
                 compiled_plan: None,
+                prerun_initial: None,
             },
             &provider_b,
         )
@@ -141,13 +145,15 @@ async fn parallel_subscriptions_receive_same_sequence() {
         let event_b = stream_b.next().await.unwrap();
         match (&event_a, &event_b) {
             (
-                DiffEvent::Update {
+                DiffEvent::TransactionUpdate {
                     changes: ca,
-                    lsn: la,
+                    commit_lsn: la,
+                    ..
                 },
-                DiffEvent::Update {
+                DiffEvent::TransactionUpdate {
                     changes: cb,
-                    lsn: lb,
+                    commit_lsn: lb,
+                    ..
                 },
             ) => {
                 assert_eq!(la, lb, "lsns diverged at round {round}");
@@ -163,7 +169,7 @@ async fn parallel_subscriptions_receive_same_sequence() {
                     );
                 }
             }
-            other => panic!("expected Update on both streams, saw {other:?}"),
+            other => panic!("expected TransactionUpdate on both streams, saw {other:?}"),
         }
     }
 }

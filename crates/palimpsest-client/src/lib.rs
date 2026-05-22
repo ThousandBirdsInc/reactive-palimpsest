@@ -40,13 +40,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 
 use connection::{Command, ConnectionInbox, ConnectionTask};
 use runtime::TaskHandle;
 
 pub use auth::Auth;
 pub use cache::{LocalCache, PrimaryKey};
+pub use connection::ConnectionState;
 pub use error::ClientError;
 pub use palimpsest_proto::palimpsest::sync::v1::{
     var_value, DatumType, DiffOp, ResyncReason, VarValue,
@@ -83,6 +84,10 @@ pub struct Client {
     next_subscription_id: Arc<AtomicU64>,
     /// Owned by the first cloned [`Client`]; dropped on shutdown.
     join: Arc<Mutex<Option<TaskHandle>>>,
+    /// Latest [`ConnectionState`] from the manager task. Each `clone`
+    /// of `Client` shares the same receiver; callers who need their
+    /// own watch handle should call [`Client::watch_connection_state`].
+    state_rx: watch::Receiver<ConnectionState>,
 }
 
 impl Client {
@@ -114,13 +119,33 @@ impl Client {
         config: ClientConfig,
     ) -> Result<Self, ClientError> {
         let endpoint = transport::parse_endpoint(url.as_ref())?;
-        let (inbox, join) = ConnectionTask::spawn(endpoint, auth, config.backoff.clone());
+        let (inbox, join, state_rx) = ConnectionTask::spawn(endpoint, auth, config.backoff.clone());
         Ok(Self {
             inbox,
             config: Arc::new(config),
             next_subscription_id: Arc::new(AtomicU64::new(1)),
             join: Arc::new(Mutex::new(Some(join))),
+            state_rx,
         })
+    }
+
+    /// Snapshot the current [`ConnectionState`]. Cheap, lock-free read
+    /// of the latest value the manager has published.
+    #[must_use]
+    pub fn connection_state(&self) -> ConnectionState {
+        self.state_rx.borrow().clone()
+    }
+
+    /// Subscribe to [`ConnectionState`] transitions. The returned
+    /// [`watch::Receiver`] tracks the same manager task as `self`; each
+    /// call hands out an independent receiver that can be `await`-ed via
+    /// [`watch::Receiver::changed`].
+    ///
+    /// UIs typically use this to render a "reconnecting in N ms" badge
+    /// without polling.
+    #[must_use]
+    pub fn watch_connection_state(&self) -> watch::Receiver<ConnectionState> {
+        self.state_rx.clone()
     }
 
     /// Subscribe to a SQL query with no variables.

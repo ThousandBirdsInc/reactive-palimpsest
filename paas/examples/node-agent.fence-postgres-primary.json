@@ -1,0 +1,8 @@
+{
+  "command_id": "cluster_123:fence-postgres-primary:failover_001",
+  "cluster_id": "cluster_123",
+  "action": {
+    "kind": "fence_postgres_primary",
+    "data_dir": "/var/lib/palimpsest/postgres/cluster_123"
+  }
+}

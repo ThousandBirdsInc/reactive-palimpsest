@@ -13,10 +13,16 @@ export interface Post {
   published: boolean;
 }
 
-export interface BulkAddEventsResponse {
+export interface BulkAddOrdersResponse {
   inserted: number;
   category_id: number;
   total_rows: number;
+}
+
+export interface AccountWriteResponse {
+  updated?: number;
+  debited?: number;
+  credited?: number;
 }
 
 export interface DemoUser {
@@ -75,22 +81,63 @@ export class ApiClient {
     if (!res.ok && res.status !== 404) throw new Error(`deletePost: ${res.status}`);
   }
 
-  async bulkAddEvents(
+  async bulkAddOrders(
     categoryId: number,
     count: number,
-    baseValue = 100,
-  ): Promise<BulkAddEventsResponse> {
-    const res = await fetch(`${this.base}/api/events/bulk-add`, {
+    floorCents: number,
+    spreadCents: number,
+  ): Promise<BulkAddOrdersResponse> {
+    const res = await fetch(`${this.base}/api/orders/bulk-add`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         category_id: categoryId,
         count,
-        base_value: baseValue,
+        floor_cents: floorCents,
+        spread_cents: spreadCents,
       }),
     });
-    if (!res.ok) throw new Error(`bulkAddEvents: ${res.status}`);
-    return (await res.json()) as BulkAddEventsResponse;
+    if (!res.ok) throw new Error(`bulkAddOrders: ${res.status}`);
+    return (await res.json()) as BulkAddOrdersResponse;
+  }
+
+  async deposit(actorUserId: string, amountCents: number): Promise<AccountWriteResponse> {
+    return this.accountWrite("/api/accounts/deposit", {
+      actor_user_id: actorUserId,
+      amount_cents: amountCents,
+    });
+  }
+
+  async withdraw(actorUserId: string, amountCents: number): Promise<AccountWriteResponse> {
+    return this.accountWrite("/api/accounts/withdraw", {
+      actor_user_id: actorUserId,
+      amount_cents: amountCents,
+    });
+  }
+
+  async transfer(
+    actorUserId: string,
+    toUserId: string,
+    amountCents: number,
+  ): Promise<AccountWriteResponse> {
+    return this.accountWrite("/api/accounts/transfer", {
+      actor_user_id: actorUserId,
+      to_user_id: toUserId,
+      amount_cents: amountCents,
+    });
+  }
+
+  private async accountWrite(
+    path: string,
+    body: Record<string, string | number>,
+  ): Promise<AccountWriteResponse> {
+    const res = await fetch(`${this.base}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`${path}: ${res.status}`);
+    return (await res.json()) as AccountWriteResponse;
   }
 }
 

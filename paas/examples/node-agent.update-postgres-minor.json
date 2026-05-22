@@ -1,0 +1,9 @@
+{
+  "command_id": "cluster_123:update-postgres-minor:request_001",
+  "cluster_id": "cluster_123",
+  "action": {
+    "kind": "update_postgres_minor",
+    "data_dir": "/var/lib/palimpsest/postgres/cluster_123",
+    "target_postgres_version": "18.4"
+  }
+}

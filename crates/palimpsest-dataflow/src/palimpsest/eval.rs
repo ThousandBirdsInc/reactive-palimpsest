@@ -256,16 +256,22 @@ fn binary_scalar(
     let l = compile_inner(left, schema)?;
     let r = compile_inner(right, schema)?;
     match op {
-        BinaryOperator::Eq => Ok(Box::new(move |row| {
-            Datum::Bool(datum_eq(&l(row), &r(row)))
-        })),
+        BinaryOperator::Eq => Ok(Box::new(move |row| Datum::Bool(datum_eq(&l(row), &r(row))))),
         BinaryOperator::NotEq => Ok(Box::new(move |row| {
             Datum::Bool(!datum_eq(&l(row), &r(row)))
         })),
-        BinaryOperator::Lt => Ok(Box::new(move |row| datum_cmp_bool(&l(row), &r(row), |o| o.is_lt()))),
-        BinaryOperator::LtEq => Ok(Box::new(move |row| datum_cmp_bool(&l(row), &r(row), |o| o.is_le()))),
-        BinaryOperator::Gt => Ok(Box::new(move |row| datum_cmp_bool(&l(row), &r(row), |o| o.is_gt()))),
-        BinaryOperator::GtEq => Ok(Box::new(move |row| datum_cmp_bool(&l(row), &r(row), |o| o.is_ge()))),
+        BinaryOperator::Lt => Ok(Box::new(move |row| {
+            datum_cmp_bool(&l(row), &r(row), |o| o.is_lt())
+        })),
+        BinaryOperator::LtEq => Ok(Box::new(move |row| {
+            datum_cmp_bool(&l(row), &r(row), |o| o.is_le())
+        })),
+        BinaryOperator::Gt => Ok(Box::new(move |row| {
+            datum_cmp_bool(&l(row), &r(row), |o| o.is_gt())
+        })),
+        BinaryOperator::GtEq => Ok(Box::new(move |row| {
+            datum_cmp_bool(&l(row), &r(row), |o| o.is_ge())
+        })),
         BinaryOperator::And => Ok(Box::new(move |row| {
             let lv = matches!(l(row), Datum::Bool(true));
             if !lv {
@@ -313,7 +319,7 @@ fn unary_scalar(
 
 /// SQL equality with three-valued logic: NULL on either side → false.
 fn datum_eq(a: &Datum, b: &Datum) -> bool {
-    use Datum::{Bool, F32, F64, I16, I32, I64, Null, Text};
+    use Datum::{Bool, Null, Text, F32, F64, I16, I32, I64};
     match (a, b) {
         (Null, _) | (_, Null) => false,
         (Bool(x), Bool(y)) => x == y,
@@ -342,7 +348,7 @@ where
     F: Fn(std::cmp::Ordering) -> bool,
 {
     use std::cmp::Ordering;
-    use Datum::{F64, I16, I32, I64, Null, Text};
+    use Datum::{Null, Text, F64, I16, I32, I64};
     let ord = match (a, b) {
         (Null, _) | (_, Null) => return Datum::Bool(false),
         (I64(x), I64(y)) => x.cmp(y),

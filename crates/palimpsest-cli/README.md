@@ -8,6 +8,9 @@ Standalone CLI that boots the embedded `palimpsest-server` (§18.14).
 palimpsest serve [config]              # default if no command given
 palimpsest validate-config <config>    # parse + permission compile; 0 ok, 1 error
 palimpsest dump-catalog [config]       # emit catalog as JSON on stdout
+palimpsest dev up|down|reset|status|env # local PostgreSQL 18 + Palimpsest stack
+palimpsest db create ...               # create a managed PostgreSQL 18+ cluster intent
+palimpsest db psql ...                 # open psql against local or configured Postgres
 palimpsest slot-info <config>          # show upstream replication slot status
                                        # (requires --features slot-info)
 palimpsest help
@@ -15,6 +18,54 @@ palimpsest help
 
 If invoked with a single positional argument that isn't a subcommand,
 the CLI behaves as `serve <config>` for backwards compatibility.
+
+## Local PaaS stack
+
+`palimpsest dev up` starts the local PaaS stack from
+`paas/local/docker-compose.yaml`. The stack runs PostgreSQL 18 with logical
+replication enabled and starts the Palimpsest server against
+`paas/local/palimpsest.toml`.
+
+```sh
+cargo run -p palimpsest-cli -- dev up
+cargo run -p palimpsest-cli -- dev status
+cargo run -p palimpsest-cli -- dev env
+cargo run -p palimpsest-cli -- dev down
+```
+
+Use `palimpsest dev reset` to remove the local Postgres volume and start from
+a clean database.
+
+Optional local SQL files can be placed under `paas/local/postgres/migrations`
+and `paas/local/postgres/seeds`. They run in sorted filename order when the
+Postgres volume is first initialized.
+
+## Managed Postgres helpers
+
+`palimpsest db create` posts a managed PostgreSQL 18+ cluster intent to the
+SQL control plane. The control-plane URL defaults to
+`PALIMPSEST_PAAS_CONTROL_PLANE_URL` or `http://127.0.0.1:8088`.
+
+```sh
+cargo run -p palimpsest-cli -- db create \
+  --cluster-id cluster_123 \
+  --organization-id org_123 \
+  --project-id project_123 \
+  --environment-id env_123 \
+  --region us-east-1 \
+  --postgres-version 18 \
+  --storage-gib 20
+```
+
+`palimpsest db psql` opens `psql` against an explicit URL, an environment
+URL, or the local dev stack URL. Use `--local --role admin` for the local
+admin role.
+
+```sh
+cargo run -p palimpsest-cli -- db psql --local
+cargo run -p palimpsest-cli -- db psql --local --role admin -- -c 'SELECT version()'
+cargo run -p palimpsest-cli -- db psql --url "$DATABASE_URL"
+```
 
 ## Configuration
 

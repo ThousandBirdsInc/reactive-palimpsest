@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/incident.schema.json",
+  "title": "Palimpsest Incident",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "incident_id",
+    "organization_id",
+    "project_id",
+    "environment_id",
+    "title",
+    "summary",
+    "severity",
+    "status",
+    "impacted_services",
+    "started_at",
+    "resolved_at"
+  ],
+  "properties": {
+    "incident_id": { "type": "string", "minLength": 1 },
+    "organization_id": { "type": "string", "minLength": 1 },
+    "project_id": { "type": ["string", "null"] },
+    "environment_id": { "type": ["string", "null"] },
+    "title": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "severity": { "enum": ["info", "warning", "critical"] },
+    "status": {
+      "enum": ["investigating", "identified", "monitoring", "resolved"]
+    },
+    "impacted_services": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._-]+$"
+      }
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "resolved_at": { "type": ["string", "null"] }
+  }
+}

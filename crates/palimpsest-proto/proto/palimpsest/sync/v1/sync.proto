@@ -24,6 +24,7 @@ message ServerMessage {
     Diff diff = 2;
     Resync resync = 3;
     Error error = 4;
+    TransactionUpdate transaction_update = 5;
   }
 }
 
@@ -61,6 +62,24 @@ message Diff {
   DiffOp op = 3;
   uint64 schema_id = 4;
   bytes rows = 5;
+}
+
+message TransactionUpdate {
+  string subscription_id = 1;
+  uint64 commit_lsn = 2;
+  optional uint64 begin_lsn = 3;
+  optional uint64 end_lsn = 4;
+  optional uint32 transaction_id = 5;
+  uint64 schema_id = 6;
+  uint32 chunk_index = 7;
+  uint32 chunk_count = 8;
+  repeated RowChange changes = 9;
+}
+
+message RowChange {
+  DiffOp op = 1;
+  optional bytes old_row = 2;
+  optional bytes new_row = 3;
 }
 
 message Resync {

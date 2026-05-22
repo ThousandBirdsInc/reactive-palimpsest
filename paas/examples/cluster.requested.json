@@ -1,0 +1,12 @@
+{
+  "cluster_id": "cluster_123",
+  "organization_id": "org_123",
+  "project_id": "project_123",
+  "environment_id": "env_123",
+  "region": "us-east-1",
+  "postgres_version": "18",
+  "tier": "dev",
+  "storage_gib": 20,
+  "lifecycle_state": "requested",
+  "host_assignment": null
+}

@@ -46,6 +46,15 @@ pub fn encode_rows(rows: &[Row]) -> Result<Vec<u8>, CodecError> {
     Ok(wire::encode_rows(&wire_rows)?)
 }
 
+/// Encodes one row into the same row-list payload used by `Diff::rows`.
+///
+/// Transaction row changes carry old/new as optional single-row
+/// payloads, so this keeps their encoding byte-compatible with the
+/// legacy diff codec.
+pub fn encode_row(row: &Row) -> Result<Vec<u8>, CodecError> {
+    encode_rows(std::slice::from_ref(row))
+}
+
 /// Decodes a row payload back into WAL-flavoured rows.
 ///
 /// # Errors

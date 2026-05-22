@@ -1,0 +1,37 @@
+{
+  "environment_id": "env_123",
+  "state": "degraded",
+  "summary": "environment is serving with degraded platform signals",
+  "components": [
+    {
+      "name": "database",
+      "state": "healthy",
+      "detail": "managed Postgres cluster cluster_123 is ready"
+    },
+    {
+      "name": "backup",
+      "state": "healthy",
+      "detail": "managed Postgres cluster cluster_123 has a successful backup"
+    },
+    {
+      "name": "restore_drill",
+      "state": "degraded",
+      "detail": "managed Postgres cluster cluster_123 has no restore drill record"
+    },
+    {
+      "name": "wal_archive",
+      "state": "healthy",
+      "detail": "managed Postgres cluster cluster_123 has archived WAL"
+    },
+    {
+      "name": "pitr",
+      "state": "degraded",
+      "detail": "managed Postgres cluster cluster_123 has no PITR continuity check"
+    },
+    {
+      "name": "sync",
+      "state": "degraded",
+      "detail": "SyncDeployment deployment_123 is still starting"
+    }
+  ]
+}

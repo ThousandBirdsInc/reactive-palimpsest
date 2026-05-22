@@ -81,6 +81,7 @@ export function diffOpFromRaw(raw: RawDiffOp): DiffOp {
 export type DiffEvent<T> =
   | AcceptedEvent
   | DiffPayloadEvent<T>
+  | TransactionEvent<T>
   | ResyncEvent
   | ErrorEvent;
 
@@ -97,6 +98,22 @@ export interface DiffPayloadEvent<T> {
   lsn: bigint;
   op: DiffOp;
   rows: T[];
+}
+
+export interface TransactionEvent<T> {
+  kind: "transaction";
+  /** Commit LSN for the complete transaction. */
+  commitLsn: bigint;
+  beginLsn?: bigint;
+  endLsn?: bigint;
+  transactionId?: number;
+  changes: RowChange<T>[];
+}
+
+export interface RowChange<T> {
+  op: DiffOp;
+  old: T | null;
+  new: T | null;
 }
 
 export interface ResyncEvent {
@@ -118,6 +135,30 @@ export interface ConnectOptions {
   url: string;
   token?: string | null;
 }
+
+/**
+ * Live status of the underlying transport. The wasm client's
+ * connection manager handles reconnect-with-backoff transparently;
+ * subscribe to this stream via `PalimpsestClient.onConnectionStatus`
+ * to surface "disconnected, retrying in 800 ms" in the UI.
+ *
+ * Mirrors `ConnectionState` in `crates/palimpsest-client/src/connection.rs`.
+ */
+export type ConnectionStatus =
+  | { kind: "connecting" }
+  | { kind: "connected" }
+  | {
+      kind: "reconnecting";
+      /** 1-based consecutive failure count since the last `connected`. */
+      attempt: number;
+      /** Backoff sleep before the next attempt, in milliseconds. */
+      delayMs: number;
+    }
+  | {
+      kind: "closed";
+      /** Human-readable cause — `"client shutdown"`, `"auth failure: …"`, etc. */
+      reason: string;
+    };
 
 /** Options for a single subscription. */
 export interface SubscribeOptions {

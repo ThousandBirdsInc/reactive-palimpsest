@@ -1,0 +1,9 @@
+{
+  "command_id": "cluster_123:delete-postgres-data:request_001",
+  "cluster_id": "cluster_123",
+  "action": {
+    "kind": "delete_postgres_data",
+    "data_dir": "/var/lib/palimpsest/postgres/cluster_123",
+    "tombstone_retention_days": 14
+  }
+}

@@ -1,0 +1,29 @@
+[package]
+name = "palimpsest-paas-node-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Rust node-agent skeleton for Palimpsest managed Postgres hosts."
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "palimpsest-paas-node-agent"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+palimpsest-paas-core = { path = "../palimpsest-paas-core" }
+ring = "0.17"
+rustls = "0.23"
+rustls-pemfile = "2"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

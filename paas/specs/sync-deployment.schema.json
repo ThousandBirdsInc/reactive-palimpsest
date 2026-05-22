@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/sync-deployment.schema.json",
+  "title": "Palimpsest SyncDeployment State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "deployment_id",
+    "organization_id",
+    "project_id",
+    "environment_id",
+    "managed_postgres_cluster_id",
+    "config_version",
+    "lifecycle_state"
+  ],
+  "properties": {
+    "deployment_id": { "type": "string", "minLength": 1 },
+    "organization_id": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "environment_id": { "type": "string", "minLength": 1 },
+    "managed_postgres_cluster_id": { "type": "string", "minLength": 1 },
+    "config_version": { "type": "string", "minLength": 1 },
+    "lifecycle_state": {
+      "enum": ["requested", "starting", "running", "draining", "stopped", "failed"]
+    }
+  }
+}

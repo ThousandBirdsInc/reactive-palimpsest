@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/deployment-spec.schema.json",
+  "title": "Palimpsest Signed SyncDeployment Spec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec", "signature"],
+  "properties": {
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deployment_id",
+        "environment_id",
+        "region",
+        "shard_id",
+        "config_version",
+        "database",
+        "sync",
+        "telemetry"
+      ],
+      "properties": {
+        "deployment_id": { "type": "string", "minLength": 1 },
+        "environment_id": { "type": "string", "minLength": 1 },
+        "region": { "type": "string", "minLength": 1 },
+        "shard_id": { "type": "string", "minLength": 1 },
+        "config_version": { "type": "string", "minLength": 1 },
+        "database": { "$ref": "#/$defs/database" },
+        "sync": { "$ref": "#/$defs/sync" },
+        "telemetry": { "$ref": "#/$defs/telemetry" }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_id", "algorithm", "signature"],
+      "properties": {
+        "key_id": { "type": "string", "minLength": 1 },
+        "algorithm": { "type": "string", "minLength": 1 },
+        "public_key_base64": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "signature": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "slot_name", "publication"],
+      "properties": {
+        "url": { "type": "string", "minLength": 1 },
+        "slot_name": { "type": "string", "minLength": 1 },
+        "publication": { "type": "string", "minLength": 1 },
+        "password_secret_ref": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/secret_ref" }
+          ]
+        }
+      }
+    },
+    "secret_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "external_ref"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "external_ref": { "type": "string", "minLength": 1 }
+      }
+    },
+    "sync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grpc_addr", "metrics_addr", "auth"],
+      "properties": {
+        "grpc_addr": { "type": "string", "minLength": 1 },
+        "metrics_addr": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "auth": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": { "kind": { "const": "anonymous" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "secret", "issuer", "audience", "claim_to_field"],
+              "properties": {
+                "kind": { "const": "jwt" },
+                "secret": { "type": "string", "minLength": 1 },
+                "issuer": { "type": "string", "minLength": 1 },
+                "audience": { "type": "string", "minLength": 1 },
+                "claim_to_field": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization_id", "project_id", "extra"],
+      "properties": {
+        "organization_id": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "project_id": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "extra": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

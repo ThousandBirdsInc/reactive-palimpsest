@@ -103,13 +103,15 @@ fn bench_pump_to_deliver(c: &mut Criterion) {
                         .subscribe(
                             SubscribeRequest {
                                 connection: ConnectionId::new(1),
+                                subscription_id: router.allocate_subscription_id(),
                                 client_id: ClientSubscriptionId::new("posts.recent"),
                                 query: QueryId::new("posts.recent"),
                                 query_graph: &graph,
                                 user_ctx: UserContext::new(std::iter::empty()),
                                 schema: schema(),
                                 resume_lsn: None,
-                compiled_plan: None,
+                                compiled_plan: None,
+                                prerun_initial: None,
                             },
                             &provider,
                         )

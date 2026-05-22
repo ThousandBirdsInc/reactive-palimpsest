@@ -23,11 +23,12 @@ use palimpsest_dataflow::palimpsest::{
 use palimpsest_permissions::{CompiledRule, RewriteStats, UserContext};
 use palimpsest_sql::mir::MirGraph;
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::warn;
 
 use crate::{
     ack::{AckOutcome, AckTracker},
     backpressure::{BackpressureOutcome, BackpressurePolicy, BoundedDiffChannel},
-    cursor::{LsnBatch, RawDiff, TraceCursor},
+    cursor::{LsnBatch, QueryTransactionDelta, RawDiff, TraceCursor},
     diff::{DiffEvent, DiffOp, ResyncReason, RowChange},
     error::RouterError,
     metrics::RouterMetrics,
@@ -68,6 +69,11 @@ impl Default for RouterConfig {
 pub struct SubscribeRequest<'a> {
     /// Connection id (server-assigned per gRPC stream).
     pub connection: ConnectionId,
+    /// Pre-allocated subscription id (see
+    /// [`SubscriptionRouter::allocate_subscription_id`]). The caller
+    /// allocates this before `subscribe` so the same id can be used as
+    /// the `PersistentHost` subscriber tag for shared-plan attachment.
+    pub subscription_id: SubscriptionId,
     /// Client-supplied subscription label.
     pub client_id: ClientSubscriptionId,
     /// Canonical query name (matches the build-plan registry key).
@@ -88,6 +94,15 @@ pub struct SubscribeRequest<'a> {
     /// (e.g. `Join`, set ops) — those still ship via the v1
     /// pass-through path.
     pub compiled_plan: Option<palimpsest_dataflow::palimpsest::CompiledPlan>,
+    /// Pre-computed `Initial` payload. When `Some`, the router uses
+    /// these rows + LSN for the snapshot event and **skips** the
+    /// `snapshot_seed`/`snapshot_run` pipeline entirely. Used by the
+    /// gRPC adapter when a `PersistentHost` cached_view hits: the
+    /// materialized view is already current and can be shipped
+    /// verbatim without re-pulling the underlying table snapshot or
+    /// re-running the dataflow. `seed_updates` in the response is
+    /// empty on this path — the host plan is already seeded.
+    pub prerun_initial: Option<(Vec<Row>, Lsn)>,
 }
 
 /// Optional resume request supplied alongside a `subscribe` call.
@@ -183,6 +198,18 @@ impl SubscriptionRouter {
         self.inner.lock().expect("router lock").rules.clone()
     }
 
+    /// Allocate a fresh subscription id without registering anything.
+    ///
+    /// The gRPC adapter needs the id *before* calling [`Self::subscribe`]
+    /// so it can use the same id as the `PersistentHost` subscriber tag
+    /// when attaching to a shared canonical plan via
+    /// `PersistentHost::cached_view`. [`Self::subscribe`] then takes the
+    /// pre-allocated id via [`SubscribeRequest::subscription_id`].
+    #[must_use]
+    pub fn allocate_subscription_id(&self) -> SubscriptionId {
+        self.allocator.allocate()
+    }
+
     /// Total active subscriptions.
     #[must_use]
     pub fn active_subscriptions(&self) -> usize {
@@ -202,6 +229,7 @@ impl SubscriptionRouter {
     ) -> Result<SubscribeResponse, RouterError> {
         let SubscribeRequest {
             connection,
+            subscription_id: id,
             client_id,
             query,
             query_graph,
@@ -209,21 +237,45 @@ impl SubscriptionRouter {
             schema,
             resume_lsn,
             compiled_plan,
+            prerun_initial,
         } = request;
 
         let rules = self.inner.lock().expect("router lock").rules.clone();
         let outcome = install_permission_filters(query_graph, &rules, &user_ctx)?;
         let canonical = canonical_subgraph_key(&query, &user_ctx);
 
-        let (snapshot_batch, seed_updates) = snapshot_seed(provider, &query)?;
-        let snapshot_lsn = snapshot_batch.snapshot_lsn;
+        // Cached fast-path: caller (gRPC adapter) already has the
+        // materialized view from a `PersistentHost::cached_view` hit.
+        // Skip the snapshot pull + dataflow snapshot_run entirely.
+        let (snapshot_lsn, initial_rows, seed_updates) = match prerun_initial {
+            Some((rows, lsn)) => (lsn, rows, Vec::new()),
+            None => {
+                let (snapshot_batch, seed_updates) = snapshot_seed(provider, &query)?;
+                let snapshot_lsn = snapshot_batch.snapshot_lsn;
+                let rows: Vec<Row> = if let Some(plan) = &compiled_plan {
+                    let inputs: std::collections::HashMap<palimpsest_wal::TableId, Vec<Row>> =
+                        snapshot_batch
+                            .rows
+                            .into_iter()
+                            .map(|table| (table.table, table.rows))
+                            .collect();
+                    palimpsest_dataflow::palimpsest::snapshot_run(plan, inputs)
+                } else {
+                    snapshot_batch
+                        .rows
+                        .into_iter()
+                        .flat_map(|table| table.rows)
+                        .collect()
+                };
+                (snapshot_lsn, rows, seed_updates)
+            }
+        };
 
         let resume = resolve_resume(
             resume_lsn,
             CompactionWindow::new(snapshot_lsn, self.config.default_latest_known_lsn),
         );
 
-        let id = self.allocator.allocate();
         let mut channel =
             BoundedDiffChannel::new(self.config.channel_capacity, self.config.backpressure);
         let stream = channel
@@ -232,33 +284,9 @@ impl SubscriptionRouter {
 
         match resume {
             ResumeDecision::FreshInitial { .. } => {
-                // If we have a compiled dataflow plan for this query,
-                // run the snapshot through it server-side so the
-                // `Initial` event ships the *query's* result rows —
-                // aggregate / filtered / projected — rather than the
-                // raw underlying tables. Falls back to the legacy
-                // pass-through for queries the compiler doesn't yet
-                // lower.
-                let rows: Vec<Row> = if let Some(plan) = &compiled_plan {
-                    let inputs: std::collections::HashMap<
-                        palimpsest_wal::TableId,
-                        Vec<Row>,
-                    > = snapshot_batch
-                        .rows
-                        .iter()
-                        .map(|table| (table.table, table.rows.clone()))
-                        .collect();
-                    palimpsest_dataflow::palimpsest::snapshot_run(plan, inputs)
-                } else {
-                    snapshot_batch
-                        .rows
-                        .iter()
-                        .flat_map(|table| table.rows.clone())
-                        .collect()
-                };
                 let initial = DiffEvent::Initial {
                     lsn: snapshot_lsn,
-                    rows,
+                    rows: initial_rows,
                 };
                 let outcome = channel.try_send(initial);
                 match outcome {
@@ -324,11 +352,22 @@ impl SubscriptionRouter {
         batch: LsnBatch,
         primary_key: &[usize],
     ) -> Result<(), RouterError> {
+        self.pump_transaction(sub, QueryTransactionDelta::from(batch), primary_key)
+    }
+
+    /// Pushes a complete transaction delta into the subscription's
+    /// channel after pairing inserts and deletes into row-level changes.
+    pub fn pump_transaction(
+        &self,
+        sub: SubscriptionId,
+        delta: QueryTransactionDelta,
+        primary_key: &[usize],
+    ) -> Result<(), RouterError> {
         let started = Instant::now();
-        let event = pair_into_event(batch, primary_key);
+        let event = pair_transaction_into_event(delta, primary_key);
         let mut inner = self.inner.lock().expect("router lock");
 
-        let outcome = {
+        let (outcome, channel_capacity, channel_full_events) = {
             let Some(channel) = inner.channels.get(&sub) else {
                 return Err(RouterError::UnknownSubscription(sub));
             };
@@ -339,7 +378,7 @@ impl SubscriptionRouter {
             ) {
                 channel.force_resync(ResyncReason::Backpressure);
             }
-            outcome
+            (outcome, channel.capacity(), channel.full_events())
         };
 
         match outcome {
@@ -354,6 +393,19 @@ impl SubscriptionRouter {
                 self.metrics.record_channel_full();
                 self.metrics
                     .record_resync_with_reason(ResyncReason::Backpressure);
+                // Surface saturation in logs so operators can correlate
+                // "client stopped updating" reports with the actual
+                // backpressure event. `full_events` is a running count
+                // of saturation hits since process start — a rapidly
+                // climbing value means the channel is small relative to
+                // either the producer rate or consumer drain rate.
+                warn!(
+                    sub = sub.get(),
+                    capacity = channel_capacity,
+                    full_events = channel_full_events,
+                    policy = ?self.config.backpressure,
+                    "per-sub channel saturated; Resync(Backpressure) force-sent",
+                );
                 if let Some(record) = inner.registry.get_mut(sub) {
                     record.state = SubscriptionState::Draining;
                 }
@@ -373,8 +425,8 @@ impl SubscriptionRouter {
         primary_key: &[usize],
     ) -> Result<usize, RouterError> {
         let mut events = 0;
-        while let Some(batch) = cursor.next_batch() {
-            self.pump_batch(sub, batch, primary_key)?;
+        while let Some(delta) = cursor.next_transaction() {
+            self.pump_transaction(sub, delta, primary_key)?;
             events += 1;
         }
         Ok(events)
@@ -452,9 +504,12 @@ impl SubscriptionRouter {
 /// Builds the canonical key for a `(query, user_ctx)` pair.
 ///
 /// This is what the [`SharedSubgraphRegistry`] uses to dedupe across
-/// subscriptions; identical keys reuse the same dataflow.
+/// subscriptions; identical keys reuse the same dataflow. Re-exported
+/// (via `pub`) so the gRPC adapter can use the same key as the
+/// `PersistentHost` host_key — sharing a plan across subscribers only
+/// works if both sides agree on what "the same query" means.
 #[must_use]
-fn canonical_subgraph_key(query: &QueryId, user_ctx: &UserContext) -> String {
+pub fn canonical_subgraph_key(query: &QueryId, user_ctx: &UserContext) -> String {
     use std::fmt::Write;
     let mut key = String::new();
     write!(&mut key, "{}|", query.as_str()).expect("write into String");
@@ -470,12 +525,22 @@ fn canonical_subgraph_key(query: &QueryId, user_ctx: &UserContext) -> String {
 }
 
 /// Pairs `+1` and `-1` diffs at the same LSN by primary key.
-fn pair_into_event(batch: LsnBatch, primary_key: &[usize]) -> DiffEvent {
-    let lsn = batch.lsn;
+fn pair_transaction_into_event(delta: QueryTransactionDelta, primary_key: &[usize]) -> DiffEvent {
+    let changes = pair_changes(delta.diffs, primary_key);
+    DiffEvent::TransactionUpdate {
+        transaction_id: delta.transaction_id,
+        begin_lsn: delta.begin_lsn,
+        commit_lsn: delta.commit_lsn,
+        end_lsn: delta.end_lsn,
+        changes,
+    }
+}
+
+fn pair_changes(diffs: Vec<RawDiff>, primary_key: &[usize]) -> Vec<RowChange> {
     let mut inserts: BTreeMap<Vec<Vec<u8>>, Vec<RawDiff>> = BTreeMap::new();
     let mut deletes: BTreeMap<Vec<Vec<u8>>, Vec<RawDiff>> = BTreeMap::new();
 
-    for diff in batch.diffs {
+    for diff in diffs {
         let key = primary_key_bytes(&diff.row, primary_key);
         if diff.diff > 0 {
             inserts.entry(key).or_default().push(diff);
@@ -529,7 +594,7 @@ fn pair_into_event(batch: LsnBatch, primary_key: &[usize]) -> DiffEvent {
         });
     }
 
-    DiffEvent::Update { lsn, changes }
+    changes
 }
 
 fn primary_key_bytes(row: &Row, primary_key: &[usize]) -> Vec<Vec<u8>> {
@@ -633,13 +698,15 @@ mod tests {
             .subscribe(
                 SubscribeRequest {
                     connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
                     client_id: ClientSubscriptionId::new("posts"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
-                compiled_plan: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
                 },
                 &provider,
             )
@@ -664,13 +731,15 @@ mod tests {
             .subscribe(
                 SubscribeRequest {
                     connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
                     client_id: ClientSubscriptionId::new("posts"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: Some(Lsn::new(60)),
-                compiled_plan: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
                 },
                 &provider,
             )
@@ -698,13 +767,15 @@ mod tests {
             .subscribe(
                 SubscribeRequest {
                     connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
                     client_id: ClientSubscriptionId::new("posts"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
-                compiled_plan: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
                 },
                 &provider,
             )
@@ -732,8 +803,8 @@ mod tests {
         // Drain Initial first.
         let _ = stream.next().await;
         let event = stream.next().await.expect("update");
-        let DiffEvent::Update { changes, .. } = event else {
-            panic!("expected update");
+        let DiffEvent::TransactionUpdate { changes, .. } = event else {
+            panic!("expected transaction update");
         };
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].op, DiffOp::Update);
@@ -750,13 +821,15 @@ mod tests {
             .subscribe(
                 SubscribeRequest {
                     connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
                     client_id: ClientSubscriptionId::new("posts"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
-                compiled_plan: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
                 },
                 &provider,
             )
@@ -787,13 +860,15 @@ mod tests {
             .subscribe(
                 SubscribeRequest {
                     connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
                     client_id: ClientSubscriptionId::new("a"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
                     user_ctx: user_ctx.clone(),
                     schema: schema(),
                     resume_lsn: None,
-                compiled_plan: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
                 },
                 &provider,
             )
@@ -802,13 +877,15 @@ mod tests {
             .subscribe(
                 SubscribeRequest {
                     connection: ConnectionId::new(2),
+                    subscription_id: router.allocate_subscription_id(),
                     client_id: ClientSubscriptionId::new("a"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
                     user_ctx,
                     schema: schema(),
                     resume_lsn: None,
-                compiled_plan: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
                 },
                 &provider,
             )
@@ -846,13 +923,15 @@ mod tests {
             .subscribe(
                 SubscribeRequest {
                     connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
                     client_id: ClientSubscriptionId::new("posts"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
                     user_ctx: UserContext::new([("id".to_owned(), UserValue::Int(7))]),
                     schema: schema(),
                     resume_lsn: None,
-                compiled_plan: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
                 },
                 &provider,
             )
@@ -888,13 +967,15 @@ mod tests {
             .subscribe(
                 SubscribeRequest {
                     connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
                     client_id: ClientSubscriptionId::new("a"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
-                compiled_plan: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
                 },
                 &provider,
             )
@@ -903,13 +984,15 @@ mod tests {
             .subscribe(
                 SubscribeRequest {
                     connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
                     client_id: ClientSubscriptionId::new("b"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
                     user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
-                compiled_plan: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
                 },
                 &provider,
             )

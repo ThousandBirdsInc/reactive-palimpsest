@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use palimpsest_proto::palimpsest::sync::v1::{DiffOp, Schema};
-use palimpsest_proto::wire::{WireDatum, WireRow};
+use palimpsest_proto::wire::{WireDatum, WireRow, WireRowChange};
 
 /// Per-subscription PK-keyed row cache.
 #[derive(Debug, Default, Clone)]
@@ -65,6 +65,34 @@ impl LocalCache {
             }
             DiffOp::Unspecified => {
                 // No-op: server should never send this.
+            }
+        }
+    }
+
+    /// Apply every row change from one transaction before callers
+    /// observe the cache again.
+    pub fn apply_transaction(&mut self, changes: &[WireRowChange]) {
+        for change in changes {
+            match change.op {
+                DiffOp::Initial | DiffOp::Insert => {
+                    if let Some(row) = change.new.as_ref() {
+                        self.rows.insert(self.key(row), row.clone());
+                    }
+                }
+                DiffOp::Update => {
+                    if let Some(old) = change.old.as_ref() {
+                        self.rows.remove(&self.key(old));
+                    }
+                    if let Some(new) = change.new.as_ref() {
+                        self.rows.insert(self.key(new), new.clone());
+                    }
+                }
+                DiffOp::Delete => {
+                    if let Some(row) = change.old.as_ref() {
+                        self.rows.remove(&self.key(row));
+                    }
+                }
+                DiffOp::Unspecified => {}
             }
         }
     }
@@ -161,5 +189,30 @@ mod tests {
             &[vec![WireDatum::I64(1), WireDatum::Null]],
         );
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn transaction_applies_mixed_changes_atomically() {
+        let mut cache = LocalCache::for_schema(&schema());
+        let row1 = vec![WireDatum::I64(1), WireDatum::Text(b"a".to_vec())];
+        let row2 = vec![WireDatum::I64(2), WireDatum::Text(b"b".to_vec())];
+        let row2_new = vec![WireDatum::I64(2), WireDatum::Text(b"bb".to_vec())];
+        cache.apply(DiffOp::Initial, &[row1.clone(), row2.clone()]);
+
+        cache.apply_transaction(&[
+            palimpsest_proto::wire::WireRowChange {
+                op: DiffOp::Delete,
+                old: Some(row1),
+                new: None,
+            },
+            palimpsest_proto::wire::WireRowChange {
+                op: DiffOp::Update,
+                old: Some(row2),
+                new: Some(row2_new.clone()),
+            },
+        ]);
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(&vec![WireDatum::I64(2)]), Some(&row2_new));
     }
 }

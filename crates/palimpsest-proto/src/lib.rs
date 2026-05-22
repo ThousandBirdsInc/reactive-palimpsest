@@ -24,5 +24,6 @@ pub mod wire;
 
 pub use version::{WIRE_PROTOCOL_PACKAGE, WIRE_PROTOCOL_VERSION};
 pub use wire::{
-    decode_diff, decode_rows, encode_rows, CodecError, SchemaRegistry, WireDatum, WireRow,
+    decode_diff, decode_rows, decode_transaction_update, encode_rows, CodecError, SchemaRegistry,
+    WireDatum, WireRow, WireRowChange,
 };

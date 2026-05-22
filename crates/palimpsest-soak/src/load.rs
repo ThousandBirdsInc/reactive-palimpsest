@@ -79,6 +79,8 @@ async fn main() -> ExitCode {
                     schema: schema(),
                     resume_lsn: None,
                     compiled_plan: None,
+                    subscription_id: router.allocate_subscription_id(),
+                    prerun_initial: None,
                 },
                 &provider,
             )
@@ -120,7 +122,7 @@ async fn main() -> ExitCode {
         }
         for (_, stream) in &mut subs {
             match stream.next().await {
-                Some(DiffEvent::Update { .. }) => {}
+                Some(DiffEvent::TransactionUpdate { .. }) => {}
                 Some(other) => {
                     eprintln!("load: unexpected event {other:?}");
                     return ExitCode::FAILURE;

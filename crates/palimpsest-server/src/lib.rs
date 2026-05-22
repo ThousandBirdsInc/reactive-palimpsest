@@ -47,8 +47,8 @@ pub use auth::{
     JwtAuthenticator,
 };
 pub use backpressure::{BackpressureOutcome, BackpressurePolicy, BoundedDiffChannel};
-pub use codec::{decode_rows, encode_rows, CodecError};
-pub use cursor::{batch_by_lsn, LsnBatch, RawDiff, TraceCursor, VecCursor};
+pub use codec::{decode_rows, encode_row, encode_rows, CodecError};
+pub use cursor::{batch_by_lsn, LsnBatch, QueryTransactionDelta, RawDiff, TraceCursor, VecCursor};
 pub use diff::{DiffEvent, DiffOp, DiffPayload, ResyncReason, RowChange};
 pub use embed::{Palimpsest, PalimpsestBuilder, PalimpsestHandle, ServerConfig};
 pub use error::RouterError;

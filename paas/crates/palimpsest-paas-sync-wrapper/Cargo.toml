@@ -1,0 +1,27 @@
+[package]
+name = "palimpsest-paas-sync-wrapper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Managed SyncDeployment wrapper primitives for Palimpsest PaaS."
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "palimpsest-paas-sync-wrapper"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+ring = "0.17"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

@@ -14,23 +14,33 @@ import init, {
 
 type Status = "loading" | "connecting" | "open" | "closed" | "error";
 
+type AcceptedSchema = {
+  columns: Array<{
+    name: string;
+    type: number;
+    typeName: string;
+    nullable: boolean;
+  }>;
+  primaryKeyColumns: number[];
+};
+
 type DiffEvent =
-  | { kind: "accepted"; schemaId: number; snapshotLsn: bigint;
-      schema: { columns: Array<{ name: string; type: number;
-                                  typeName: string; nullable: boolean }>;
-                 primaryKeyColumns: number[] } }
+  | {
+      kind: "accepted";
+      schemaId: number;
+      snapshotLsn: bigint;
+      schema: AcceptedSchema;
+    }
   | { kind: "diff"; lsn: bigint; op: string; rows: unknown[][] }
+  | { kind: "transaction"; commitLsn: bigint;
+      changes: Array<{ op: string; old: unknown[] | null; new: unknown[] | null }> }
   | { kind: "resync"; reason: string; message: string }
   | { kind: "error"; code: string; message: string };
 
 export interface PalimpsestSubscriptionResult {
   status: Status;
   rows: unknown[][];
-  schema: DiffEvent extends infer X
-    ? X extends { kind: "accepted" }
-      ? X["schema"]
-      : null
-    : null;
+  schema: AcceptedSchema | null;
   error: { code: string; message: string } | null;
 }
 
@@ -122,6 +132,27 @@ export function usePalimpsestSubscription(
                   rowsByPk.delete(pk);
                 } else {
                   rowsByPk.set(pk, row);
+                }
+              }
+              setRows([...rowsByPk.values()]);
+              break;
+            }
+            case "transaction": {
+              const pkCols = schema?.primaryKeyColumns ?? [0];
+              for (const change of event.changes) {
+                if (change.op === "DIFF_OP_DELETE") {
+                  if (change.old) {
+                    rowsByPk.delete(pkCols.map((i) => change.old![i]).join("|"));
+                  }
+                } else if (change.op === "DIFF_OP_UPDATE") {
+                  if (change.old) {
+                    rowsByPk.delete(pkCols.map((i) => change.old![i]).join("|"));
+                  }
+                  if (change.new) {
+                    rowsByPk.set(pkCols.map((i) => change.new![i]).join("|"), change.new);
+                  }
+                } else if (change.new) {
+                  rowsByPk.set(pkCols.map((i) => change.new![i]).join("|"), change.new);
                 }
               }
               setRows([...rowsByPk.values()]);

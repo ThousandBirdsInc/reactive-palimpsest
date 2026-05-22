@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use palimpsest_dataflow::palimpsest::eval::ScalarSchema;
-use palimpsest_dataflow::palimpsest::{compile_mir, PersistentHost, Lsn, Row};
+use palimpsest_dataflow::palimpsest::{compile_mir, Lsn, PersistentHost, Row};
 use palimpsest_sql::catalog::ColumnType;
 use palimpsest_sql::lower::parse_and_lower;
 use palimpsest_wal::{Datum, TableId};
@@ -49,7 +49,9 @@ fn run(n_seed: usize, n_categories: i64, n_diff: usize) {
     let mut seed = Vec::with_capacity(n_seed);
     let mut state: u64 = 1;
     for i in 0..n_seed {
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let cat = (state % n_categories as u64) as i64 + 1;
         let value = (state >> 32) as i64 % 1000;
         seed.push(row(i as i64 + 1, cat, value));
@@ -59,7 +61,7 @@ fn run(n_seed: usize, n_categories: i64, n_diff: usize) {
     inputs.insert(TableId::new(2), seed);
 
     let start = Instant::now();
-    let _ = host.register_or_seed(canonical, &plan, inputs);
+    let _ = host.register_or_seed(canonical, &plan, inputs, Lsn::new(1), 0);
     let seed_time = start.elapsed();
     println!("seed({n_seed} rows): {seed_time:?}");
 
@@ -71,7 +73,10 @@ fn run(n_seed: usize, n_categories: i64, n_diff: usize) {
     let start = Instant::now();
     let deltas = host.push_table_batch(canonical, batch, Lsn::new(2));
     let push_time = start.elapsed();
-    println!("push_batch({n_diff} rows over {n_seed}-row state): {push_time:?} → {} deltas", deltas.len());
+    println!(
+        "push_batch({n_diff} rows over {n_seed}-row state): {push_time:?} → {} deltas",
+        deltas.len()
+    );
 }
 
 fn main() {

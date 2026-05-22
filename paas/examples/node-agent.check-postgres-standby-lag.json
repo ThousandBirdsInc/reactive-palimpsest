@@ -1,0 +1,12 @@
+{
+  "command_id": "cluster_123:check-standby-lag:standby_check_001",
+  "cluster_id": "cluster_123",
+  "action": {
+    "kind": "check_postgres_standby_lag",
+    "source_data_dir": "/var/lib/palimpsest/postgres/cluster_123",
+    "source_port": 5432,
+    "database": "postgres",
+    "slot_name": "cluster_123_standby_slot",
+    "max_lag_bytes": 16777216
+  }
+}

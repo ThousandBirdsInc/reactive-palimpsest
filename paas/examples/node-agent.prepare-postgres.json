@@ -1,0 +1,10 @@
+{
+  "command_id": "cluster_123:prepare-postgres",
+  "cluster_id": "cluster_123",
+  "action": {
+    "kind": "prepare_postgres",
+    "postgres_version": "18",
+    "data_dir": "/var/lib/palimpsest/postgres/cluster_123",
+    "port": 55000
+  }
+}

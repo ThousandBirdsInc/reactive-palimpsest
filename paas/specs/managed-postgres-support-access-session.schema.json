@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/managed-postgres-support-access-session.schema.json",
+  "title": "Palimpsest Managed Postgres Support Access Session",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "session_id",
+    "cluster_id",
+    "organization_id",
+    "project_id",
+    "environment_id",
+    "requested_by",
+    "reason",
+    "status",
+    "requested_at",
+    "expires_at"
+  ],
+  "properties": {
+    "session_id": { "type": "string", "minLength": 1 },
+    "cluster_id": { "type": "string", "minLength": 1 },
+    "organization_id": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "environment_id": { "type": "string", "minLength": 1 },
+    "requested_by": { "type": "string", "minLength": 1 },
+    "approved_by": { "type": ["string", "null"] },
+    "revoked_by": { "type": ["string", "null"] },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "ticket_ref": { "type": ["string", "null"], "maxLength": 256 },
+    "status": { "enum": ["requested", "active", "revoked", "expired"] },
+    "requested_at": { "type": "string", "minLength": 1 },
+    "approved_at": { "type": ["string", "null"] },
+    "expires_at": { "type": "string", "minLength": 1 },
+    "revoked_at": { "type": ["string", "null"] }
+  }
+}

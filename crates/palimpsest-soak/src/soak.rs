@@ -84,6 +84,8 @@ async fn main() -> ExitCode {
                 schema: schema(),
                 resume_lsn: None,
                 compiled_plan: None,
+                subscription_id: router.allocate_subscription_id(),
+                prerun_initial: None,
             },
             &provider,
         )
@@ -112,7 +114,7 @@ async fn main() -> ExitCode {
             return capture_failure(round, &err.to_string());
         }
         match stream.next().await {
-            Some(DiffEvent::Update { .. }) => {}
+            Some(DiffEvent::TransactionUpdate { .. }) => {}
             Some(other) => {
                 return capture_failure(round, &format!("unexpected event {other:?}"));
             }

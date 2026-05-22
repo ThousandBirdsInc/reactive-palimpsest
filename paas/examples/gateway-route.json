@@ -1,0 +1,12 @@
+{
+  "host": "env-123.palimpsest.dev",
+  "organization_id": "org_123",
+  "project_id": "project_123",
+  "environment_id": "env_123",
+  "sync_endpoint": "http://127.0.0.1:50051",
+  "tls_policy": "terminate_at_gateway",
+  "rate_limit": {
+    "max_connections": 100,
+    "max_requests_per_minute": 1000
+  }
+}

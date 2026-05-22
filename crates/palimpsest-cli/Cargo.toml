@@ -20,6 +20,7 @@ default = []
 slot-info = ["dep:tokio-postgres"]
 
 [dependencies]
+palimpsest-paas-core = { path = "../../paas/crates/palimpsest-paas-core" }
 palimpsest-permissions = { path = "../palimpsest-permissions" }
 palimpsest-server = { path = "../palimpsest-server" }
 palimpsest-sql = { path = "../palimpsest-sql" }

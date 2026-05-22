@@ -67,11 +67,17 @@
 
       .bubble-chart { display: block; width: 100%; height: auto;
                       margin-top: 4px; }
-      .bubble-grid { stroke: #eef1f5; stroke-width: 1; }
+      .bubble-grid { stroke: #d6dde6; stroke-width: 1; }
+      .bubble-grid-minor { stroke: #eef1f5; stroke-width: 1;
+                           stroke-dasharray: 2 3; }
       .bubble-axis { stroke: #c8ced8; stroke-width: 1; }
       .bubble-tick { font-size: 11px; fill: #6b7280;
                      font-variant-numeric: tabular-nums; }
+      .bubble-tick-minor { fill: #9aa3af; font-size: 10px; }
       .bubble-axis-label { font-size: 12px; fill: #1f2937; font-weight: 500; }
+      .bubble-halo {
+        pointer-events: none;
+      }
       .bubble circle {
         stroke-width: 1.5;
         transition: cx 480ms cubic-bezier(.4,0,.2,1),
@@ -85,20 +91,135 @@
         transition: x 480ms cubic-bezier(.4,0,.2,1),
                     y 480ms cubic-bezier(.4,0,.2,1);
       }
+      .bubble-sublabel {
+        font: 500 10px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        fill: rgba(17, 24, 28, 0.72); pointer-events: none;
+        transition: x 480ms cubic-bezier(.4,0,.2,1),
+                    y 480ms cubic-bezier(.4,0,.2,1);
+      }
+      .bubble-sublabel-strong {
+        fill: rgba(17, 24, 28, 0.92);
+        font-weight: 600;
+      }
+      .bubble-legend {
+        display: flex; flex-wrap: wrap; gap: 12px;
+        align-items: center; margin: 6px 4px 0;
+        font-size: 12px; color: #555;
+      }
+      .bubble-legend-item {
+        display: inline-flex; align-items: center; gap: 6px;
+      }
+      .bubble-legend-swatch {
+        display: inline-block; width: 10px; height: 10px;
+        border-radius: 50%;
+      }
+      .bubble-legend-hint {
+        margin-left: auto; color: #777; font-size: 11px;
+      }
+      .bubble-legend-hint code {
+        background: #f3f4f6; padding: 1px 4px; border-radius: 3px;
+        font-size: 11px;
+      }
       .auto-toggle {
-        display: inline-flex; align-items: center; gap: 4px;
-        font-size: 12px; color: #555; padding: 3px 8px;
-        border: 1px solid #e1e7ef; border-radius: 999px;
-        background: #f7f9fc;
+        display: inline-flex; align-items: center; gap: 6px;
+        font-size: 12px; color: #333;
       }
       .auto-toggle input { margin: 0; }
+      .auto-write-row {
+        display: flex; align-items: center; gap: 14px;
+        margin: 0 0 12px;
+        padding: 8px 12px;
+        background: #f7f9fc;
+        border: 1px solid #e1e7ef;
+        border-radius: 6px;
+      }
+      .pace-slider {
+        flex: 1; min-width: 0; max-width: 360px;
+        accent-color: #1a73e8;
+      }
+      .pace-slider:disabled { opacity: 0.45; cursor: not-allowed; }
+      .pace-value {
+        font: 12px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #555; font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+      .pace-value strong { color: #1a73e8; }
+      .auto-write-last {
+        font: 12px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #1a4d2e; font-variant-numeric: tabular-nums;
+        padding: 2px 10px; border-radius: 999px;
+        background: #e6f4ec; border: 1px solid #bfe0cc;
+        white-space: nowrap;
+        /* Fixed width so categories of different name lengths
+           (Tees → Smartphones) don't push the slider around when
+           successive ticks land. Sized to the worst-case content. */
+        width: 210px;
+        flex: 0 0 210px;
+        text-align: left;
+      }
+      .auto-write-last strong { color: #0a8a3e; }
+
+      .account-controls {
+        display: flex; flex-wrap: wrap; align-items: end; gap: 12px;
+        margin: 0 0 14px; padding: 10px 12px;
+        border: 1px solid #e1e7ef; border-radius: 6px;
+        background: #f7f9fc;
+      }
+      .account-controls label {
+        display: grid; gap: 4px; font-size: 12px; color: #444;
+      }
+      .account-controls input,
+      .account-controls select {
+        min-width: 130px; padding: 6px 8px;
+        border: 1px solid #cfd7e3; border-radius: 4px;
+        background: white; font: inherit;
+      }
+      .account-total {
+        margin-left: auto;
+        font: 600 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #1f2937; font-variant-numeric: tabular-nums;
+      }
+      .accounts-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 10px;
+      }
+      .account-card {
+        border: 1px solid #e5e7eb; border-radius: 8px;
+        padding: 12px; background: #fff;
+      }
+      .account-mine {
+        border-color: #1a73e8;
+        box-shadow: inset 3px 0 0 #1a73e8;
+      }
+      .account-card-head {
+        display: flex; justify-content: space-between; gap: 8px;
+        font-weight: 600; margin-bottom: 8px;
+      }
+      .account-owner {
+        color: #6b7280; font-size: 12px; font-weight: 500;
+      }
+      .account-bar-track {
+        height: 18px; background: #eef2f7; border-radius: 4px;
+        overflow: hidden;
+      }
+      .account-bar-fill {
+        height: 100%; background: #15a86b;
+        transition: width 420ms cubic-bezier(.4,0,.2,1);
+      }
+      .account-balance {
+        margin-top: 8px;
+        font: 700 18px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        font-variant-numeric: tabular-nums; color: #111827;
+      }
 
       .chip:disabled { opacity: 0.45; cursor: not-allowed; }
       .rule-text { margin: 4px 0; font-size: 13px; color: #444; }
       .status { font-size: 12px; padding: 2px 8px; border-radius: 4px;
                 background: #eee; color: #444; }
       .status.open { background: #e6f4ea; color: #137333; }
-      .status.error { background: #fce8e6; color: #c5221f; }
+      .status.error, .status.closed { background: #fce8e6; color: #c5221f; }
+      .status.reconnecting { background: #fef7e0; color: #b06000; }
       form.create { display: flex; gap: 8px; margin: 16px 0; }
       form.create input[type=text] { flex: 1; padding: 6px 8px;
         border: 1px solid #ccc; border-radius: 4px; font: inherit; }

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/domain.schema.json",
+  "title": "Palimpsest Domain",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "domain_id",
+    "hostname",
+    "organization_id",
+    "project_id",
+    "environment_id",
+    "route_host",
+    "verification_status",
+    "verification_token",
+    "tls_status"
+  ],
+  "properties": {
+    "domain_id": { "type": "string", "minLength": 1 },
+    "hostname": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+    },
+    "organization_id": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "environment_id": { "type": "string", "minLength": 1 },
+    "route_host": { "type": "string", "minLength": 1 },
+    "verification_status": { "enum": ["pending", "verified", "failed"] },
+    "verification_token": { "type": "string", "minLength": 1 },
+    "tls_status": { "enum": ["pending", "active", "failed"] }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "organization_id": "org_123",
+  "project_id": "project_123",
+  "environment_id": "env_123",
+  "region": "us-east-1",
+  "database": {
+    "mode": "managed",
+    "postgres_version": "18",
+    "managed": {
+      "cluster_id": "cluster_123",
+      "tier": "dev",
+      "storage_gib": 20,
+      "backup_policy": {
+        "pitr_window_hours": 72,
+        "base_backup_interval_hours": 24
+      },
+      "maintenance_policy": {
+        "window": "sun:04:00-05:00Z",
+        "auto_minor_upgrades": true
+      },
+      "roles": [
+        {
+          "name": "palimpsest_app",
+          "kind": "app",
+          "secret_ref": null,
+          "privileges": ["connect", "read_write_app_schema"]
+        },
+        {
+          "name": "palimpsest_repl",
+          "kind": "replication",
+          "secret_ref": null,
+          "privileges": ["replication", "read_publication_tables"]
+        }
+      ]
+    }
+  },
+  "sync": {
+    "deployment_id": "sync_123",
+    "config_version": "config_001"
+  }
+}

@@ -20,7 +20,9 @@ pub use build_plan::{
     BuildPlan, BuildPlanRegistry, PlanAlreadyRegistered, ProbeHandle, RegisteredPlan, TraceHandle,
 };
 pub use compaction::{LsnWatermarks, SubscriberId};
-pub use compile_mir::{compile_mir, install_plan, CompileError, CompiledPlan, NodeRecipe, TableSchemaLookup};
+pub use compile_mir::{
+    compile_mir, install_plan, CompileError, CompiledPlan, NodeRecipe, TableSchemaLookup,
+};
 pub use cte::{CteAlreadyRegistered, CteRegistry};
 pub use dataflow_host::{snapshot_run, AggregateDelta, PersistentHost};
 pub use eval::{
@@ -47,7 +49,7 @@ pub use upquery::{
     base_tables, plan_upquery, referenced_columns, PrimaryKeyResolver, StaticPrimaryKeys,
     UpqueryPlan, UpqueryRequest,
 };
-pub use wal::{Row, RowContainer, WalSourceState, WalUpdate};
+pub use wal::{Row, RowContainer, WalSourceState, WalTransaction, WalUpdate};
 pub use worker::{
     spawn_worker, LocalTimelyWorker, StepLoopConfig, WorkerCommand, WorkerError, WorkerHandle,
     WorkerStats,

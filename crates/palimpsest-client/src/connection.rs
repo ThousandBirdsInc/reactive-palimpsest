@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, info, warn};
 
 use palimpsest_proto::palimpsest::sync::v1::{self as proto, ClientMessage, ServerMessage};
@@ -44,6 +44,32 @@ const COMMAND_CAPACITY: usize = 256;
 /// Bounded depth for the manager → wire outbound channel (one per
 /// active connection attempt).
 const OUTBOUND_CAPACITY: usize = 256;
+
+/// Live status of the underlying gRPC/WS transport. Surfaced through
+/// [`Client::watch_connection_state`] so UIs can render a "disconnected,
+/// retrying in 800 ms" badge even while the manager is silently
+/// reconnecting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// Initial handshake in flight (either first connect or a retry).
+    Connecting,
+    /// Bidi stream is open; events flow.
+    Connected,
+    /// Last attempt failed transiently — sleeping `delay_ms` before the
+    /// next attempt. `attempt` counts the consecutive failures since
+    /// the last [`Connected`](Self::Connected).
+    Reconnecting {
+        /// 1-based consecutive failure count.
+        attempt: u32,
+        /// Backoff sleep before the next attempt.
+        delay_ms: u64,
+    },
+    /// Manager has stopped. Will not reconnect on its own.
+    Closed {
+        /// Human-readable cause — `"client shutdown"`, `"auth failure: …"`, etc.
+        reason: String,
+    },
+}
 
 /// Commands accepted by the connection manager.
 pub(crate) enum Command {
@@ -107,16 +133,24 @@ pub(crate) struct ConnectionTask {
     commands_rx: mpsc::Receiver<Command>,
     state: HashMap<String, SubState>,
     registry: SchemaRegistry,
+    /// Latest [`ConnectionState`] published to observers. Updated by
+    /// `run` and `run_once`.
+    state_tx: watch::Sender<ConnectionState>,
 }
 
 impl ConnectionTask {
-    /// Start the manager. Returns `(inbox, join_handle)`.
+    /// Start the manager. Returns `(inbox, join_handle, state_rx)`.
     pub(crate) fn spawn(
         endpoint: Endpoint,
         auth: Auth,
         backoff: BackoffConfig,
-    ) -> (ConnectionInbox, TaskHandle) {
+    ) -> (
+        ConnectionInbox,
+        TaskHandle,
+        watch::Receiver<ConnectionState>,
+    ) {
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (state_tx, state_rx) = watch::channel(ConnectionState::Connecting);
         let task = Self {
             endpoint,
             auth,
@@ -124,26 +158,50 @@ impl ConnectionTask {
             commands_rx: cmd_rx,
             state: HashMap::new(),
             registry: SchemaRegistry::new(),
+            state_tx,
         };
         let join = runtime::spawn(task.run());
-        (ConnectionInbox { tx: cmd_tx }, join)
+        (ConnectionInbox { tx: cmd_tx }, join, state_rx)
     }
 
     async fn run(mut self) {
         let mut backoff = self.backoff.schedule();
+        let mut attempt: u32 = 0;
         loop {
             match self.run_once(&mut backoff).await {
                 RunOutcome::Shutdown => {
+                    self.publish_close_if_open("client shutdown".to_owned());
                     self.fail_all(&ClientError::ConnectionClosed);
                     self.drain_pending_subscribes().await;
                     break;
                 }
                 RunOutcome::Reconnect => {
+                    // `attempt` counts *consecutive* failures since the
+                    // last successful Connected; reset if `run_once`
+                    // had connected before dropping.
+                    if matches!(*self.state_tx.borrow(), ConnectionState::Connected) {
+                        attempt = 0;
+                    }
                     let delay = backoff.next_delay();
-                    debug!(delay_ms = delay.as_millis(), "reconnecting");
+                    attempt = attempt.saturating_add(1);
+                    let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+                    let _ = self
+                        .state_tx
+                        .send(ConnectionState::Reconnecting { attempt, delay_ms });
+                    debug!(delay_ms, attempt, "reconnecting");
                     runtime::sleep(delay).await;
+                    let _ = self.state_tx.send(ConnectionState::Connecting);
                 }
             }
+        }
+    }
+
+    /// Publish [`ConnectionState::Closed`] unless the state is already
+    /// closed. `run_once` may close with a specific reason (e.g. auth
+    /// failure) and we don't want the outer loop to overwrite it.
+    fn publish_close_if_open(&self, reason: String) {
+        if !matches!(*self.state_tx.borrow(), ConnectionState::Closed { .. }) {
+            let _ = self.state_tx.send(ConnectionState::Closed { reason });
         }
     }
 
@@ -166,23 +224,21 @@ impl ConnectionTask {
     #[allow(clippy::significant_drop_tightening)]
     async fn run_once(&mut self, backoff: &mut Backoff) -> RunOutcome {
         let (outbound_tx, outbound_rx) = mpsc::channel::<ClientMessage>(OUTBOUND_CAPACITY);
-        let mut inbound = match transport::open_subscribe(
-            &self.endpoint,
-            &self.auth,
-            outbound_rx,
-        )
-        .await
-        {
-            Ok(rx) => rx,
-            Err(OpenError::Auth(status)) => {
-                self.fail_all(&ClientError::Grpc(status));
-                return RunOutcome::Shutdown;
-            }
-            Err(OpenError::Transient) => {
-                return RunOutcome::Reconnect;
-            }
-        };
+        let mut inbound =
+            match transport::open_subscribe(&self.endpoint, &self.auth, outbound_rx).await {
+                Ok(rx) => rx,
+                Err(OpenError::Auth(status)) => {
+                    let reason = format!("auth failure: {}", status.message());
+                    let _ = self.state_tx.send(ConnectionState::Closed { reason });
+                    self.fail_all(&ClientError::Grpc(status));
+                    return RunOutcome::Shutdown;
+                }
+                Err(OpenError::Transient) => {
+                    return RunOutcome::Reconnect;
+                }
+            };
         backoff.reset(self.backoff.initial);
+        let _ = self.state_tx.send(ConnectionState::Connected);
         info!("connected; resubscribing {} subs", self.state.len());
 
         for (sub_id, sub) in &self.state {
@@ -328,6 +384,9 @@ impl ConnectionTask {
         match kind {
             proto::server_message::Kind::Accepted(accepted) => self.handle_accepted(accepted).await,
             proto::server_message::Kind::Diff(diff) => self.handle_diff(diff).await,
+            proto::server_message::Kind::TransactionUpdate(update) => {
+                self.handle_transaction_update(update).await;
+            }
             proto::server_message::Kind::Resync(resync) => self.handle_resync(resync).await,
             proto::server_message::Kind::Error(err) => self.handle_error(err).await,
         }
@@ -396,6 +455,43 @@ impl ConnectionTask {
                 lsn: diff.lsn,
                 op,
                 rows,
+            }))
+            .await;
+    }
+
+    async fn handle_transaction_update(&mut self, update: proto::TransactionUpdate) {
+        let subscription_id = update.subscription_id.clone();
+        let Some(sub) = self.state.get_mut(&subscription_id) else {
+            return;
+        };
+        if update.commit_lsn <= sub.last_seen_lsn && sub.last_seen_lsn > 0 {
+            debug!(
+                sub = %subscription_id,
+                lsn = update.commit_lsn,
+                last_seen = sub.last_seen_lsn,
+                "dropping replayed transaction update"
+            );
+            return;
+        }
+        let changes = match self.registry.decode_transaction(&update) {
+            Ok(changes) => changes,
+            Err(err) => {
+                let _ = sub.events_tx.send(Err(ClientError::Codec(err))).await;
+                return;
+            }
+        };
+        if let Some(cache) = sub.cache.as_ref() {
+            cache.lock().await.apply_transaction(&changes);
+        }
+        sub.last_seen_lsn = update.commit_lsn;
+        let _ = sub
+            .events_tx
+            .send(Ok(DiffEvent::Transaction {
+                commit_lsn: update.commit_lsn,
+                begin_lsn: update.begin_lsn,
+                end_lsn: update.end_lsn,
+                transaction_id: update.transaction_id,
+                changes,
             }))
             .await;
     }

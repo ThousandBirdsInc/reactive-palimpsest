@@ -19,6 +19,8 @@
 //!                            nullable: boolean }[];
 //!                  primaryKeyColumns: number[] } }
 //!   | { kind: "diff"; lsn: bigint; op: string; rows: any[][] }
+//!   | { kind: "transaction"; commitLsn: bigint; changes:
+//!       { op: string; old: any[] | null; new: any[] | null }[] }
 //!   | { kind: "resync"; reason: string; message: string }
 //!   | { kind: "error"; code: string; message: string };
 //! ```
@@ -44,8 +46,8 @@ use std::sync::Arc;
 
 use js_sys::{Array, BigInt, Function, Object, Reflect, Uint8Array};
 use palimpsest_client::{
-    var_value, Auth, Client as RustClient, ClientError, DatumType, DiffEvent, DiffOp, ResyncReason,
-    Subscription as RustSubscription, VarValue, WireDatum,
+    var_value, Auth, Client as RustClient, ClientError, ConnectionState, DatumType, DiffEvent,
+    DiffOp, ResyncReason, Subscription as RustSubscription, VarValue, WireDatum,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -102,6 +104,58 @@ impl Client {
     pub async fn shutdown(self) {
         self.inner.shutdown().await;
     }
+
+    /// Register a JS callback that fires on every connection-state
+    /// transition. The callback receives a plain object matching the
+    /// TypeScript `ConnectionStatus` discriminated union — see
+    /// `palimpsest-client-typescript/src/types.ts`.
+    ///
+    /// Fires once immediately with the current state, then on every
+    /// change until the `Client` is dropped or shutdown.
+    #[wasm_bindgen(js_name = onConnectionStatus)]
+    pub fn on_connection_status(&self, callback: Function) {
+        let mut rx = self.inner.watch_connection_state();
+        spawn_local(async move {
+            // Fire once with the current value so callers don't need to
+            // poll `borrow()` themselves.
+            let _ = callback.call1(
+                &JsValue::NULL,
+                &connection_state_to_js(&rx.borrow().clone()),
+            );
+            while rx.changed().await.is_ok() {
+                let snapshot = rx.borrow().clone();
+                let _ = callback.call1(&JsValue::NULL, &connection_state_to_js(&snapshot));
+                if matches!(snapshot, ConnectionState::Closed { .. }) {
+                    return;
+                }
+            }
+        });
+    }
+}
+
+fn connection_state_to_js(state: &ConnectionState) -> JsValue {
+    let obj = Object::new();
+    match state {
+        ConnectionState::Connecting => {
+            set(&obj, "kind", &JsValue::from_str("connecting"));
+        }
+        ConnectionState::Connected => {
+            set(&obj, "kind", &JsValue::from_str("connected"));
+        }
+        ConnectionState::Reconnecting { attempt, delay_ms } => {
+            set(&obj, "kind", &JsValue::from_str("reconnecting"));
+            set(&obj, "attempt", &JsValue::from_f64(f64::from(*attempt)));
+            // delay_ms fits in f64 — values come from Duration::as_millis()
+            // clamped to u64, never larger than the watch's max sleep
+            // (5s default).
+            set(&obj, "delayMs", &JsValue::from_f64(*delay_ms as f64));
+        }
+        ConnectionState::Closed { reason } => {
+            set(&obj, "kind", &JsValue::from_str("closed"));
+            set(&obj, "reason", &JsValue::from_str(reason));
+        }
+    }
+    obj.into()
 }
 
 fn parse_vars(value: &JsValue) -> Result<HashMap<String, VarValue>, JsValue> {
@@ -266,6 +320,52 @@ fn event_to_js(event: &DiffEvent) -> JsValue {
             }
             set(&obj, "rows", &rows_js);
         }
+        DiffEvent::Transaction {
+            commit_lsn,
+            begin_lsn,
+            end_lsn,
+            transaction_id,
+            changes,
+        } => {
+            set(&obj, "kind", &JsValue::from_str("transaction"));
+            set(&obj, "commitLsn", &BigInt::from(*commit_lsn).into());
+            if let Some(lsn) = begin_lsn {
+                set(&obj, "beginLsn", &BigInt::from(*lsn).into());
+            }
+            if let Some(lsn) = end_lsn {
+                set(&obj, "endLsn", &BigInt::from(*lsn).into());
+            }
+            if let Some(xid) = transaction_id {
+                set(&obj, "transactionId", &JsValue::from_f64(f64::from(*xid)));
+            }
+            let changes_js = Array::new();
+            for change in changes {
+                let change_js = Object::new();
+                set(
+                    &change_js,
+                    "op",
+                    &JsValue::from_str(diff_op_name(change.op)),
+                );
+                set(
+                    &change_js,
+                    "old",
+                    &change
+                        .old
+                        .as_ref()
+                        .map_or(JsValue::NULL, |row| row_to_js(row)),
+                );
+                set(
+                    &change_js,
+                    "new",
+                    &change
+                        .new
+                        .as_ref()
+                        .map_or(JsValue::NULL, |row| row_to_js(row)),
+                );
+                changes_js.push(&change_js);
+            }
+            set(&obj, "changes", &changes_js);
+        }
         DiffEvent::Resync { reason, message } => {
             set(&obj, "kind", &JsValue::from_str("resync"));
             set(
@@ -282,6 +382,14 @@ fn event_to_js(event: &DiffEvent) -> JsValue {
         }
     }
     obj.into()
+}
+
+fn row_to_js(row: &[WireDatum]) -> JsValue {
+    let row_arr = Array::new();
+    for datum in row {
+        row_arr.push(&datum_to_js(datum));
+    }
+    row_arr.into()
 }
 
 fn error_payload(message: &str) -> JsValue {

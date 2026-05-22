@@ -1,0 +1,20 @@
+{
+  "listen_addr": "127.0.0.1:55432",
+  "upstream_addr": "127.0.0.1:55000",
+  "organization_id": "org_123",
+  "project_id": "project_123",
+  "environment_id": "env_123",
+  "cluster_id": "cluster_123",
+  "policy": {
+    "allowed_users": [
+      "cluster_123_app",
+      "cluster_123_migration",
+      "cluster_123_support"
+    ],
+    "allowed_databases": ["postgres"],
+    "forbidden_startup_parameters": ["replication", "options"],
+    "required_startup_parameters": {},
+    "forbidden_simple_query_verbs": ["copy"],
+    "max_simple_query_bytes": 1048576
+  }
+}

@@ -14,6 +14,7 @@
 export type RawDiffEvent =
   | RawAcceptedEvent
   | RawDiffPayloadEvent
+  | RawTransactionEvent
   | RawResyncEvent
   | RawErrorEvent;
 
@@ -46,6 +47,21 @@ export interface RawDiffPayloadEvent {
   /** One of `DIFF_OP_INITIAL`, `DIFF_OP_INSERT`, `DIFF_OP_UPDATE`, `DIFF_OP_DELETE`. */
   op: RawDiffOp;
   rows: unknown[][];
+}
+
+export interface RawTransactionEvent {
+  kind: "transaction";
+  commitLsn: bigint;
+  beginLsn?: bigint;
+  endLsn?: bigint;
+  transactionId?: number;
+  changes: RawRowChange[];
+}
+
+export interface RawRowChange {
+  op: RawDiffOp;
+  old: unknown[] | null;
+  new: unknown[] | null;
 }
 
 export type RawDiffOp =
@@ -95,7 +111,22 @@ export interface WasmClientCtor {
 export interface WasmClient {
   subscribe(sql: string, vars: Record<string, string>): Promise<WasmSubscription>;
   shutdown(): Promise<void>;
+  /**
+   * Register a callback that fires once with the current transport
+   * state and then on every transition until the client is shut down.
+   * The payload matches `RawConnectionStatus` below; the typed wrapper
+   * surfaces it as {@link ConnectionStatus}.
+   */
+  onConnectionStatus(callback: (status: RawConnectionStatus) => void): void;
 }
+
+/** Raw connection-state payload — mirrors `connection_state_to_js`
+ *  in `crates/palimpsest-client-js/src/bindings.rs`. */
+export type RawConnectionStatus =
+  | { kind: "connecting" }
+  | { kind: "connected" }
+  | { kind: "reconnecting"; attempt: number; delayMs: number }
+  | { kind: "closed"; reason: string };
 
 export interface WasmSubscription {
   onDiff(callback: (event: RawDiffEvent) => void): void;

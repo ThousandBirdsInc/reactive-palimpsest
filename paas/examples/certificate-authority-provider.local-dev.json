@@ -1,0 +1,9 @@
+{
+  "ca_provider_id": "ca_local_dev",
+  "name": "Local development CA",
+  "kind": "local_dev",
+  "issuer_ref": "palimpsest-owned-local-dev-ca",
+  "status": "active",
+  "default_for_managed_postgres": true,
+  "updated_at": "2026-05-18 03:00:00+00"
+}

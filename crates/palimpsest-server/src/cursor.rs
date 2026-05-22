@@ -58,6 +58,12 @@ pub trait TraceCursor {
         })
     }
 
+    /// Returns the next complete transaction delta. Legacy cursors
+    /// infer the transaction boundary from one complete LSN batch.
+    fn next_transaction(&mut self) -> Option<QueryTransactionDelta> {
+        self.next_batch().map(QueryTransactionDelta::from)
+    }
+
     /// Returns the LSN of the diff `next_diff` would yield, without
     /// consuming it. Implementations that cannot peek may return
     /// `None`, in which case [`next_batch`](Self::next_batch) emits
@@ -74,6 +80,68 @@ pub struct LsnBatch {
     pub lsn: Lsn,
     /// Raw diffs at `lsn`.
     pub diffs: Vec<RawDiff>,
+}
+
+/// Complete dataflow output for one upstream transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryTransactionDelta {
+    /// PostgreSQL transaction id, when known.
+    pub transaction_id: Option<u32>,
+    /// Begin marker LSN, when known.
+    pub begin_lsn: Option<Lsn>,
+    /// Commit LSN shared by every raw diff in this output.
+    pub commit_lsn: Lsn,
+    /// End marker LSN, when known.
+    pub end_lsn: Option<Lsn>,
+    /// Raw dataflow diffs caused by this transaction.
+    pub diffs: Vec<RawDiff>,
+}
+
+impl QueryTransactionDelta {
+    /// Builds a transaction delta from already-complete raw output.
+    #[must_use]
+    pub const fn new(
+        transaction_id: Option<u32>,
+        begin_lsn: Option<Lsn>,
+        commit_lsn: Lsn,
+        end_lsn: Option<Lsn>,
+        diffs: Vec<RawDiff>,
+    ) -> Self {
+        Self {
+            transaction_id,
+            begin_lsn,
+            commit_lsn,
+            end_lsn,
+            diffs,
+        }
+    }
+
+    /// Total cardinality of the transaction output (sum of `|diff|`).
+    #[must_use]
+    pub fn cardinality(&self) -> usize {
+        self.diffs
+            .iter()
+            .map(|d| usize::try_from(d.diff.unsigned_abs()).unwrap_or(usize::MAX))
+            .sum()
+    }
+
+    /// Returns true when the transaction produced no visible output.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.diffs.is_empty()
+    }
+}
+
+impl From<LsnBatch> for QueryTransactionDelta {
+    fn from(batch: LsnBatch) -> Self {
+        Self {
+            transaction_id: None,
+            begin_lsn: None,
+            commit_lsn: batch.lsn,
+            end_lsn: None,
+            diffs: batch.diffs,
+        }
+    }
 }
 
 impl LsnBatch {

@@ -1,0 +1,25 @@
+{
+  "order_id": "acme_order_001",
+  "certificate_id": "cert_001",
+  "environment_id": "env_123",
+  "ca_provider_id": "ca_lets_encrypt",
+  "common_name": "db.env-123.palimpsest.dev",
+  "challenge_type": "http_01",
+  "challenge_token": "plmp-acme-001",
+  "key_authorization_secret_ref": {
+    "secret_id": "secret_acme_key_authorization_001",
+    "provider": "env-envelope",
+    "external_ref": "managed-postgres-endpoints/env_123/certificates/cert_001/http-01-key-authorization"
+  },
+  "csr_secret_ref": {
+    "secret_id": "secret_acme_csr_001",
+    "provider": "env-envelope",
+    "external_ref": "managed-postgres-endpoints/env_123/certificates/cert_001/acme.csr"
+  },
+  "directory_url": "https://acme-v02.api.letsencrypt.org/directory",
+  "account_ref": "ca_lets_encrypt",
+  "status": "pending_challenge",
+  "error_message": null,
+  "created_at": "2026-05-18 03:00:00+00",
+  "updated_at": "2026-05-18 03:00:00+00"
+}

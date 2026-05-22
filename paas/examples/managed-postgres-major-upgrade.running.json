@@ -1,0 +1,13 @@
+{
+  "upgrade_id": "major_upgrade_1779105000000000000",
+  "cluster_id": "cluster_123",
+  "source_postgres_version": "18.5",
+  "target_postgres_version": "19",
+  "strategy": "logical_replication_copy",
+  "status": "running",
+  "command_id": "cluster_123:upgrade-postgres-major:1779105000000000001",
+  "operation_id": "op_1779105000000000002",
+  "error_message": null,
+  "created_at": "2026-05-18 12:00:00+00",
+  "completed_at": null
+}

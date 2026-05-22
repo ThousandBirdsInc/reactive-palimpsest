@@ -4,16 +4,18 @@
 // is cheap to share; pass it around components rather than calling
 // connect() in every hook.
 
-import { decodeRows, type RowDecoderOptions } from "./codec.js";
+import { decodeRow, decodeRows, type RowDecoderOptions } from "./codec.js";
 import {
   diffOpFromRaw,
   schemaFromRaw,
   type ConnectOptions,
+  type ConnectionStatus,
   type DiffEvent,
   type Schema,
   type SubscribeOptions,
 } from "./types.js";
 import type {
+  RawConnectionStatus,
   RawDiffEvent,
   WasmClient,
   WasmModule,
@@ -104,6 +106,31 @@ export class TypedSubscription<T> {
           rows: decodeRows<T>(raw.rows, this.decodedSchema, this.decoderOptions),
         };
       }
+      case "transaction": {
+        if (!this.decodedSchema) {
+          return {
+            kind: "error",
+            code: "protocol",
+            message: "transaction received before accepted",
+          };
+        }
+        return {
+          kind: "transaction",
+          commitLsn: raw.commitLsn,
+          beginLsn: raw.beginLsn,
+          endLsn: raw.endLsn,
+          transactionId: raw.transactionId,
+          changes: raw.changes.map((change) => ({
+            op: diffOpFromRaw(change.op),
+            old: change.old
+              ? decodeRow<T>(change.old, this.decodedSchema!, this.decoderOptions)
+              : null,
+            new: change.new
+              ? decodeRow<T>(change.new, this.decodedSchema!, this.decoderOptions)
+              : null,
+          })),
+        };
+      }
       case "resync":
         return { kind: "resync", reason: raw.reason, message: raw.message };
       case "error":
@@ -156,5 +183,28 @@ export class PalimpsestClient {
   /** Close the underlying connection. */
   async shutdown(): Promise<void> {
     await this.wasmClient.shutdown();
+  }
+
+  /**
+   * Subscribe to transport state transitions. The callback fires once
+   * immediately with the current status, then on every change. Returns
+   * an unsubscribe function — call it to stop receiving updates (the
+   * underlying connection manager keeps running).
+   *
+   * The wasm side keeps a single forwarding task per registration; the
+   * unsubscribe just toggles a local flag, so calling it from an effect
+   * cleanup is cheap.
+   */
+  onConnectionStatus(
+    callback: (status: ConnectionStatus) => void,
+  ): () => void {
+    let active = true;
+    this.wasmClient.onConnectionStatus((raw: RawConnectionStatus) => {
+      if (!active) return;
+      callback(raw satisfies ConnectionStatus);
+    });
+    return () => {
+      active = false;
+    };
   }
 }

@@ -5,7 +5,8 @@
 //! Topology (single binary, three concurrent tasks):
 //!
 //! 1. **Postgres consumer** — tails the `palimpsest_demo` slot,
-//!    decodes pgoutput frames, mirrors `posts` + `events` in-memory,
+//!    decodes pgoutput frames, mirrors `posts`, `orders`, and `accounts`
+//!    in-memory,
 //!    and appends to the per-table journals the WAL runtime cursor
 //!    consumes.
 //! 2. **Write API (axum)** — issues SQL through tokio-postgres;
@@ -26,7 +27,7 @@ use std::sync::Arc;
 
 use palimpsest_permissions::{compile_rules, PermissionRule, UserContextSchema};
 use palimpsest_server::{JwtAuthenticator, Palimpsest};
-use palimpsest_sql::{Catalog, ColumnType};
+use palimpsest_sql::{Catalog, ColumnSchema, ColumnType, TableSchema};
 use palimpsest_wal::TableId;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -34,7 +35,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::api::{router, AppState};
-use crate::state::{DemoWalRuntime, EventStore, Store};
+use crate::state::{AccountStore, DemoWalRuntime, OrderStore, Store};
 
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:3000";
 const DEFAULT_GRPC_ADDR: &str = "0.0.0.0:50051";
@@ -102,21 +103,30 @@ async fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let events_snapshot = match db::snapshot_events(&pg.client).await {
+    let orders_snapshot = match db::snapshot_orders(&pg.client).await {
         Ok(rows) => rows,
         Err(err) => {
-            error!(%err, "events snapshot failed");
+            error!(%err, "orders snapshot failed");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let accounts_snapshot = match db::snapshot_accounts(&pg.client).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            error!(%err, "accounts snapshot failed");
             return std::process::ExitCode::FAILURE;
         }
     };
     info!(
         posts = posts_snapshot.len(),
-        events = events_snapshot.len(),
+        orders = orders_snapshot.len(),
+        accounts = accounts_snapshot.len(),
         "initial snapshot loaded from postgres",
     );
 
     let store = Arc::new(Store::from_snapshot(posts_snapshot));
-    let event_store = Arc::new(EventStore::from_snapshot(events_snapshot));
+    let order_store = Arc::new(OrderStore::from_snapshot(orders_snapshot));
+    let account_store = Arc::new(AccountStore::from_snapshot(accounts_snapshot));
 
     // -------------------------------------------------------------
     // Start consuming the replication slot. The consumer owns its
@@ -125,9 +135,11 @@ async fn main() -> std::process::ExitCode {
     let _consumer = db::spawn_consumer(
         pg.settings.clone(),
         pg.posts_oid,
-        pg.events_oid,
+        pg.orders_oid,
+        pg.accounts_oid,
         Arc::clone(&store),
-        Arc::clone(&event_store),
+        Arc::clone(&order_store),
+        Arc::clone(&account_store),
     );
 
     let grpc_addr = addr_from_env("PALIMPSEST_DEMO_GRPC_ADDR", DEFAULT_GRPC_ADDR);
@@ -138,12 +150,19 @@ async fn main() -> std::process::ExitCode {
         ("is_admin".to_owned(), ColumnType::Bool),
     ]);
     let permission_rules = compile_rules(
-        &[PermissionRule::new(
-            "posts_visibility",
-            "posts",
-            "published = true OR $user.is_admin = true",
-        )],
-        &Catalog::demo(),
+        &[
+            PermissionRule::new(
+                "posts_visibility",
+                "posts",
+                "published = true OR $user.is_admin = true",
+            ),
+            PermissionRule::new(
+                "accounts_visibility",
+                "accounts",
+                "owner_user_id = $user.id OR $user.is_admin = true",
+            ),
+        ],
+        &demo_catalog(),
         &user_schema,
     )
     .expect("compile permission rules");
@@ -151,9 +170,11 @@ async fn main() -> std::process::ExitCode {
     let palimpsest = Palimpsest::builder()
         .with_wal(DemoWalRuntime::new(
             Arc::clone(&store),
-            Arc::clone(&event_store),
+            Arc::clone(&order_store),
+            Arc::clone(&account_store),
             TableId::new(pg.posts_oid),
-            TableId::new(pg.events_oid),
+            TableId::new(pg.orders_oid),
+            TableId::new(pg.accounts_oid),
         ))
         .with_auth(JwtAuthenticator::new(auth::jwt_auth_config()))
         .with_permissions(permission_rules)
@@ -180,7 +201,7 @@ async fn main() -> std::process::ExitCode {
     let http_state = AppState {
         pg: Arc::clone(&pg.client),
         store: Arc::clone(&store),
-        events: Arc::clone(&event_store),
+        orders: Arc::clone(&order_store),
     };
     let http_handle = tokio::spawn(async move {
         info!(%http_addr, "write API listening");
@@ -216,4 +237,18 @@ async fn main() -> std::process::ExitCode {
     let _ = shutdown_http_tx.send(());
     let _ = tokio::join!(grpc_handle, http_handle);
     std::process::ExitCode::SUCCESS
+}
+
+fn demo_catalog() -> Catalog {
+    let mut tables: Vec<TableSchema> = Catalog::demo().tables().cloned().collect();
+    tables.push(TableSchema::new(
+        "accounts",
+        vec![
+            ColumnSchema::new("id", ColumnType::Int),
+            ColumnSchema::new("owner_user_id", ColumnType::Text),
+            ColumnSchema::new("display_name", ColumnType::Text),
+            ColumnSchema::new("balance_cents", ColumnType::Int),
+        ],
+    ));
+    Catalog::new(tables)
 }

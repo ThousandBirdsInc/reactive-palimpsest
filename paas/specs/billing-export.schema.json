@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/billing-export.schema.json",
+  "title": "Palimpsest Billing Export Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["export_id", "destination"],
+  "properties": {
+    "export_id": { "type": "string", "minLength": 1 },
+    "destination": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Use local-jsonl or local-jsonl:/path for the owned JSONL delivery sink."
+    },
+    "organization_id": {
+      "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+    },
+    "project_id": {
+      "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+    },
+    "environment_id": {
+      "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+    },
+    "metric": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "enum": [
+            "postgres_storage_gib_hours",
+            "postgres_wal_bytes",
+            "postgres_backup_bytes",
+            "sync_egress_bytes",
+            "sync_connection_minutes"
+          ]
+        }
+      ]
+    },
+    "occurred_at_from": {
+      "anyOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }]
+    },
+    "occurred_at_to": {
+      "anyOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }]
+    },
+    "limit": {
+      "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 1 }]
+    }
+  }
+}

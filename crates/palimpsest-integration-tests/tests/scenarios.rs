@@ -97,6 +97,7 @@ fn subscribe<P: SnapshotProvider + ?Sized>(
         .subscribe(
             SubscribeRequest {
                 connection: ConnectionId::new(1),
+                subscription_id: router.allocate_subscription_id(),
                 client_id: ClientSubscriptionId::new(client),
                 query: QueryId::new("posts.recent"),
                 query_graph: &graph,
@@ -104,6 +105,7 @@ fn subscribe<P: SnapshotProvider + ?Sized>(
                 schema: schema(),
                 resume_lsn: None,
                 compiled_plan: None,
+                prerun_initial: None,
             },
             provider,
         )
@@ -131,10 +133,15 @@ async fn scenario_initial_snapshot_then_steady_state_diffs() {
     router
         .pump_cursor(response.subscription_id, &mut cursor, &[0])
         .unwrap();
-    let DiffEvent::Update { changes, lsn } = stream.next().await.unwrap() else {
-        panic!("expected Update");
+    let DiffEvent::TransactionUpdate {
+        changes,
+        commit_lsn,
+        ..
+    } = stream.next().await.unwrap()
+    else {
+        panic!("expected TransactionUpdate");
     };
-    assert_eq!(lsn, Lsn::new(110));
+    assert_eq!(commit_lsn, Lsn::new(110));
     assert_eq!(changes.len(), 1);
 }
 

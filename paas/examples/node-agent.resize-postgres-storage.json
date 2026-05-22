@@ -1,0 +1,9 @@
+{
+  "command_id": "cluster_123:resize-postgres-storage:1779043500000000000",
+  "cluster_id": "cluster_123",
+  "action": {
+    "kind": "resize_postgres_storage",
+    "data_dir": "/tmp/palimpsest-paas-smoke/postgres/cluster_123",
+    "storage_gib": 32
+  }
+}

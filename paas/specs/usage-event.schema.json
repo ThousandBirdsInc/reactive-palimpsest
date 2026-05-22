@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/usage-event.schema.json",
+  "title": "Palimpsest Usage Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "idempotency_key",
+    "organization_id",
+    "project_id",
+    "environment_id",
+    "metric",
+    "quantity",
+    "occurred_at"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "minLength": 1 },
+    "idempotency_key": { "type": "string", "minLength": 1 },
+    "organization_id": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "environment_id": { "type": "string", "minLength": 1 },
+    "metric": {
+      "enum": [
+        "postgres_storage_gib_hours",
+        "postgres_wal_bytes",
+        "postgres_backup_bytes",
+        "sync_egress_bytes",
+        "sync_connection_minutes"
+      ]
+    },
+    "quantity": { "type": "integer", "minimum": 0 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_id", "algorithm", "signature"],
+      "properties": {
+        "key_id": { "type": "string", "minLength": 1 },
+        "algorithm": { "const": "hmac_sha256_v1" },
+        "signature": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

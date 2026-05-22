@@ -1,4 +1,5 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { motion } from "motion/react";
 import {
   usePalimpsestClient,
   usePalimpsestSubscription,
@@ -12,16 +13,16 @@ interface Post {
   published: boolean;
 }
 
-/// Per-row shape the server emits for the events-aggregate
-/// subscription. After the v1 → v2 router rewrite the dataflow does
-/// the aggregation server-side, so the client receives ~50 rows of
-/// `(category_id, n, total, avg_value)` instead of the 300k raw
-/// events.
-interface EventAggregateRow {
+/// Per-row shape the server emits for the orders-aggregate
+/// subscription. The dataflow rolls up the 600k-row orders table
+/// into one row per category — `(category_id, n, total_cents,
+/// avg_cents)` — so the bubble chart only ever sees ~20 rows of
+/// aggregate, never the raw orders.
+interface OrderAggregateRow {
   category_id: bigint;
   n: bigint;
-  total: bigint;
-  avg_value: number;
+  total_cents: bigint;
+  avg_cents: number;
 }
 
 /// Per-row shape the server emits for the posts-by-status chart
@@ -32,11 +33,23 @@ interface PostsByStatusRow {
   n: bigint;
 }
 
+interface AccountRow {
+  id: bigint;
+  owner_user_id: string;
+  display_name: string;
+  balance_cents: bigint;
+}
+
 /// Default bulk-add payload size for the "inject events into
 /// category N" button. Same-LSN coalescing means one click = one
 /// Diff event with `BULK_ADD_BATCH` rows, regardless of how big the
 /// batch is.
 const BULK_ADD_BATCH = 1_000;
+
+/// Rows written per auto-write tick. Fixed (not randomized) so the
+/// number visible in the UI matches what's actually hitting Postgres
+/// and so demo behavior is reproducible across runs.
+const AUTO_WRITE_BATCH = 500;
 
 type Filter = "all" | "published" | "draft";
 
@@ -55,23 +68,80 @@ SELECT published, n
 FROM stats
 ORDER BY published`;
 
-/// Multi-CTE aggregate against the 300k-row `events` table. Chains a
+/// Multi-CTE aggregate against the 600k-row `orders` table. Chains a
 /// per-category rollup through a sort-and-limit. The server compiles
 /// this into a differential-dataflow pipeline (BaseTable → Aggregate
-/// → TopK) and ships only the ~50 aggregate rows the query produces,
-/// not the 300k raw events.
-const EVENT_STATS_SQL = `WITH per_category AS (
+/// → TopK) and ships only the top-12 aggregate rows the query
+/// produces, not the 600k raw orders.
+const ORDER_STATS_SQL = `WITH per_category AS (
   SELECT category_id,
-         COUNT(*) AS n,
-         SUM(value) AS total,
-         AVG(value) AS avg_value
-  FROM events
+         COUNT(*)          AS n,
+         SUM(amount_cents) AS total_cents,
+         AVG(amount_cents) AS avg_cents
+  FROM orders
   GROUP BY category_id
 )
-SELECT category_id, n, total, avg_value
+SELECT category_id, n, total_cents, avg_cents
 FROM per_category
-ORDER BY total DESC
-LIMIT 8`;
+ORDER BY total_cents DESC
+LIMIT 12`;
+
+const ACCOUNTS_SQL = `SELECT id, owner_user_id, display_name, balance_cents
+FROM accounts
+ORDER BY owner_user_id`;
+
+/// 20-category e-commerce catalog, mirrored from `db.rs::CATEGORY_PROFILES`.
+/// `floorCents` and `spreadCents` define the (uniform) price distribution
+/// for each category; the auto-write timer + bulk-add buttons use them so
+/// new orders fit the category's existing pricing shape. `sector` groups
+/// related categories so the bubble chart can color them consistently.
+type Sector = "tech" | "apparel" | "grocery" | "home" | "media";
+interface Category {
+  id: number;
+  name: string;
+  short: string;
+  sector: Sector;
+  floorCents: number;
+  spreadCents: number;
+}
+const CATEGORIES: Category[] = [
+  { id: 1,  name: "Smartphones", short: "Phones",   sector: "tech",    floorCents: 40_000, spreadCents:  80_000 },
+  { id: 2,  name: "Laptops",     short: "Laptops",  sector: "tech",    floorCents: 60_000, spreadCents: 140_000 },
+  { id: 3,  name: "Headphones",  short: "Audio",    sector: "tech",    floorCents:  5_000, spreadCents:  12_000 },
+  { id: 4,  name: "Cameras",     short: "Cams",     sector: "tech",    floorCents: 30_000, spreadCents:  90_000 },
+  { id: 5,  name: "Tees",        short: "Tees",     sector: "apparel", floorCents:  1_500, spreadCents:   3_000 },
+  { id: 6,  name: "Jeans",       short: "Jeans",    sector: "apparel", floorCents:  4_000, spreadCents:   7_000 },
+  { id: 7,  name: "Sneakers",    short: "Shoes",    sector: "apparel", floorCents:  6_000, spreadCents:  15_000 },
+  { id: 8,  name: "Jackets",     short: "Jackets",  sector: "apparel", floorCents:  8_000, spreadCents:  20_000 },
+  { id: 9,  name: "Snacks",      short: "Snacks",   sector: "grocery", floorCents:    300, spreadCents:     600 },
+  { id: 10, name: "Beverages",   short: "Drinks",   sector: "grocery", floorCents:    400, spreadCents:     800 },
+  { id: 11, name: "Dairy",       short: "Dairy",    sector: "grocery", floorCents:    500, spreadCents:   1_200 },
+  { id: 12, name: "Pantry",      short: "Pantry",   sector: "grocery", floorCents:    800, spreadCents:   1_800 },
+  { id: 13, name: "Cookware",    short: "Cook",     sector: "home",    floorCents:  4_000, spreadCents:  12_000 },
+  { id: 14, name: "Bedding",     short: "Bedding",  sector: "home",    floorCents:  5_000, spreadCents:   9_000 },
+  { id: 15, name: "Decor",       short: "Decor",    sector: "home",    floorCents:  2_500, spreadCents:   6_000 },
+  { id: 16, name: "Furniture",   short: "Furn",     sector: "home",    floorCents: 15_000, spreadCents:  60_000 },
+  { id: 17, name: "Books",       short: "Books",    sector: "media",   floorCents:  1_500, spreadCents:   2_500 },
+  { id: 18, name: "Games",       short: "Games",    sector: "media",   floorCents:  4_000, spreadCents:   4_000 },
+  { id: 19, name: "Movies",      short: "Movies",   sector: "media",   floorCents:  2_000, spreadCents:   1_500 },
+  { id: 20, name: "Vinyl",       short: "Vinyl",    sector: "media",   floorCents:  2_500, spreadCents:   4_000 },
+];
+const CATEGORIES_BY_ID = new Map(CATEGORIES.map((c) => [c.id, c]));
+
+const SECTOR_COLOR: Record<Sector, string> = {
+  tech:    "#1a73e8",
+  apparel: "#a64ac9",
+  grocery: "#15a86b",
+  home:    "#e07f23",
+  media:   "#d63a5a",
+};
+const SECTOR_LABEL: Record<Sector, string> = {
+  tech: "Tech",
+  apparel: "Apparel",
+  grocery: "Grocery",
+  home: "Home",
+  media: "Media",
+};
 
 /// Permission rule as configured on the server (see
 /// `examples/demo-app/server/src/main.rs::permission_rules`). Shown
@@ -94,6 +164,8 @@ export default function App() {
   const [draftTitle, setDraftTitle] = useState("");
   const [writeError, setWriteError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
+  const [accountAmount, setAccountAmount] = useState(25);
+  const [transferTo, setTransferTo] = useState("bob");
 
   // User picker state. `users` is populated once from /api/users;
   // `currentUser` drives which token we request from /api/token. The
@@ -167,6 +239,7 @@ export default function App() {
   const {
     client,
     status: clientStatus,
+    connection: clientConnection,
     error: clientError,
   } = usePalimpsestClient(clientOpts);
 
@@ -185,19 +258,25 @@ export default function App() {
       decoder: { coerceSafeIntegersToNumber: false },
     });
 
-  // Subscription 3: aggregate over the 300k-row `events` table. The
+  // Subscription 3: aggregate over the 600k-row `orders` table. The
   // server compiles the CTE+aggregate+TopK SQL into a dataflow and
-  // ships only the ~50 aggregate rows; the client just renders them.
-  // Live diffs flow through the persistent host's
-  // `push_table_batch`: each WAL mutation produces aggregate
-  // retract+assert deltas the client merges by PK.
-  const { rows: eventRows, error: eventError } =
-    usePalimpsestSubscription<EventAggregateRow>(client, EVENT_STATS_SQL, {
+  // ships only the top-12 aggregate rows; the client renders them
+  // as a multi-axis bubble chart. Live diffs flow through the
+  // persistent host's `push_table_batch`: each WAL mutation produces
+  // aggregate retract+assert deltas the client merges by PK.
+  const { rows: orderRows, error: orderError } =
+    usePalimpsestSubscription<OrderAggregateRow>(client, ORDER_STATS_SQL, {
+      decoder: { coerceSafeIntegersToNumber: false },
+    });
+
+  const { rows: accountRows, error: accountError } =
+    usePalimpsestSubscription<AccountRow>(client, ACCOUNTS_SQL, {
       decoder: { coerceSafeIntegersToNumber: false },
     });
 
   const overallStatus = client ? listStatus : clientStatus;
-  const connectionError = clientError ?? listError ?? chartError ?? eventError;
+  const connectionError =
+    clientError ?? listError ?? chartError ?? orderError ?? accountError;
 
   // The server now runs the permission filter through the compiled
   // dataflow, so `listRows` is *already* filtered down to what this
@@ -224,28 +303,49 @@ export default function App() {
   }, [chartRows]);
   const total = counts.published + counts.draft;
 
-  // Server-side aggregation: `eventRows` already contains exactly
-  // the top categories, ordered + limited per the SQL's
-  // `ORDER BY total DESC LIMIT 8`. No client-side aggregation needed.
-  const eventTopCategories = useMemo(
+  // The dataflow already returns the top-12 categories ordered by
+  // `total_cents DESC`. Map into the shape the bubble chart consumes —
+  // dollars instead of cents, with the resolved Category descriptor
+  // attached so the chart can show names + sector colors.
+  const orderTopCategories = useMemo(
     () =>
-      eventRows.map((row) => ({
-        categoryId: String(row.category_id),
-        count: Number(row.n),
-        total: row.total,
-        avg: row.avg_value,
-      })),
-    [eventRows],
+      orderRows.map((row) => {
+        const id = Number(row.category_id);
+        const category = CATEGORIES_BY_ID.get(id);
+        return {
+          id,
+          name: category?.name ?? `cat ${id}`,
+          short: category?.short ?? `${id}`,
+          sector: category?.sector ?? "media",
+          count: Number(row.n),
+          avgDollars: row.avg_cents / 100,
+          totalDollars: Number(row.total_cents) / 100,
+        };
+      }),
+    [orderRows],
   );
 
-  /// Sum of the aggregate's `n` column — i.e. the total number of
-  /// events across the categories the server sent us. The aggregate
-  /// only ships the top-N categories, so for >N categories this is a
-  /// lower bound; for the demo's 50 categories vs LIMIT 8 it is.
-  const eventTotalRows = eventTopCategories.reduce(
+  /// Sum of the aggregate's `n` column across the categories the
+  /// server sent us. With 20 categories and LIMIT 12 this is a
+  /// lower bound, but the visible chart only covers those 12 anyway.
+  const orderTotalRows = orderTopCategories.reduce(
     (sum, row) => sum + row.count,
     0,
   );
+
+  const visibleAccountTotal = accountRows.reduce(
+    (sum, row) => sum + Number(row.balance_cents),
+    0,
+  );
+  const transferOptions = users.filter((u) => u.id !== currentUser?.id);
+
+  useEffect(() => {
+    if (currentUser && transferTo === currentUser.id) {
+      setTransferTo(users.find((u) => u.id !== currentUser.id)?.id ?? "");
+    } else if (!transferTo && users.length > 1) {
+      setTransferTo(users.find((u) => u.id !== currentUser?.id)?.id ?? "");
+    }
+  }, [currentUser, transferTo, users]);
 
   async function withWrite<T>(fn: () => Promise<T>): Promise<void> {
     setWriteError(null);
@@ -265,32 +365,83 @@ export default function App() {
     await withWrite(() => api.createPost(title, true));
   }
 
-  async function onBulkAddEvents(categoryId: number) {
-    await withWrite(() => api.bulkAddEvents(categoryId, BULK_ADD_BATCH));
+  async function onBulkAddOrders(category: Category) {
+    await withWrite(() =>
+      api.bulkAddOrders(
+        category.id,
+        BULK_ADD_BATCH,
+        category.floorCents,
+        category.spreadCents,
+      ),
+    );
   }
 
-  // Background traffic generator — every 5 seconds, push a random
-  // batch into a random category through the regular write API.
-  // Keeps the bubble chart visibly moving so the live-diff path is
-  // obvious without the user clicking anything.
+  async function onDeposit() {
+    if (!currentUser) return;
+    await withWrite(() =>
+      api.deposit(currentUser.id, Math.round(accountAmount * 100)),
+    );
+  }
+
+  async function onWithdraw() {
+    if (!currentUser) return;
+    await withWrite(() =>
+      api.withdraw(currentUser.id, Math.round(accountAmount * 100)),
+    );
+  }
+
+  async function onTransfer() {
+    if (!currentUser || !transferTo) return;
+    await withWrite(() =>
+      api.transfer(currentUser.id, transferTo, Math.round(accountAmount * 100)),
+    );
+  }
+
+  // Background traffic generator — every N ms, push a random batch
+  // into a random category through the regular write API, priced
+  // from that category's own distribution. Keeps the bubble chart
+  // visibly moving so the live-diff path is obvious without the
+  // user clicking anything. The pace slider drives the cadence in
+  // writes-per-minute (12 = one every 5s, 240 = one every 250ms).
   const [autoWrite, setAutoWrite] = useState(true);
+  const [writesPerMinute, setWritesPerMinute] = useState(12);
+  const autoWriteIntervalMs = Math.max(
+    250,
+    Math.round(60_000 / writesPerMinute),
+  );
+  // Most recent auto-write tick — surfaced in the UI so it's obvious
+  // how many rows each timer fire actually pushes through. `nonce`
+  // re-keys the badge so it can re-mount and replay the pop animation
+  // even when consecutive ticks happen to hit the same category.
+  const [lastAutoWrite, setLastAutoWrite] = useState<{
+    category: string;
+    nonce: number;
+  } | null>(null);
   useEffect(() => {
     if (!autoWrite || overallStatus !== "open") return;
     const tick = async () => {
-      const categoryId = 1 + Math.floor(Math.random() * 50);
-      const count = 200 + Math.floor(Math.random() * 600);
-      const baseValue = 50 + Math.floor(Math.random() * 500);
+      const category =
+        CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
       try {
-        await api.bulkAddEvents(categoryId, count, baseValue);
+        await api.bulkAddOrders(
+          category.id,
+          AUTO_WRITE_BATCH,
+          category.floorCents,
+          category.spreadCents,
+        );
+        setLastAutoWrite((prev) => ({
+          category: category.name,
+          nonce: (prev?.nonce ?? 0) + 1,
+        }));
       } catch (err) {
         // Don't surface auto-write errors into the user-facing banner;
         // a brief network hiccup shouldn't look like a write failure.
         console.warn("auto-write failed", err);
       }
     };
-    const handle = window.setInterval(tick, 5000);
+    const handle = window.setInterval(tick, autoWriteIntervalMs);
     return () => window.clearInterval(handle);
-  }, [api, autoWrite, overallStatus]);
+  }, [api, autoWrite, autoWriteIntervalMs, overallStatus]);
 
   return (
     <>
@@ -336,7 +487,18 @@ export default function App() {
 
       <p>
         connection:{" "}
-        <span className={`status ${overallStatus}`}>{overallStatus}</span>
+        <span className={`status ${overallStatus}`}>
+          {overallStatus}
+          {clientConnection?.kind === "reconnecting" && (
+            <>
+              {" "}attempt {clientConnection.attempt}, retry in{" "}
+              {clientConnection.delayMs} ms
+            </>
+          )}
+          {clientConnection?.kind === "closed" && (
+            <> — {clientConnection.reason}</>
+          )}
+        </span>
         {" · "}
         <strong>{listRows.length}</strong> rows after rule + filter
         {connectionError && (
@@ -443,40 +605,155 @@ export default function App() {
 
       <section className="panel">
         <header className="panel-head">
+          <h2>Subscription 3 — account balances as one transaction</h2>
+          <div className="filters" role="group" aria-label="Account actions">
+            <button
+              type="button"
+              className="chip"
+              disabled={overallStatus !== "open" || !currentUser}
+              onClick={onDeposit}
+            >
+              +${accountAmount}
+            </button>
+            <button
+              type="button"
+              className="chip"
+              disabled={overallStatus !== "open" || !currentUser}
+              onClick={onWithdraw}
+            >
+              -${accountAmount}
+            </button>
+            <button
+              type="button"
+              className="chip"
+              disabled={overallStatus !== "open" || !currentUser || !transferTo}
+              onClick={onTransfer}
+            >
+              transfer ${accountAmount}
+            </button>
+          </div>
+        </header>
+        <pre className="sql">{ACCOUNTS_SQL}</pre>
+        <p className="rule-text">
+          Account visibility rule:{" "}
+          <code>owner_user_id = $user.id OR $user.is_admin = true</code>. Writes
+          are stricter: each persona can deposit to, withdraw from, and transfer
+          out of only their own account.
+        </p>
+
+        <div className="account-controls">
+          <label>
+            Amount
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              value={accountAmount}
+              onChange={(e) => setAccountAmount(Number(e.target.value))}
+            />
+          </label>
+          <label>
+            Transfer recipient
+            <select
+              value={transferTo}
+              onChange={(e) => setTransferTo(e.target.value)}
+            >
+              {transferOptions.map((user) => (
+                <option key={user.id} value={user.id}>
+                  {user.display_name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="account-total">
+            visible total: {formatMoney(visibleAccountTotal)}
+          </span>
+        </div>
+
+        <AccountBalances rows={accountRows} currentUserId={currentUser?.id} />
+      </section>
+
+      <section className="panel">
+        <header className="panel-head">
           <h2>
-            Subscription 3 — top categories over{" "}
-            <strong>{eventTotalRows.toLocaleString()}</strong> events
+            Subscription 4 — top categories over{" "}
+            <strong>{orderTotalRows.toLocaleString()}</strong> orders
           </h2>
-          <div className="filters" role="group" aria-label="Inject events">
-            <label className="auto-toggle">
-              <input
-                type="checkbox"
-                checked={autoWrite}
-                onChange={(e) => setAutoWrite(e.target.checked)}
-              />
-              auto-write 5s
-            </label>
-            {[3, 17, 42].map((categoryId) => (
+          <div className="filters" role="group" aria-label="Inject orders">
+            {[
+              CATEGORIES_BY_ID.get(9)!,   // Snacks (high vol, low ticket)
+              CATEGORIES_BY_ID.get(2)!,   // Laptops (low vol, high ticket)
+              CATEGORIES_BY_ID.get(7)!,   // Sneakers (mid)
+            ].map((category) => (
               <button
-                key={categoryId}
+                key={category.id}
                 type="button"
                 className="chip"
                 disabled={overallStatus !== "open"}
-                onClick={() => onBulkAddEvents(categoryId)}
+                title={`Bulk-insert ${BULK_ADD_BATCH} ${category.name.toLowerCase()} orders priced from the same distribution`}
+                onClick={() => onBulkAddOrders(category)}
               >
-                +{BULK_ADD_BATCH.toLocaleString()} → cat {categoryId}
+                +{BULK_ADD_BATCH.toLocaleString()} → {category.name}
               </button>
             ))}
           </div>
         </header>
-        <pre className="sql">{EVENT_STATS_SQL}</pre>
+        <pre className="sql">{ORDER_STATS_SQL}</pre>
 
-        {eventTopCategories.length === 0 && overallStatus === "open" && (
+        <div className="auto-write-row" aria-label="Auto-write controls">
+          <label className="auto-toggle">
+            <input
+              type="checkbox"
+              checked={autoWrite}
+              onChange={(e) => setAutoWrite(e.target.checked)}
+            />
+            auto-write
+          </label>
+          <input
+            type="range"
+            className="pace-slider"
+            min={12}
+            max={240}
+            step={12}
+            value={writesPerMinute}
+            disabled={!autoWrite}
+            onChange={(e) => setWritesPerMinute(Number(e.target.value))}
+            aria-label="Auto-write pace (writes per minute)"
+          />
+          <span className="pace-value">
+            <strong>{writesPerMinute}</strong>/min · every{" "}
+            {(autoWriteIntervalMs / 1000).toFixed(2)}s ·{" "}
+            <strong>
+              {(writesPerMinute * AUTO_WRITE_BATCH).toLocaleString()}
+            </strong>{" "}
+            rows / min
+          </span>
+          {lastAutoWrite && (
+            <motion.span
+              key={lastAutoWrite.nonce}
+              className="auto-write-last"
+              initial={{ scale: 0.85, opacity: 0.4 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{
+                type: "spring",
+                stiffness: 320,
+                damping: 22,
+              }}
+              aria-live="polite"
+            >
+              last:{" "}
+              <strong>+{AUTO_WRITE_BATCH.toLocaleString()}</strong> →{" "}
+              {lastAutoWrite.category}
+            </motion.span>
+          )}
+        </div>
+
+        {orderTopCategories.length === 0 && overallStatus === "open" && (
           <p className="empty">Waiting for first aggregate snapshot…</p>
         )}
 
-        {eventTopCategories.length > 0 && (
-          <EventBubbleChart rows={eventTopCategories} />
+        {orderTopCategories.length > 0 && (
+          <OrderBubbleChart rows={orderTopCategories} />
         )}
       </section>
 
@@ -496,6 +773,54 @@ interface ChartProps {
   accent: "published" | "draft";
 }
 
+function formatMoney(cents: number): string {
+  return (cents / 100).toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
+}
+
+function AccountBalances({
+  rows,
+  currentUserId,
+}: {
+  rows: AccountRow[];
+  currentUserId?: string;
+}) {
+  const maxBalance = Math.max(
+    1,
+    ...rows.map((row) => Number(row.balance_cents)),
+  );
+  if (rows.length === 0) {
+    return <p className="empty">No account rows are visible for this persona.</p>;
+  }
+  return (
+    <div className="accounts-grid">
+      {rows.map((row) => {
+        const balance = Number(row.balance_cents);
+        const pct = Math.max(6, (balance / maxBalance) * 100);
+        const isMine = row.owner_user_id === currentUserId;
+        return (
+          <div
+            key={String(row.id)}
+            className={`account-card ${isMine ? "account-mine" : ""}`}
+          >
+            <div className="account-card-head">
+              <span>{row.display_name}</span>
+              <span className="account-owner">{row.owner_user_id}</span>
+            </div>
+            <div className="account-bar-track">
+              <div className="account-bar-fill" style={{ width: `${pct}%` }} />
+            </div>
+            <div className="account-balance">{formatMoney(balance)}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Chart({ label, value, total, accent }: ChartProps) {
   const pct = total === 0 ? 0 : (value / total) * 100;
   return (
@@ -510,166 +835,414 @@ function Chart({ label, value, total, accent }: ChartProps) {
 }
 
 interface BubbleRow {
-  categoryId: string;
+  id: number;
+  name: string;
+  short: string;
+  sector: Sector;
   count: number;
-  total: bigint;
-  avg: number;
+  avgDollars: number;
+  totalDollars: number;
 }
 
 /// Multi-axis bubble chart over the live aggregate. Each bubble is
-/// one of the top categories returned by the dataflow's TopK; its
-/// position encodes count + average value, its area encodes total
-/// (= count × avg, the same column the SQL orders by), and its hue
-/// is a stable hash of the category id so a category keeps the same
-/// color as it slides around on incoming diffs.
+/// one of the top categories returned by the dataflow's TopK:
 ///
-/// Pure inline SVG: no chart library. SVG `cx`/`cy`/`r` transitions
-/// are CSS properties so the bubble animates smoothly when the
-/// dataflow ships a retract+assert pair at a single LSN.
-function EventBubbleChart({ rows }: { rows: BubbleRow[] }) {
-  const width = 760;
-  const height = 360;
-  const pad = { top: 24, right: 28, bottom: 48, left: 64 };
+/// * **X axis** — orders shipped (COUNT(*) per category). Log-scaled
+///   because volume spans Snacks (~100k) to Furniture (~3k), and a
+///   linear axis would crowd everything against the right edge.
+/// * **Y axis** — average order value (AVG(amount_cents) / 100, in
+///   dollars). Also log-scaled — Snacks averages ~$5, Laptops ~$1300.
+/// * **Area** — total revenue (SUM(amount_cents) / 100). √-scaled so
+///   the visual area is proportional to dollars.
+/// * **Color** — sector (Tech, Apparel, Grocery, Home, Media), shared
+///   across the 3–4 categories in each sector so visual groupings
+///   pop without overloading the eye with 20 distinct hues.
+///
+/// Inline SVG (no chart library) wrapped in `motion` so each bubble
+/// + its labels spring into their new position when the dataflow
+/// retracts the old aggregate row and asserts the new one. Same
+/// row id across frames means motion reuses the DOM node and
+/// interpolates `cx`/`cy`/`r`/`x`/`y` instead of teleporting.
+function OrderBubbleChart({ rows }: { rows: BubbleRow[] }) {
+  const width = 780;
+  const height = 420;
+  const pad = { top: 24, right: 28, bottom: 56, left: 72 };
   const innerW = width - pad.left - pad.right;
   const innerH = height - pad.top - pad.bottom;
 
   const counts = rows.map((r) => r.count);
-  const avgs = rows.map((r) => r.avg);
-  const totals = rows.map((r) => Number(r.total));
-
-  const xLo = Math.min(...counts);
-  const xHi = Math.max(...counts);
-  const yLo = Math.min(...avgs);
-  const yHi = Math.max(...avgs);
+  const avgs = rows.map((r) => r.avgDollars);
+  const totals = rows.map((r) => r.totalDollars);
   const tMax = Math.max(...totals, 1);
 
-  // Pad the data range so points never sit exactly on the axis.
-  const xRange = Math.max(xHi - xLo, 1);
-  const yRange = Math.max(yHi - yLo, 1);
-  const xMin = xLo - xRange * 0.12;
-  const xMax = xHi + xRange * 0.12;
-  const yMin = Math.max(0, yLo - yRange * 0.15);
-  const yMax = yHi + yRange * 0.15;
+  // Log scales for both axes so the realistic e-commerce spread
+  // (high-volume / low-ticket vs low-volume / high-ticket) reads
+  // clearly. Padding kept tight (~6 % per side) so small live-diff
+  // movements use as many pixels as possible.
+  const xLogLo = Math.log10(Math.max(Math.min(...counts), 1));
+  const xLogHi = Math.log10(Math.max(...counts, 10));
+  const yLogLo = Math.log10(Math.max(Math.min(...avgs), 1));
+  const yLogHi = Math.log10(Math.max(...avgs, 10));
+  const xPad = (xLogHi - xLogLo) * 0.06 || 0.15;
+  const yPad = (yLogHi - yLogLo) * 0.06 || 0.15;
+  const xMin = xLogLo - xPad;
+  const xMax = xLogHi + xPad;
+  const yMin = yLogLo - yPad;
+  const yMax = yLogHi + yPad;
 
   const sx = (v: number) =>
-    pad.left + ((v - xMin) / (xMax - xMin || 1)) * innerW;
+    pad.left + ((Math.log10(Math.max(v, 1)) - xMin) / (xMax - xMin)) * innerW;
   const sy = (v: number) =>
-    pad.top + innerH - ((v - yMin) / (yMax - yMin || 1)) * innerH;
-  const sr = (v: number) => 10 + Math.sqrt(v / tMax) * 32;
+    pad.top +
+    innerH -
+    ((Math.log10(Math.max(v, 1)) - yMin) / (yMax - yMin)) * innerH;
+  const sr = (totalDollars: number) =>
+    14 + Math.sqrt(totalDollars / tMax) * 42;
 
-  // Golden-angle hue mapping → distinct, stable colors per category.
-  const hue = (id: string) => (Number(id) * 137.508) % 360;
+  // Major ticks at decades (1, 10, 100, 1k, …); minor ticks at 2× and
+  // 5× of each decade (e.g. 1, 2, 5, 10, 20, 50, 100, …). The minor
+  // gridlines double the eye's reference density so small movements
+  // between major ticks are easier to spot.
+  const decadeTicks = (lo: number, hi: number, multipliers: number[]) => {
+    const start = Math.floor(lo);
+    const end = Math.ceil(hi);
+    const out: number[] = [];
+    for (let p = start; p <= end; p += 1) {
+      for (const m of multipliers) {
+        const v = m * Math.pow(10, p);
+        if (Math.log10(v) >= lo && Math.log10(v) <= hi) out.push(v);
+      }
+    }
+    return out;
+  };
+  const fmt = (n: number) => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(0)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
+    if (n >= 1) return n.toFixed(0);
+    return n.toString();
+  };
 
-  const xTicks = Array.from({ length: 4 }, (_, i) =>
-    Math.round(xMin + ((xMax - xMin) * i) / 3),
+  const xMajor = decadeTicks(xMin, xMax, [1]);
+  const xMinor = decadeTicks(xMin, xMax, [2, 5]);
+  const yMajor = decadeTicks(yMin, yMax, [1]);
+  const yMinor = decadeTicks(yMin, yMax, [2, 5]);
+
+  // Sector legend — only show sectors that are actually present in
+  // the current top-K so we don't advertise hues that aren't drawn.
+  const sectorsShown = Array.from(new Set(rows.map((r) => r.sector)));
+
+  // Pulse tracking: for every row that changed since the last frame,
+  // bump its counter so React remounts the SMIL halo with a fresh
+  // animation. Even one-row diffs from the dataflow visibly ping
+  // their bubble.
+  const prevByIdRef = useRef<Map<number, BubbleRow>>(new Map());
+  const [pulseCounters, setPulseCounters] = useState<Map<number, number>>(
+    () => new Map(),
   );
-  const yTicks = Array.from({ length: 4 }, (_, i) =>
-    yMin + ((yMax - yMin) * i) / 3,
-  );
+  useEffect(() => {
+    const prev = prevByIdRef.current;
+    let updated: Map<number, number> | null = null;
+    for (const row of rows) {
+      const last = prev.get(row.id);
+      const changed =
+        last !== undefined &&
+        (last.count !== row.count ||
+          Math.abs(last.totalDollars - row.totalDollars) > 0.005 ||
+          Math.abs(last.avgDollars - row.avgDollars) > 0.005);
+      if (changed) {
+        if (!updated) updated = new Map(pulseCounters);
+        updated.set(row.id, (updated.get(row.id) ?? 0) + 1);
+      }
+    }
+    if (updated) setPulseCounters(updated);
+    // Refresh the snapshot regardless so newly-appearing rows
+    // don't get a spurious pulse on their next frame.
+    const next = new Map<number, BubbleRow>();
+    for (const row of rows) next.set(row.id, row);
+    prevByIdRef.current = next;
+  }, [rows]);
+
+  // For text decisions below.
+  const yDollarFmt = (n: number) =>
+    n >= 1_000_000
+      ? `$${(n / 1_000_000).toFixed(1)}M`
+      : n >= 1_000
+      ? `$${(n / 1_000).toFixed(0)}k`
+      : `$${n.toFixed(0)}`;
 
   return (
-    <svg
-      className="bubble-chart"
-      viewBox={`0 0 ${width} ${height}`}
-      role="img"
-      aria-label="Bubble chart of top categories"
-    >
-      {/* horizontal gridlines */}
-      {yTicks.map((y, i) => (
+    <>
+      <svg
+        className="bubble-chart"
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="Bubble chart of top order categories"
+      >
+        {/* minor gridlines (2× and 5× of each decade) — drawn first
+            so the major lines render on top */}
+        {yMinor.map((y, i) => (
+          <line
+            key={`gym-${i}`}
+            x1={pad.left}
+            x2={width - pad.right}
+            y1={sy(y)}
+            y2={sy(y)}
+            className="bubble-grid-minor"
+          />
+        ))}
+        {xMinor.map((x, i) => (
+          <line
+            key={`gxm-${i}`}
+            x1={sx(x)}
+            x2={sx(x)}
+            y1={pad.top}
+            y2={height - pad.bottom}
+            className="bubble-grid-minor"
+          />
+        ))}
+        {/* major gridlines at decades */}
+        {yMajor.map((y, i) => (
+          <line
+            key={`gy-${i}`}
+            x1={pad.left}
+            x2={width - pad.right}
+            y1={sy(y)}
+            y2={sy(y)}
+            className="bubble-grid"
+          />
+        ))}
+        {xMajor.map((x, i) => (
+          <line
+            key={`gx-${i}`}
+            x1={sx(x)}
+            x2={sx(x)}
+            y1={pad.top}
+            y2={height - pad.bottom}
+            className="bubble-grid"
+          />
+        ))}
+        {/* axes */}
         <line
-          key={`gy-${i}`}
           x1={pad.left}
           x2={width - pad.right}
-          y1={sy(y)}
-          y2={sy(y)}
-          className="bubble-grid"
+          y1={height - pad.bottom}
+          y2={height - pad.bottom}
+          className="bubble-axis"
         />
-      ))}
-      {/* axes */}
-      <line
-        x1={pad.left}
-        x2={width - pad.right}
-        y1={height - pad.bottom}
-        y2={height - pad.bottom}
-        className="bubble-axis"
-      />
-      <line
-        x1={pad.left}
-        x2={pad.left}
-        y1={pad.top}
-        y2={height - pad.bottom}
-        className="bubble-axis"
-      />
-      {/* x tick labels */}
-      {xTicks.map((x, i) => (
+        <line
+          x1={pad.left}
+          x2={pad.left}
+          y1={pad.top}
+          y2={height - pad.bottom}
+          className="bubble-axis"
+        />
+        {/* minor x tick labels — lighter so the eye groups them as
+            references, not as primary readings */}
+        {xMinor.map((x, i) => (
+          <text
+            key={`txm-${i}`}
+            x={sx(x)}
+            y={height - pad.bottom + 18}
+            className="bubble-tick bubble-tick-minor"
+            textAnchor="middle"
+          >
+            {fmt(x)}
+          </text>
+        ))}
+        {/* major x tick labels */}
+        {xMajor.map((x, i) => (
+          <text
+            key={`tx-${i}`}
+            x={sx(x)}
+            y={height - pad.bottom + 18}
+            className="bubble-tick"
+            textAnchor="middle"
+          >
+            {fmt(x)}
+          </text>
+        ))}
+        {/* minor y tick labels — dollars */}
+        {yMinor.map((y, i) => (
+          <text
+            key={`tym-${i}`}
+            x={pad.left - 10}
+            y={sy(y) + 4}
+            className="bubble-tick bubble-tick-minor"
+            textAnchor="end"
+          >
+            ${fmt(y)}
+          </text>
+        ))}
+        {/* major y tick labels */}
+        {yMajor.map((y, i) => (
+          <text
+            key={`ty-${i}`}
+            x={pad.left - 10}
+            y={sy(y) + 4}
+            className="bubble-tick"
+            textAnchor="end"
+          >
+            ${fmt(y)}
+          </text>
+        ))}
+        {/* axis titles */}
         <text
-          key={`tx-${i}`}
-          x={sx(x)}
-          y={height - pad.bottom + 18}
-          className="bubble-tick"
+          x={pad.left + innerW / 2}
+          y={height - 14}
+          className="bubble-axis-label"
           textAnchor="middle"
         >
-          {x.toLocaleString()}
+          orders per category (log scale)
         </text>
-      ))}
-      {/* y tick labels */}
-      {yTicks.map((y, i) => (
         <text
-          key={`ty-${i}`}
-          x={pad.left - 10}
-          y={sy(y) + 4}
-          className="bubble-tick"
-          textAnchor="end"
+          x={20}
+          y={pad.top + innerH / 2}
+          className="bubble-axis-label"
+          textAnchor="middle"
+          transform={`rotate(-90 20 ${pad.top + innerH / 2})`}
         >
-          {y.toFixed(0)}
+          avg ticket ($, log scale)
         </text>
-      ))}
-      {/* axis titles */}
-      <text
-        x={pad.left + innerW / 2}
-        y={height - 8}
-        className="bubble-axis-label"
-        textAnchor="middle"
-      >
-        rows per category (COUNT(*))
-      </text>
-      <text
-        x={16}
-        y={pad.top + innerH / 2}
-        className="bubble-axis-label"
-        textAnchor="middle"
-        transform={`rotate(-90 16 ${pad.top + innerH / 2})`}
-      >
-        avg value (AVG(value))
-      </text>
-      {/* bubbles */}
-      {rows.map((row) => {
-        const h = hue(row.categoryId);
-        const fill = `hsl(${h}deg 75% 55% / 0.55)`;
-        const stroke = `hsl(${h}deg 70% 40%)`;
-        return (
-          <g key={row.categoryId} className="bubble">
-            <circle
-              cx={sx(row.count)}
-              cy={sy(row.avg)}
-              r={sr(Number(row.total))}
-              style={{ fill, stroke }}
-            />
-            <text
-              x={sx(row.count)}
-              y={sy(row.avg) + 4}
-              className="bubble-label"
-              textAnchor="middle"
+        {/* bubbles */}
+        {rows.map((row) => {
+          const color = SECTOR_COLOR[row.sector];
+          const cx = sx(row.count);
+          const cy = sy(row.avgDollars);
+          const r = sr(row.totalDollars);
+          const pulse = pulseCounters.get(row.id) ?? 0;
+          // Three lines of text fit comfortably for r >= 26 (≈ 52px
+          // diameter). Smaller bubbles drop to two lines so we don't
+          // overflow the circle.
+          const showCount = r >= 26;
+          // Tuned spring: stiff enough that fast write bursts catch
+          // up before the next aggregate frame lands, soft enough
+          // that small moves don't snap. One config drives the
+          // parent transform and the radius/label offset tweens so
+          // every element of a bubble shares the same easing curve.
+          const tween = {
+            type: "spring",
+            stiffness: 180,
+            damping: 24,
+            mass: 0.7,
+          } as const;
+          // Position lives on the parent <motion.g> — animating the
+          // group's transform once keeps the circle, halo, and every
+          // text label locked together as the bubble moves. Children
+          // use offsets relative to the group's origin, so they can
+          // never desync from the circle the way independently-
+          // animated `cx`/`x` attributes did.
+          return (
+            <motion.g
+              key={row.id}
+              className="bubble"
+              initial={false}
+              animate={{ x: cx, y: cy }}
+              transition={tween}
             >
-              {row.categoryId}
-            </text>
-            <title>
-              cat {row.categoryId} · {row.count.toLocaleString()} rows · avg{" "}
-              {row.avg.toFixed(1)} · total {row.total.toLocaleString()}
-            </title>
-          </g>
-        );
-      })}
-    </svg>
+              <motion.circle
+                initial={false}
+                cx={0}
+                cy={0}
+                animate={{ r }}
+                transition={tween}
+                style={{
+                  fill: `${color}99`, // ~60 % alpha hex suffix
+                  stroke: color,
+                }}
+              />
+              {pulse > 0 && (
+                <circle
+                  key={`halo-${row.id}-${pulse}`}
+                  cx={0}
+                  cy={0}
+                  r={r}
+                  className="bubble-halo"
+                  stroke={color}
+                  fill="none"
+                >
+                  <animate
+                    attributeName="r"
+                    from={r}
+                    to={r + 22}
+                    dur="800ms"
+                    fill="freeze"
+                  />
+                  <animate
+                    attributeName="stroke-opacity"
+                    from="0.95"
+                    to="0"
+                    dur="800ms"
+                    fill="freeze"
+                  />
+                  <animate
+                    attributeName="stroke-width"
+                    from="3"
+                    to="0.5"
+                    dur="800ms"
+                    fill="freeze"
+                  />
+                </circle>
+              )}
+              {/* Texts get animated y so the showCount threshold cross
+                  (r ≈ 26) eases between layouts instead of snapping. */}
+              <motion.text
+                initial={false}
+                x={0}
+                animate={{ y: showCount ? -10 : -1 }}
+                transition={tween}
+                className="bubble-label"
+                textAnchor="middle"
+              >
+                {row.short}
+              </motion.text>
+              {showCount && (
+                <motion.text
+                  initial={false}
+                  x={0}
+                  animate={{ y: 4 }}
+                  transition={tween}
+                  className="bubble-sublabel"
+                  textAnchor="middle"
+                >
+                  {row.count.toLocaleString()}
+                </motion.text>
+              )}
+              <motion.text
+                initial={false}
+                x={0}
+                animate={{ y: showCount ? 17 : 12 }}
+                transition={tween}
+                className="bubble-sublabel bubble-sublabel-strong"
+                textAnchor="middle"
+              >
+                {yDollarFmt(row.totalDollars)}
+              </motion.text>
+              <title>
+                {row.name} · {row.count.toLocaleString()} orders · avg $
+                {row.avgDollars.toFixed(2)} · revenue $
+                {row.totalDollars.toLocaleString(undefined, {
+                  maximumFractionDigits: 0,
+                })}
+              </title>
+            </motion.g>
+          );
+        })}
+      </svg>
+      <div className="bubble-legend">
+        {sectorsShown.map((sector) => (
+          <span key={sector} className="bubble-legend-item">
+            <span
+              className="bubble-legend-swatch"
+              style={{ background: SECTOR_COLOR[sector] }}
+            />
+            {SECTOR_LABEL[sector]}
+          </span>
+        ))}
+        <span className="bubble-legend-hint">
+          area = revenue · size of bubble grows with{" "}
+          <code>SUM(amount_cents)</code>
+        </span>
+      </div>
+    </>
   );
 }

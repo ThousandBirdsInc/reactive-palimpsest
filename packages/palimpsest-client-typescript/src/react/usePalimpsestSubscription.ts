@@ -6,6 +6,7 @@
 //   - For each event:
 //       * "accepted" → stash schema, clear local cache, status = "open".
 //       * "diff"     → apply rows by primary key into the local cache.
+//       * "transaction" → apply all row changes, then publish once.
 //       * "resync"   → clear the cache, wait for the next "accepted".
 //       * "error"    → surface code+message; status = "error".
 //   - On unmount: call .unsubscribe() and stop reacting to events.
@@ -68,6 +69,12 @@ export function usePalimpsestSubscription<T>(
   const [schema, setSchema] = useState<Schema | null>(null);
   const [error, setError] = useState<UseSubscriptionResult<T>["error"]>(null);
   const [lsn, setLsn] = useState<bigint | null>(null);
+  // Bumped from inside the event callback on every `resync` so the
+  // effect tears the current subscription down and opens a fresh one.
+  // The server emits Resync when a per-subscription channel saturates
+  // (DropAndResync policy) expecting the client to refetch; without
+  // this the subscription would appear "stuck" after a write burst.
+  const [resyncEpoch, setResyncEpoch] = useState(0);
 
   // Stable string key for vars — re-subscribe when it changes.
   const varsKey = useMemo(
@@ -128,10 +135,29 @@ export function usePalimpsestSubscription<T>(
               setRows([...rowsByPk.values()]);
               break;
             }
+            case "transaction": {
+              setLsn(event.commitLsn);
+              if (!currentSchema) break;
+              for (const change of event.changes) {
+                if (change.op === "delete") {
+                  if (change.old) rowsByPk.delete(pkOf(change.old, currentSchema));
+                } else if (change.op === "update") {
+                  if (change.old) rowsByPk.delete(pkOf(change.old, currentSchema));
+                  if (change.new) rowsByPk.set(pkOf(change.new, currentSchema), change.new);
+                } else if (change.new) {
+                  rowsByPk.set(pkOf(change.new, currentSchema), change.new);
+                }
+              }
+              setRows([...rowsByPk.values()]);
+              break;
+            }
             case "resync":
               rowsByPk.clear();
               setRows([]);
               if (options.onResync) options.onResync(event);
+              // Force a fresh subscribe so the client refetches —
+              // matches the server's DropAndResync contract.
+              setResyncEpoch((n) => n + 1);
               break;
             case "error":
               setError({ code: event.code, message: event.message });
@@ -160,7 +186,7 @@ export function usePalimpsestSubscription<T>(
       }
       setStatus("closed");
     };
-  }, [client, sql, varsKey, options.refreshKey]);
+  }, [client, sql, varsKey, options.refreshKey, resyncEpoch]);
 
   return { status, rows, schema, error, lsn };
 }

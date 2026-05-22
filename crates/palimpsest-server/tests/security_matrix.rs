@@ -242,16 +242,26 @@ async fn subscribe_rate_limit_returns_error_message() {
         .expect("subscribe")
         .into_inner();
 
-    let first = next_message(&mut response).await;
-    assert!(matches!(
-        first.kind,
-        Some(proto::server_message::Kind::Accepted(_))
-    ));
-
-    let second = next_message(&mut response).await;
-    let kind = second.kind.expect("kind");
-    let proto::server_message::Kind::Error(err) = kind else {
-        panic!("expected Error message, got {kind:?}");
+    // Admission decisions are taken in arrival order, but Accepted vs
+    // Error are emitted by independent tasks (Accepted goes through
+    // the heavy snapshot path, Error returns immediately), so the two
+    // can arrive in either order on the multiplexed bidi stream.
+    // Match by subscription_id instead of position.
+    let (a, b) = (
+        next_message(&mut response).await,
+        next_message(&mut response).await,
+    );
+    let (accepted, rejected) = match (&a.kind, &b.kind) {
+        (Some(proto::server_message::Kind::Accepted(_)), _) => (a, b),
+        (_, Some(proto::server_message::Kind::Accepted(_))) => (b, a),
+        _ => panic!("expected one Accepted and one Error, got {a:?}, {b:?}"),
+    };
+    let proto::server_message::Kind::Accepted(acc) = accepted.kind.expect("accepted kind") else {
+        unreachable!()
+    };
+    assert_eq!(acc.subscription_id, "first");
+    let proto::server_message::Kind::Error(err) = rejected.kind.expect("rejected kind") else {
+        panic!("expected Error message");
     };
     assert_eq!(err.code, "rate_limited");
     assert_eq!(err.subscription_id, "second");
@@ -291,11 +301,24 @@ async fn subscribe_cap_returns_connection_saturated() {
         .expect("subscribe")
         .into_inner();
 
-    let _accepted = next_message(&mut response).await;
-    let saturated = next_message(&mut response).await;
-    let kind = saturated.kind.expect("kind");
-    let proto::server_message::Kind::Error(err) = kind else {
-        panic!("expected Error, got {kind:?}");
+    // Same ordering caveat as `subscribe_rate_limit_returns_error_message`:
+    // admission is in arrival order, but the two responses can arrive
+    // in either order. Match by subscription_id.
+    let (a, b) = (
+        next_message(&mut response).await,
+        next_message(&mut response).await,
+    );
+    let (accepted, rejected) = match (&a.kind, &b.kind) {
+        (Some(proto::server_message::Kind::Accepted(_)), _) => (a, b),
+        (_, Some(proto::server_message::Kind::Accepted(_))) => (b, a),
+        _ => panic!("expected one Accepted and one Error, got {a:?}, {b:?}"),
+    };
+    let proto::server_message::Kind::Accepted(acc) = accepted.kind.expect("accepted kind") else {
+        unreachable!()
+    };
+    assert_eq!(acc.subscription_id, "first");
+    let proto::server_message::Kind::Error(err) = rejected.kind.expect("rejected kind") else {
+        panic!("expected Error message");
     };
     assert_eq!(err.code, "connection_saturated");
     assert_eq!(err.subscription_id, "second");

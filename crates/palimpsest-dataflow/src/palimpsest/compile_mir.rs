@@ -39,9 +39,7 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::palimpsest::eval::{compile_predicate, EvalError, ScalarSchema};
-use crate::palimpsest::relational::{
-    self, AggregateFunc, AggregateValue, SortDirection,
-};
+use crate::palimpsest::relational::{self, AggregateFunc, AggregateValue, SortDirection};
 use crate::palimpsest::wal::Row;
 use crate::{lattice::Lattice, VecCollection};
 
@@ -212,11 +210,7 @@ pub fn compile_mir<L: TableSchemaLookup>(
     }
 
     let root = graph.root();
-    let output_schema = state
-        .node_schemas
-        .get(&root)
-        .cloned()
-        .unwrap_or_default();
+    let output_schema = state.node_schemas.get(&root).cloned().unwrap_or_default();
 
     Ok(CompiledPlan {
         graph: graph.clone(),
@@ -305,7 +299,9 @@ fn compile_base_table<L: TableSchemaLookup>(
     }
 
     state.node_schemas.insert(node, schema);
-    state.recipes.insert(node, NodeRecipe::BaseTable { table: table_id });
+    state
+        .recipes
+        .insert(node, NodeRecipe::BaseTable { table: table_id });
     Ok(())
 }
 
@@ -403,9 +399,8 @@ fn compile_aggregate(
     // `K`, so passing `Datum` works directly — and the schema we
     // advertise to clients (group_col with its original `group_type`)
     // round-trips end-to-end.
-    let group_extract: Arc<dyn Fn(&Row) -> Datum + Send + Sync> = Arc::new(move |row: &Row| {
-        row.get(group_idx).cloned().unwrap_or(Datum::Null)
-    });
+    let group_extract: Arc<dyn Fn(&Row) -> Datum + Send + Sync> =
+        Arc::new(move |row: &Row| row.get(group_idx).cloned().unwrap_or(Datum::Null));
 
     // `aggregate_i64` reads one input column per call, with each
     // `AggregateFunc` evaluating against the same value stream.
@@ -421,11 +416,7 @@ fn compile_aggregate(
         funcs.push(func);
 
         // Validate the value column. `*` is the wildcard for COUNT.
-        let arg_text = agg
-            .args
-            .first()
-            .map(String::as_str)
-            .unwrap_or("*");
+        let arg_text = agg.args.first().map(String::as_str).unwrap_or("*");
         let arg_col = arg_text.trim();
         if arg_col != "*" && !matches!(func, AggregateFunc::Count) {
             match &value_column {
@@ -515,14 +506,13 @@ fn compile_topk(
         .index_of(&key.expression)
         .ok_or_else(|| CompileError::Unknown(format!("order column {}", key.expression)))?;
 
-    let sort_key_extract: Arc<dyn Fn(&Row) -> i64 + Send + Sync> = Arc::new(move |row: &Row| {
-        match row.get(sort_idx) {
+    let sort_key_extract: Arc<dyn Fn(&Row) -> i64 + Send + Sync> =
+        Arc::new(move |row: &Row| match row.get(sort_idx) {
             Some(Datum::I64(v)) => *v,
             Some(Datum::I32(v)) => i64::from(*v),
             Some(Datum::I16(v)) => i64::from(*v),
             _ => 0,
-        }
-    });
+        });
 
     let direction = if key.descending {
         SortDirection::Descending
@@ -556,7 +546,12 @@ fn compile_cte_ref(
     let target = graph
         .graph()
         .edges_directed(node, Direction::Incoming)
-        .find(|edge| matches!(edge.weight(), palimpsest_sql::mir::MirEdgeKind::CteExpansion))
+        .find(|edge| {
+            matches!(
+                edge.weight(),
+                palimpsest_sql::mir::MirEdgeKind::CteExpansion
+            )
+        })
         .map(|edge| edge.source());
     let target = target.ok_or_else(|| CompileError::Unknown(format!("cte {cte}")))?;
 
@@ -661,8 +656,7 @@ where
             // Project Row → (group_key, value).
             let ge = Arc::clone(group_extract);
             let ve = Arc::clone(value_extract);
-            let projected =
-                relational::project(&input, move |row: Row| (ge(&row), ve(&row)));
+            let projected = relational::project(&input, move |row: Row| (ge(&row), ve(&row)));
             let funcs = funcs.clone();
             let aggregated = relational::aggregate_i64(&projected, funcs);
 
@@ -670,25 +664,28 @@ where
             // group key keeps its original Datum type, so a Bool
             // group column emits a Bool first column and matches the
             // schema we advertised to clients.
-            relational::project(&aggregated, |(group, aggs): (Datum, Vec<AggregateValue>)| {
-                let mut row: Row = SmallVec::with_capacity(1 + aggs.len());
-                row.push(group);
-                for av in aggs {
-                    let datum = match av {
-                        AggregateValue::Integer(v) => Datum::I64(saturating_i128_to_i64(v)),
-                        AggregateValue::Average { sum, count } => {
-                            let avg = if count == 0 {
-                                0.0
-                            } else {
-                                sum as f64 / count as f64
-                            };
-                            Datum::F64(avg.to_bits())
-                        }
-                    };
-                    row.push(datum);
-                }
-                row
-            })
+            relational::project(
+                &aggregated,
+                |(group, aggs): (Datum, Vec<AggregateValue>)| {
+                    let mut row: Row = SmallVec::with_capacity(1 + aggs.len());
+                    row.push(group);
+                    for av in aggs {
+                        let datum = match av {
+                            AggregateValue::Integer(v) => Datum::I64(saturating_i128_to_i64(v)),
+                            AggregateValue::Average { sum, count } => {
+                                let avg = if count == 0 {
+                                    0.0
+                                } else {
+                                    sum as f64 / count as f64
+                                };
+                                Datum::F64(avg.to_bits())
+                            }
+                        };
+                        row.push(datum);
+                    }
+                    row
+                },
+            )
         }
         NodeRecipe::TopK {
             sort_key_extract,
@@ -708,9 +705,7 @@ where
             let sliced = relational::topk(&with_key, *direction, *limit, *offset);
             relational::project(&sliced, |(_, row): (i64, Row)| row)
         }
-        NodeRecipe::CteRef { target } => {
-            install_recursive(plan, scope, inputs, *target, cache)
-        }
+        NodeRecipe::CteRef { target } => install_recursive(plan, scope, inputs, *target, cache),
     };
 
     cache.insert(node, collection.clone());
@@ -730,8 +725,8 @@ fn saturating_i128_to_i64(v: i128) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use palimpsest_sql::lower::parse_and_lower;
     use crate::input::Input;
+    use palimpsest_sql::lower::parse_and_lower;
 
     fn posts_schema() -> ScalarSchema {
         ScalarSchema::from_pairs([
@@ -767,10 +762,9 @@ mod tests {
 
     #[test]
     fn compile_filter() {
-        let graph = parse_and_lower(
-            "SELECT id, title, published FROM posts WHERE published = true",
-        )
-        .unwrap();
+        let graph =
+            parse_and_lower("SELECT id, title, published FROM posts WHERE published = true")
+                .unwrap();
         let plan = compile_mir(&graph, &lookup).unwrap();
         let recipes_include_filter = plan
             .recipes
@@ -830,15 +824,30 @@ mod tests {
             _ => None,
         })
         .unwrap();
-        assert_eq!(plan.output_schema.column_type("published"), Some(ColumnType::Bool));
+        assert_eq!(
+            plan.output_schema.column_type("published"),
+            Some(ColumnType::Bool)
+        );
         assert_eq!(plan.output_schema.column_type("n"), Some(ColumnType::Int));
 
         // Drive the pipeline through timely and verify the emitted
         // rows actually carry `Datum::Bool` at column 0.
         let seed = vec![
-            datum_row(vec![Datum::I64(1), Datum::Text(bytes::Bytes::from_static(b"a")), Datum::Bool(true)]),
-            datum_row(vec![Datum::I64(2), Datum::Text(bytes::Bytes::from_static(b"b")), Datum::Bool(true)]),
-            datum_row(vec![Datum::I64(3), Datum::Text(bytes::Bytes::from_static(b"c")), Datum::Bool(false)]),
+            datum_row(vec![
+                Datum::I64(1),
+                Datum::Text(bytes::Bytes::from_static(b"a")),
+                Datum::Bool(true),
+            ]),
+            datum_row(vec![
+                Datum::I64(2),
+                Datum::Text(bytes::Bytes::from_static(b"b")),
+                Datum::Bool(true),
+            ]),
+            datum_row(vec![
+                Datum::I64(3),
+                Datum::Text(bytes::Bytes::from_static(b"c")),
+                Datum::Bool(false),
+            ]),
         ];
 
         timely::example(move |scope| {

@@ -1,0 +1,136 @@
+name: PaaS
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/paas.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/palimpsest-cli/**"
+      - "docs/PAAS-DESIGN.md"
+      - "paas/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/paas.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/palimpsest-cli/**"
+      - "docs/PAAS-DESIGN.md"
+      - "paas/**"
+  workflow_dispatch:
+    inputs:
+      run_smoke:
+        description: "Run the Docker-backed local PaaS smoke test"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  schemas:
+    name: schemas and scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate PaaS JSON schemas and examples
+        run: ruby paas/ci/validate-json-schemas.rb
+
+      - name: Check smoke script syntax
+        run: bash -n paas/control-plane/smoke-local.sh
+
+  rust:
+    name: PaaS Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-paas-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-paas-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ubuntu-stable-paas-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-paas-target-
+
+      - name: Check formatting
+        run: |
+          cargo fmt \
+            --package palimpsest-paas-core \
+            --package palimpsest-paas-control-plane \
+            --package palimpsest-paas-node-agent \
+            --package palimpsest-paas-sync-wrapper \
+            --package palimpsest-paas-gateway \
+            --check
+
+      - name: Test PaaS crates
+        run: |
+          cargo test \
+            -p palimpsest-paas-core \
+            -p palimpsest-paas-control-plane \
+            -p palimpsest-paas-node-agent \
+            -p palimpsest-paas-sync-wrapper \
+            -p palimpsest-paas-gateway
+
+  flyway:
+    name: Flyway migrations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start control-plane Postgres
+        run: docker compose -f paas/control-plane/docker-compose.yaml up -d control-plane-postgres
+
+      - name: Run Flyway migrations
+        run: docker compose -f paas/control-plane/docker-compose.yaml run --rm flyway
+
+      - name: Stop control-plane Postgres
+        if: always()
+        run: docker compose -f paas/control-plane/docker-compose.yaml down -v --remove-orphans
+
+  smoke:
+    name: Local PaaS smoke
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_smoke }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-stable-paas-smoke-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-paas-smoke-cargo-
+
+      - name: Run local smoke
+        run: paas/control-plane/smoke-local.sh

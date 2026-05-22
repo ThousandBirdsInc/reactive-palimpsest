@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/jwt-issuer.schema.json",
+  "title": "Palimpsest JWT Issuer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issuer_id",
+    "organization_id",
+    "project_id",
+    "environment_id",
+    "name",
+    "issuer",
+    "audience",
+    "jwks_url",
+    "claim_to_field",
+    "status"
+  ],
+  "properties": {
+    "issuer_id": { "type": "string", "minLength": 1 },
+    "organization_id": { "type": "string", "minLength": 1 },
+    "project_id": { "type": ["string", "null"] },
+    "environment_id": { "type": ["string", "null"] },
+    "name": { "type": "string", "minLength": 1 },
+    "issuer": { "type": "string", "minLength": 1 },
+    "audience": { "type": "string", "minLength": 1 },
+    "jwks_url": { "type": "string", "minLength": 1 },
+    "claim_to_field": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "field"],
+        "properties": {
+          "claim": { "type": "string", "minLength": 1 },
+          "field": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "status": { "enum": ["active", "disabled"] }
+  }
+}

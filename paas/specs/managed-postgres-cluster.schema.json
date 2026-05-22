@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/managed-postgres-cluster.schema.json",
+  "title": "Palimpsest Managed Postgres Cluster",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "cluster_id",
+    "organization_id",
+    "project_id",
+    "environment_id",
+    "region",
+    "postgres_version",
+    "tier",
+    "storage_gib",
+    "lifecycle_state",
+    "host_assignment"
+  ],
+  "properties": {
+    "cluster_id": { "type": "string", "minLength": 1 },
+    "organization_id": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "environment_id": { "type": "string", "minLength": 1 },
+    "region": { "type": "string", "minLength": 1 },
+    "postgres_version": {
+      "type": "string",
+      "pattern": "^(1[8-9]|[2-9][0-9])([.-].*)?$"
+    },
+    "tier": { "type": "string", "minLength": 1 },
+    "storage_gib": { "type": "integer", "minimum": 1 },
+    "lifecycle_state": {
+      "enum": [
+        "requested",
+        "placing",
+        "allocating_storage",
+        "initializing_postgres",
+        "configuring_roles",
+        "configuring_replication",
+        "restoring",
+        "resizing",
+        "starting",
+        "verifying",
+        "ready",
+        "stopping",
+        "stopped",
+        "deleting",
+        "deleted",
+        "failed"
+      ]
+    },
+    "host_assignment": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host_id", "data_dir", "port"],
+          "properties": {
+            "host_id": { "type": "string", "minLength": 1 },
+            "data_dir": { "type": "string", "minLength": 1 },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+[tools]
+tilt = "latest"
+
+[tasks."paas:up"]
+description = "Start the Palimpsest PaaS stack with Tilt"
+run = "cd paas && tilt up"
+
+[tasks."paas:down"]
+description = "Stop the Palimpsest PaaS Tilt stack"
+run = "cd paas && tilt down"

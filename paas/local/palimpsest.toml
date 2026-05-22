@@ -1,0 +1,13 @@
+[grpc]
+addr = "0.0.0.0:50051"
+
+[metrics]
+addr = "0.0.0.0:9090"
+
+[auth]
+kind = "anonymous"
+
+[upstream]
+url = "postgres://palimpsest_repl:palimpsest_repl@postgres:5432/palimpsest_dev"
+slot_name = "palimpsest"
+publication = "palimpsest_pub"

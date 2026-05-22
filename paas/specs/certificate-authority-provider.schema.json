@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://palimpsest.dev/schemas/paas/certificate-authority-provider.schema.json",
+  "title": "Palimpsest Managed Postgres Certificate Authority Provider",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ca_provider_id",
+    "name",
+    "kind",
+    "issuer_ref",
+    "status",
+    "default_for_managed_postgres",
+    "updated_at"
+  ],
+  "properties": {
+    "ca_provider_id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "kind": { "enum": ["local_dev", "acme", "external_pki"] },
+    "issuer_ref": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["active", "disabled"] },
+    "default_for_managed_postgres": { "type": "boolean" },
+    "updated_at": { "type": "string", "minLength": 1 }
+  }
+}

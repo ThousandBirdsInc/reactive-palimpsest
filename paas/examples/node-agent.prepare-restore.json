@@ -1,0 +1,12 @@
+{
+  "command_id": "cluster_123:prepare-restore:backup_001",
+  "cluster_id": "cluster_123",
+  "action": {
+    "kind": "prepare_restore",
+    "backup_id": "backup_001",
+    "backup_dir": "/var/lib/palimpsest/backups/cluster_123",
+    "data_dir": "/var/lib/palimpsest/postgres/cluster_123-restore",
+    "restore_command": "cp /var/lib/palimpsest/wal/cluster_123/%f %p",
+    "recovery_target_lsn": null
+  }
+}

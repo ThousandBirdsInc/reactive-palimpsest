@@ -1,19 +1,20 @@
-//! In-memory mirror of the Postgres-backed `posts` + `events` tables,
-//! plus the `WalRuntime` adapter Palimpsest reads through.
+//! In-memory mirror of the Postgres-backed `posts`, `orders`, and
+//! `accounts` tables, plus the `WalRuntime` adapter Palimpsest reads
+//! through.
 //!
 //! Writes do **not** flow through here — HTTP handlers go straight
 //! to Postgres via tokio-postgres. The logical-replication consumer
 //! (see `db.rs`) tails the slot, decodes pgoutput frames into
 //! `DecodedEvent::Row { op, old, new }`, and pipes those into
-//! `Store::apply_*` / `EventStore::apply_*`. The mirror keeps the
+//! `Store::apply_*` / `OrderStore::apply_*`. The mirror keeps the
 //! "current snapshot" in lock-step with the database, and the
 //! journal of `RawDiff`s drives the live-diff cursor the dataflow
 //! consumes.
 //!
-//! Two `Store` shapes (posts vs events) instead of one generic
+//! Separate store shapes instead of one generic
 //! type so the row constructors stay tightly typed — the demo only
-//! needs these two surfaces and a generic event-keyed store would
-//! cost more in plumbing than it pays back in flexibility.
+//! needs these surfaces and a generic event-keyed store would cost
+//! more in plumbing than it pays back in flexibility.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +30,7 @@ use palimpsest_sql::ColumnType;
 use palimpsest_wal::{DatumType, TableId};
 use serde::Serialize;
 
-use crate::db::{event_to_row, post_to_row};
+use crate::db::{account_to_row, order_to_row, post_to_row};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Post {
@@ -39,10 +40,18 @@ pub struct Post {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Event {
+pub struct Order {
     pub id: i64,
     pub category_id: i64,
-    pub value: i64,
+    pub amount_cents: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: i64,
+    pub owner_user_id: String,
+    pub display_name: String,
+    pub balance_cents: i64,
 }
 
 // -----------------------------------------------------------------------------
@@ -151,24 +160,24 @@ impl Store {
 }
 
 // -----------------------------------------------------------------------------
-// Events mirror — same shape as Store, different row type.
+// Orders mirror — same shape as Store, different row type.
 // -----------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-pub enum EventChange {
-    Insert(Event),
-    Update { prev: Event, curr: Event },
-    Delete(Event),
+pub enum OrderChange {
+    Insert(Order),
+    Update { prev: Order, curr: Order },
+    Delete(Order),
 }
 
-pub struct EventStore {
-    rows: Mutex<Vec<Event>>,
+pub struct OrderStore {
+    rows: Mutex<Vec<Order>>,
     lsn: AtomicU64,
     journal: Arc<Mutex<Vec<RawDiff>>>,
 }
 
-impl EventStore {
-    pub fn from_snapshot(snapshot: Vec<Event>) -> Self {
+impl OrderStore {
+    pub fn from_snapshot(snapshot: Vec<Order>) -> Self {
         Self {
             rows: Mutex::new(snapshot),
             lsn: AtomicU64::new(1),
@@ -176,8 +185,8 @@ impl EventStore {
         }
     }
 
-    pub fn snapshot(&self) -> Vec<Event> {
-        self.rows.lock().expect("events poisoned").clone()
+    pub fn snapshot(&self) -> Vec<Order> {
+        self.rows.lock().expect("orders poisoned").clone()
     }
 
     pub fn current_lsn(&self) -> Lsn {
@@ -185,7 +194,7 @@ impl EventStore {
     }
 
     pub fn row_count(&self) -> usize {
-        self.rows.lock().expect("events poisoned").len()
+        self.rows.lock().expect("orders poisoned").len()
     }
 
     fn bump_lsn(&self) -> Lsn {
@@ -198,21 +207,21 @@ impl EventStore {
 
     /// Apply all event-row changes in one Postgres transaction at a
     /// single LSN. See `Store::apply_txn` for why batching matters.
-    pub fn apply_txn(&self, changes: &[EventChange]) {
+    pub fn apply_txn(&self, changes: &[OrderChange]) {
         if changes.is_empty() {
             return;
         }
         {
-            let mut rows = self.rows.lock().expect("events poisoned");
+            let mut rows = self.rows.lock().expect("orders poisoned");
             for change in changes {
                 match change {
-                    EventChange::Insert(ev) => rows.push(ev.clone()),
-                    EventChange::Update { curr, .. } => {
+                    OrderChange::Insert(ev) => rows.push(ev.clone()),
+                    OrderChange::Update { curr, .. } => {
                         if let Some(slot) = rows.iter_mut().find(|e| e.id == curr.id) {
                             *slot = curr.clone();
                         }
                     }
-                    EventChange::Delete(prev) => {
+                    OrderChange::Delete(prev) => {
                         if let Some(idx) = rows.iter().position(|e| e.id == prev.id) {
                             rows.remove(idx);
                         }
@@ -221,28 +230,28 @@ impl EventStore {
             }
         }
         let lsn = self.bump_lsn();
-        let mut journal = self.journal.lock().expect("events journal poisoned");
+        let mut journal = self.journal.lock().expect("orders journal poisoned");
         for change in changes {
             match change {
-                EventChange::Insert(ev) => journal.push(RawDiff {
-                    row: event_to_row(ev),
+                OrderChange::Insert(ev) => journal.push(RawDiff {
+                    row: order_to_row(ev),
                     lsn,
                     diff: 1,
                 }),
-                EventChange::Update { prev, curr } => {
+                OrderChange::Update { prev, curr } => {
                     journal.push(RawDiff {
-                        row: event_to_row(prev),
+                        row: order_to_row(prev),
                         lsn,
                         diff: -1,
                     });
                     journal.push(RawDiff {
-                        row: event_to_row(curr),
+                        row: order_to_row(curr),
                         lsn,
                         diff: 1,
                     });
                 }
-                EventChange::Delete(prev) => journal.push(RawDiff {
-                    row: event_to_row(prev),
+                OrderChange::Delete(prev) => journal.push(RawDiff {
+                    row: order_to_row(prev),
                     lsn,
                     diff: -1,
                 }),
@@ -252,28 +261,131 @@ impl EventStore {
 }
 
 // -----------------------------------------------------------------------------
-// Adapter that exposes both mirrors as a single `WalRuntime`.
+// Accounts mirror — same transaction-journal shape, used to visualize
+// atomic transfers across two account rows.
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum AccountChange {
+    Insert(Account),
+    Update { prev: Account, curr: Account },
+    Delete(Account),
+}
+
+pub struct AccountStore {
+    rows: Mutex<Vec<Account>>,
+    lsn: AtomicU64,
+    journal: Arc<Mutex<Vec<RawDiff>>>,
+}
+
+impl AccountStore {
+    pub fn from_snapshot(snapshot: Vec<Account>) -> Self {
+        Self {
+            rows: Mutex::new(snapshot),
+            lsn: AtomicU64::new(1),
+            journal: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<Account> {
+        self.rows.lock().expect("accounts poisoned").clone()
+    }
+
+    pub fn current_lsn(&self) -> Lsn {
+        Lsn::new(self.lsn.load(Ordering::SeqCst))
+    }
+
+    fn bump_lsn(&self) -> Lsn {
+        Lsn::new(self.lsn.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    fn journal_handle(&self) -> Arc<Mutex<Vec<RawDiff>>> {
+        Arc::clone(&self.journal)
+    }
+
+    pub fn apply_txn(&self, changes: &[AccountChange]) {
+        if changes.is_empty() {
+            return;
+        }
+        {
+            let mut rows = self.rows.lock().expect("accounts poisoned");
+            for change in changes {
+                match change {
+                    AccountChange::Insert(account) => rows.push(account.clone()),
+                    AccountChange::Update { curr, .. } => {
+                        if let Some(slot) = rows.iter_mut().find(|a| a.id == curr.id) {
+                            *slot = curr.clone();
+                        }
+                    }
+                    AccountChange::Delete(prev) => {
+                        if let Some(idx) = rows.iter().position(|a| a.id == prev.id) {
+                            rows.remove(idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        let lsn = self.bump_lsn();
+        let mut journal = self.journal.lock().expect("accounts journal poisoned");
+        for change in changes {
+            match change {
+                AccountChange::Insert(account) => journal.push(RawDiff {
+                    row: account_to_row(account),
+                    lsn,
+                    diff: 1,
+                }),
+                AccountChange::Update { prev, curr } => {
+                    journal.push(RawDiff {
+                        row: account_to_row(prev),
+                        lsn,
+                        diff: -1,
+                    });
+                    journal.push(RawDiff {
+                        row: account_to_row(curr),
+                        lsn,
+                        diff: 1,
+                    });
+                }
+                AccountChange::Delete(prev) => journal.push(RawDiff {
+                    row: account_to_row(prev),
+                    lsn,
+                    diff: -1,
+                }),
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Adapter that exposes all mirrors as a single `WalRuntime`.
 // -----------------------------------------------------------------------------
 
 pub struct DemoWalRuntime {
     posts: Arc<Store>,
-    events: Arc<EventStore>,
+    orders: Arc<OrderStore>,
+    accounts: Arc<AccountStore>,
     posts_table_id: TableId,
-    events_table_id: TableId,
+    orders_table_id: TableId,
+    accounts_table_id: TableId,
 }
 
 impl DemoWalRuntime {
     pub fn new(
         posts: Arc<Store>,
-        events: Arc<EventStore>,
+        orders: Arc<OrderStore>,
+        accounts: Arc<AccountStore>,
         posts_table_id: TableId,
-        events_table_id: TableId,
+        orders_table_id: TableId,
+        accounts_table_id: TableId,
     ) -> Self {
         Self {
             posts,
-            events,
+            orders,
+            accounts,
             posts_table_id,
-            events_table_id,
+            orders_table_id,
+            accounts_table_id,
         }
     }
 }
@@ -281,16 +393,19 @@ impl DemoWalRuntime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
     Posts,
-    EventsAggregate,
+    OrdersAggregate,
+    Accounts,
 }
 
 /// Pick a target table from the SQL we packed into the QueryId.
-/// Anything referencing `events` lands on the events mirror; the
+/// Anything referencing `orders` lands on the orders mirror; the
 /// rest go to posts. Case-insensitive.
 fn classify(query: &QueryId) -> Target {
     let sql = query.as_str().to_ascii_lowercase();
-    if sql.contains("from events") {
-        Target::EventsAggregate
+    if sql.contains("from accounts") {
+        Target::Accounts
+    } else if sql.contains("from orders") {
+        Target::OrdersAggregate
     } else {
         Target::Posts
     }
@@ -309,12 +424,27 @@ impl WalRuntime for DemoWalRuntime {
                     }],
                 })
             }
-            Target::EventsAggregate => {
-                let rows = self.events.snapshot().iter().map(event_to_row).collect();
+            Target::OrdersAggregate => {
+                let rows = self.orders.snapshot().iter().map(order_to_row).collect();
                 Ok(SnapshotBatch {
-                    snapshot_lsn: self.events.current_lsn(),
+                    snapshot_lsn: self.orders.current_lsn(),
                     rows: vec![SnapshotTableRows {
-                        table: self.events_table_id,
+                        table: self.orders_table_id,
+                        rows,
+                    }],
+                })
+            }
+            Target::Accounts => {
+                let rows = self
+                    .accounts
+                    .snapshot()
+                    .iter()
+                    .map(account_to_row)
+                    .collect();
+                Ok(SnapshotBatch {
+                    snapshot_lsn: self.accounts.current_lsn(),
+                    rows: vec![SnapshotTableRows {
+                        table: self.accounts_table_id,
                         rows,
                     }],
                 })
@@ -337,7 +467,8 @@ impl WalRuntime for DemoWalRuntime {
     ) -> Result<Box<dyn TraceCursor + Send>, String> {
         let journal = match classify(query) {
             Target::Posts => self.posts.journal_handle(),
-            Target::EventsAggregate => self.events.journal_handle(),
+            Target::OrdersAggregate => self.orders.journal_handle(),
+            Target::Accounts => self.accounts.journal_handle(),
         };
         Ok(Box::new(JournalCursor {
             journal,
@@ -356,12 +487,21 @@ impl WalRuntime for DemoWalRuntime {
                     ("published".to_owned(), ColumnType::Bool),
                 ]),
             )),
-            "events" => Some((
-                self.events_table_id,
+            "orders" => Some((
+                self.orders_table_id,
                 ScalarSchema::from_pairs([
                     ("id".to_owned(), ColumnType::Int),
                     ("category_id".to_owned(), ColumnType::Int),
-                    ("value".to_owned(), ColumnType::Int),
+                    ("amount_cents".to_owned(), ColumnType::Int),
+                ]),
+            )),
+            "accounts" => Some((
+                self.accounts_table_id,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("owner_user_id".to_owned(), ColumnType::Text),
+                    ("display_name".to_owned(), ColumnType::Text),
+                    ("balance_cents".to_owned(), ColumnType::Int),
                 ]),
             )),
             _ => None,
@@ -426,7 +566,7 @@ fn schema_for(query: &QueryId) -> Vec<ColumnSpec> {
                 nullable: false,
             },
         ],
-        Target::EventsAggregate => vec![
+        Target::OrdersAggregate => vec![
             ColumnSpec {
                 name: "id".to_owned(),
                 datum_type: DatumType::I64,
@@ -438,7 +578,29 @@ fn schema_for(query: &QueryId) -> Vec<ColumnSpec> {
                 nullable: false,
             },
             ColumnSpec {
-                name: "value".to_owned(),
+                name: "amount_cents".to_owned(),
+                datum_type: DatumType::I64,
+                nullable: false,
+            },
+        ],
+        Target::Accounts => vec![
+            ColumnSpec {
+                name: "id".to_owned(),
+                datum_type: DatumType::I64,
+                nullable: false,
+            },
+            ColumnSpec {
+                name: "owner_user_id".to_owned(),
+                datum_type: DatumType::Text,
+                nullable: false,
+            },
+            ColumnSpec {
+                name: "display_name".to_owned(),
+                datum_type: DatumType::Text,
+                nullable: false,
+            },
+            ColumnSpec {
+                name: "balance_cents".to_owned(),
                 datum_type: DatumType::I64,
                 nullable: false,
             },

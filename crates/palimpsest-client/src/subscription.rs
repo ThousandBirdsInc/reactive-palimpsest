@@ -12,7 +12,7 @@ use futures::Stream;
 use tokio::sync::{mpsc, Mutex};
 
 use palimpsest_proto::palimpsest::sync::v1::{DiffOp, ResyncReason, Schema};
-use palimpsest_proto::wire::WireRow;
+use palimpsest_proto::wire::{WireRow, WireRowChange};
 
 use crate::cache::LocalCache;
 use crate::connection::{Command, ConnectionInbox};
@@ -39,6 +39,19 @@ pub enum DiffEvent {
         op: DiffOp,
         /// Decoded rows.
         rows: Vec<WireRow>,
+    },
+    /// Decoded transaction envelope applied as one cache mutation.
+    Transaction {
+        /// Commit LSN for the complete transaction.
+        commit_lsn: u64,
+        /// Begin marker LSN, when supplied by the server.
+        begin_lsn: Option<u64>,
+        /// End marker LSN, when supplied by the server.
+        end_lsn: Option<u64>,
+        /// PostgreSQL transaction id, when supplied by the server.
+        transaction_id: Option<u32>,
+        /// Per-row changes in this transaction.
+        changes: Vec<WireRowChange>,
     },
     /// Server signalled a forced resync.
     Resync {
