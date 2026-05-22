@@ -15,20 +15,6 @@
       <stop offset="0.72" stop-color="#000" stop-opacity="0"/>
       <stop offset="1" stop-color="#000" stop-opacity="0.7"/>
     </radialGradient>
-    <linearGradient id="scrollL" x1="0" y1="0" x2="200" y2="0" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.18" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.45" stop-color="#000000" stop-opacity="1"/>
-      <stop offset="0.72" stop-color="#000000" stop-opacity="0.45"/>
-      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
-    </linearGradient>
-    <linearGradient id="scrollR" x1="1200" y1="0" x2="1000" y2="0" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.18" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.45" stop-color="#000000" stop-opacity="1"/>
-      <stop offset="0.72" stop-color="#000000" stop-opacity="0.45"/>
-      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
-    </linearGradient>
     <linearGradient id="metricArea" x1="0" y1="161" x2="0" y2="185" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#ffd11a" stop-opacity="0.34"/>
       <stop offset="1" stop-color="#ffd11a" stop-opacity="0"/>
@@ -47,26 +33,29 @@
       .glyphs { font-family: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace; font-size: 19px; font-weight: 500; }
       .logline { font-family: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace; font-size: 15px; fill: #8a7a3a; letter-spacing: 1px; opacity: 0; }
       @keyframes rain { from { transform: translateY(-330px); } to { transform: translateY(0); } }
-      @keyframes typ { 0% { transform: scaleX(0); } 38%,100% { transform: scaleX(1); } }
+      @keyframes typ {
+        0% { transform: scaleX(0); animation-timing-function: steps(35, end); }
+        58%,100% { transform: scaleX(1); }
+      }
       @keyframes scrollx { from { transform: translateX(0); } to { transform: translateX(-880px); } }
       @keyframes pulse { 0%,100% { opacity: .4; transform: scale(1); } 50% { opacity: 1; transform: scale(1.6); } }
       @keyframes caret {
-        0% { transform: translateX(0); opacity: 1; animation-timing-function: ease-in-out; }
-        38% { transform: translateX(444px); opacity: 1; }
-        44% { opacity: 0; } 50% { opacity: 1; } 56% { opacity: 0; } 62% { opacity: 1; } 68% { opacity: 0; } 74% { opacity: 1; } 80% { opacity: 0; } 86% { opacity: 1; } 92% { opacity: 0; }
-        100% { transform: translateX(444px); opacity: 1; }
+        0% { transform: translateX(0); opacity: 1; animation-timing-function: steps(35, end); }
+        58% { transform: translateX(448px); opacity: 1; }
+        64% { opacity: 0; } 70% { opacity: 1; } 76% { opacity: 0; } 82% { opacity: 1; } 88% { opacity: 0; } 94% { opacity: 1; }
+        100% { transform: translateX(448px); opacity: 1; }
       }
-      .type { transform-box: fill-box; transform-origin: 0% 50%; animation: typ 5s ease-in-out infinite; }
+      .type { transform-box: fill-box; transform-origin: 0% 50%; animation: typ 6s linear infinite; }
       .metric { animation: scrollx 7s linear infinite; }
       .pulse { transform-box: fill-box; transform-origin: center; animation: pulse 1.6s ease-in-out infinite; }
-      .caret { animation: caret 5s step-end infinite; }
+      .caret { animation: caret 6s step-end infinite; }
       @keyframes log0 { 0%,0.0% {opacity:0} 4.0%,27.3% {opacity:.42} 31.3%,100% {opacity:0} }
       @keyframes log1 { 0%,33.3% {opacity:0} 37.3%,60.7% {opacity:.42} 64.7%,100% {opacity:0} }
       @keyframes log2 { 0%,66.7% {opacity:0} 70.7%,94.0% {opacity:.42} 98.0%,100% {opacity:0} }
       @media (prefers-reduced-motion: reduce) {
         .glyphs, .type, .metric, .pulse, .caret, .logline { animation: none !important; }
         .type { transform: scaleX(1); }
-        .caret { transform: translateX(444px); opacity: 1; }
+        .caret { transform: translateX(448px); opacity: 1; }
         .logline { opacity: .18; }
       }
     </style>
@@ -147,6 +136,4 @@
   <text x="600" y="288" text-anchor="middle" class="logline" style="animation: log2 9.600000000000001s ease-in-out infinite;">overwrite view :: SELECT * FROM orders WHERE live</text>
 
   <rect width="1200" height="340" fill="url(#vignette)"/>
-  <rect x="0" y="0" width="200" height="340" fill="url(#scrollL)"/>
-  <rect x="1000" y="0" width="200" height="340" fill="url(#scrollR)"/>
 </svg>
