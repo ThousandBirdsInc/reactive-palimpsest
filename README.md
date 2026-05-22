@@ -1,12 +1,24 @@
-# Palimpsest
+<p align="center">
+  <img src=".github/palimpsest-header.svg" alt="Palimpsest" width="720" />
+</p>
 
-Palimpsest is a Postgres WAL-backed live query sync engine. It keeps SQL
-query result sets current from a logical replication stream and pushes
-row-level diffs to clients over the Palimpsest SyncEngine protocol.
+<h1 align="center">Palimpsest</h1>
 
-The repository contains the Rust server, WAL decoder, SQL frontend,
-permission rewriter, native and WASM clients, TypeScript/React client
-package, test harnesses, operational docs, and an end-to-end demo app.
+<p align="center">
+  A <b>Postgres WAL-backed live query sync engine</b>. It keeps SQL query
+  result sets current from a logical replication stream and pushes
+  <b>row-level diffs</b> to clients over the Palimpsest <code>SyncEngine</code>
+  protocol &mdash; a Rust server, WAL decoder, SQL frontend, permission
+  rewriter, and native + WASM clients in one repository.
+</p>
+
+<p align="center">
+  <a href="#quick-start-demo-app"><b>🚀 Quick Start</b></a> &middot;
+  <a href="DESIGN.md"><b>📐 Design</b></a> &middot;
+  <a href="docs/ARCHITECTURE.md"><b>🏛️ Architecture</b></a> &middot;
+  <a href="docs/USER-GUIDE.md"><b>📚 User Guide</b></a> &middot;
+  <a href="docs/TROUBLESHOOTING.md"><b>🔧 Troubleshooting</b></a>
+</p>
 
 ## Status
 
