@@ -28,6 +28,16 @@ paths are still being completed. See [DESIGN.md](DESIGN.md) for the
 implementation plan and [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
 for known operational failure modes.
 
+## Positioning
+
+If you know [Convex](https://www.convex.dev/), Palimpsest is aimed at a
+similar application model: queries that stay live, clients that receive
+realtime updates, and backend tooling that removes most cache invalidation
+and WebSocket plumbing from application code. The main difference is that
+Palimpsest is open source and built on top of Postgres: your source of truth
+is a standard PostgreSQL database, and Palimpsest derives live query updates
+from the Postgres WAL.
+
 ## Repository Layout
 
 | Path | Purpose |
