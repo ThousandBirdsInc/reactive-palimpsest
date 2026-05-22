@@ -15,16 +15,33 @@
       <stop offset="0.72" stop-color="#000" stop-opacity="0"/>
       <stop offset="1" stop-color="#000" stop-opacity="0.7"/>
     </radialGradient>
-    <linearGradient id="scrollL" x1="0" y1="0" x2="120" y2="0" gradientUnits="userSpaceOnUse">
+    <linearGradient id="scrollL" x1="0" y1="0" x2="200" y2="0" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.55" stop-color="#0D1117" stop-opacity="0.65"/>
+      <stop offset="0.2" stop-color="#0D1117" stop-opacity="1"/>
+      <stop offset="0.4" stop-color="#0D1117" stop-opacity="0.86"/>
+      <stop offset="0.6" stop-color="#0D1117" stop-opacity="0.55"/>
+      <stop offset="0.8" stop-color="#0D1117" stop-opacity="0.22"/>
       <stop offset="1" stop-color="#0D1117" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="scrollR" x1="1200" y1="0" x2="1080" y2="0" gradientUnits="userSpaceOnUse">
+    <linearGradient id="scrollR" x1="1200" y1="0" x2="1000" y2="0" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.55" stop-color="#0D1117" stop-opacity="0.65"/>
+      <stop offset="0.2" stop-color="#0D1117" stop-opacity="1"/>
+      <stop offset="0.4" stop-color="#0D1117" stop-opacity="0.86"/>
+      <stop offset="0.6" stop-color="#0D1117" stop-opacity="0.55"/>
+      <stop offset="0.8" stop-color="#0D1117" stop-opacity="0.22"/>
       <stop offset="1" stop-color="#0D1117" stop-opacity="0"/>
     </linearGradient>
+    <linearGradient id="metricArea" x1="0" y1="161" x2="0" y2="185" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd11a" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#ffd11a" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="fadeGrad" x1="150" y1="0" x2="1050" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="1"/>
+    </linearGradient>
+    <mask id="metricFade"><rect x="150" y="161" width="900" height="24" fill="url(#fadeGrad)"/></mask>
+    <clipPath id="metricClip"><rect x="150" y="161" width="900" height="24"/></clipPath>
     <clipPath id="rainClip"><rect x="0" y="0" width="1200" height="340"/></clipPath>
     <clipPath id="subClip"><rect class="type" x="376" y="206" width="448" height="26"/></clipPath>
 
@@ -32,19 +49,26 @@
       .glyphs { font-family: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace; font-size: 19px; font-weight: 500; }
       .logline { font-family: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace; font-size: 15px; fill: #8a7a3a; letter-spacing: 1px; opacity: 0; }
       @keyframes rain { from { transform: translateY(-330px); } to { transform: translateY(0); } }
-      @keyframes write { 0% { transform: scaleX(0); opacity: 0; } 12% { opacity: 1; } 52%,80% { transform: scaleX(1); opacity: 1; } 94% { opacity: 0; } 100% { transform: scaleX(1); opacity: 0; } }
       @keyframes typ { 0% { transform: scaleX(0); } 38%,100% { transform: scaleX(1); } }
-      @keyframes blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
-      .stroke { transform-box: fill-box; transform-origin: 0% 50%; animation: write 6s ease-in-out infinite; }
+      @keyframes scrollx { from { transform: translateX(0); } to { transform: translateX(-880px); } }
+      @keyframes pulse { 0%,100% { opacity: .4; transform: scale(1); } 50% { opacity: 1; transform: scale(1.6); } }
+      @keyframes caret {
+        0% { transform: translateX(0); opacity: 1; animation-timing-function: ease-in-out; }
+        38% { transform: translateX(444px); opacity: 1; }
+        44% { opacity: 0; } 50% { opacity: 1; } 56% { opacity: 0; } 62% { opacity: 1; } 68% { opacity: 0; } 74% { opacity: 1; } 80% { opacity: 0; } 86% { opacity: 1; } 92% { opacity: 0; }
+        100% { transform: translateX(444px); opacity: 1; }
+      }
       .type { transform-box: fill-box; transform-origin: 0% 50%; animation: typ 5s ease-in-out infinite; }
-      .caret { animation: blink 1.05s step-end infinite; }
+      .metric { animation: scrollx 7s linear infinite; }
+      .pulse { transform-box: fill-box; transform-origin: center; animation: pulse 1.6s ease-in-out infinite; }
+      .caret { animation: caret 5s step-end infinite; }
       @keyframes log0 { 0%,0.0% {opacity:0} 4.0%,27.3% {opacity:.42} 31.3%,100% {opacity:0} }
       @keyframes log1 { 0%,33.3% {opacity:0} 37.3%,60.7% {opacity:.42} 64.7%,100% {opacity:0} }
       @keyframes log2 { 0%,66.7% {opacity:0} 70.7%,94.0% {opacity:.42} 98.0%,100% {opacity:0} }
       @media (prefers-reduced-motion: reduce) {
-        .glyphs, .stroke, .type, .caret, .logline { animation: none !important; }
-        .stroke { transform: scaleX(1); opacity: 1; }
+        .glyphs, .type, .metric, .pulse, .caret, .logline { animation: none !important; }
         .type { transform: scaleX(1); }
+        .caret { transform: translateX(444px); opacity: 1; }
         .logline { opacity: .18; }
       }
     </style>
@@ -98,8 +122,17 @@
   <!-- the wordmark -->
   <text x="600" y="150" text-anchor="middle" fill="#ffd11a" font-family="'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="88" font-weight="700" letter-spacing="6">PALIMPSEST</text>
 
-  <!-- scribe stroke re-writing beneath the title -->
-  <rect class="stroke" x="372" y="168" width="456" height="3" rx="1.5" fill="#ffcf33"/>
+  <!-- live metric stream: scrolls left, fades out on the left half -->
+  <g mask="url(#metricFade)">
+    <g clip-path="url(#metricClip)">
+      <g class="metric">
+        <path d="M 150 182.1 L 172 177.3 L 194 172.3 L 216 178.1 L 238 172.5 L 260 171.8 L 282 167.2 L 304 171.0 L 326 170.8 L 348 171.1 L 370 172.2 L 392 181.9 L 414 168.5 L 436 165.2 L 458 178.3 L 480 169.6 L 502 166.2 L 524 172.0 L 546 180.7 L 568 166.4 L 590 181.7 L 612 178.6 L 634 180.4 L 656 170.1 L 678 165.9 L 700 176.9 L 722 176.4 L 744 167.7 L 766 182.5 L 788 172.9 L 810 170.7 L 832 178.9 L 854 179.1 L 876 172.7 L 898 165.5 L 920 178.7 L 942 172.2 L 964 180.8 L 986 175.0 L 1008 168.7 L 1030 182.1 L 1052 177.3 L 1074 172.3 L 1096 178.1 L 1118 172.5 L 1140 171.8 L 1162 167.2 L 1184 171.0 L 1206 170.8 L 1228 171.1 L 1250 172.2 L 1272 181.9 L 1294 168.5 L 1316 165.2 L 1338 178.3 L 1360 169.6 L 1382 166.2 L 1404 172.0 L 1426 180.7 L 1448 166.4 L 1470 181.7 L 1492 178.6 L 1514 180.4 L 1536 170.1 L 1558 165.9 L 1580 176.9 L 1602 176.4 L 1624 167.7 L 1646 182.5 L 1668 172.9 L 1690 170.7 L 1712 178.9 L 1734 179.1 L 1756 172.7 L 1778 165.5 L 1800 178.7 L 1822 172.2 L 1844 180.8 L 1866 175.0 L 1888 168.7 L 1910 182.1 L 1932 177.3 L 1954 172.3 L 1976 178.1 L 1998 172.5 L 1998 185 L 150 185 Z" fill="url(#metricArea)"/>
+        <path d="M 150 182.1 L 172 177.3 L 194 172.3 L 216 178.1 L 238 172.5 L 260 171.8 L 282 167.2 L 304 171.0 L 326 170.8 L 348 171.1 L 370 172.2 L 392 181.9 L 414 168.5 L 436 165.2 L 458 178.3 L 480 169.6 L 502 166.2 L 524 172.0 L 546 180.7 L 568 166.4 L 590 181.7 L 612 178.6 L 634 180.4 L 656 170.1 L 678 165.9 L 700 176.9 L 722 176.4 L 744 167.7 L 766 182.5 L 788 172.9 L 810 170.7 L 832 178.9 L 854 179.1 L 876 172.7 L 898 165.5 L 920 178.7 L 942 172.2 L 964 180.8 L 986 175.0 L 1008 168.7 L 1030 182.1 L 1052 177.3 L 1074 172.3 L 1096 178.1 L 1118 172.5 L 1140 171.8 L 1162 167.2 L 1184 171.0 L 1206 170.8 L 1228 171.1 L 1250 172.2 L 1272 181.9 L 1294 168.5 L 1316 165.2 L 1338 178.3 L 1360 169.6 L 1382 166.2 L 1404 172.0 L 1426 180.7 L 1448 166.4 L 1470 181.7 L 1492 178.6 L 1514 180.4 L 1536 170.1 L 1558 165.9 L 1580 176.9 L 1602 176.4 L 1624 167.7 L 1646 182.5 L 1668 172.9 L 1690 170.7 L 1712 178.9 L 1734 179.1 L 1756 172.7 L 1778 165.5 L 1800 178.7 L 1822 172.2 L 1844 180.8 L 1866 175.0 L 1888 168.7 L 1910 182.1 L 1932 177.3 L 1954 172.3 L 1976 178.1 L 1998 172.5" fill="none" stroke="#ffd11a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      </g>
+    </g>
+  </g>
+  <line x1="1050" y1="161" x2="1050" y2="185" stroke="#ffcf33" stroke-opacity="0.3" stroke-width="1"/>
+  <circle class="pulse" cx="1050" cy="174" r="3.2" fill="#ffe24a"/>
 
   <!-- dictionary pronunciation -->
   <text x="600" y="196" text-anchor="middle" fill="#9a8a3f" font-family="'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="18" letter-spacing="0.5">/&#712;p&#230;l&#601;mp&#716;s&#603;st/</text>
@@ -108,14 +141,14 @@
   <g clip-path="url(#subClip)">
     <text x="600" y="224" text-anchor="middle" fill="#c9b86a" font-family="'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="19" letter-spacing="1">Postgres WAL-backed live query sync</text>
   </g>
-  <rect class="caret" x="826" y="210" width="10" height="19" rx="1" fill="#ffe24a"/>
+  <rect class="caret" x="376" y="210" width="10" height="19" rx="1" fill="#ffe24a"/>
 
   <!-- overwriting replication log -->
   <text x="600" y="288" text-anchor="middle" class="logline" style="animation: log0 9.600000000000001s ease-in-out infinite;">BEGIN; -- slot &apos;palimpsest&apos; @ lsn 0/1A2F3C8</text>
   <text x="600" y="288" text-anchor="middle" class="logline" style="animation: log1 9.600000000000001s ease-in-out infinite;">apply &#916; rows &#8594; rebroadcast to 1,204 subscribers</text>
   <text x="600" y="288" text-anchor="middle" class="logline" style="animation: log2 9.600000000000001s ease-in-out infinite;">overwrite view :: SELECT * FROM orders WHERE live</text>
 
-  <rect x="0" y="0" width="120" height="340" fill="url(#scrollL)"/>
-  <rect x="1080" y="0" width="120" height="340" fill="url(#scrollR)"/>
+  <rect x="0" y="0" width="200" height="340" fill="url(#scrollL)"/>
+  <rect x="1000" y="0" width="200" height="340" fill="url(#scrollR)"/>
   <rect width="1200" height="340" fill="url(#vignette)"/>
 </svg>
