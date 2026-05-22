@@ -1,21 +1,21 @@
-<svg viewBox="0 0 1200 340" width="1200" height="340" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 1200 360" width="1200" height="360" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="340" gradientUnits="userSpaceOnUse">
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="360" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#040403"/>
       <stop offset="0.55" stop-color="#070603"/>
       <stop offset="1" stop-color="#0a0903"/>
     </linearGradient>
-    <radialGradient id="halo" cx="600" cy="150" r="430" gradientUnits="userSpaceOnUse" gradientTransform="matrix(1 0 0 0.34 0 99)">
+    <radialGradient id="halo" cx="600" cy="132" r="430" gradientUnits="userSpaceOnUse" gradientTransform="matrix(1 0 0 0.34 0 87)">
       <stop offset="0" stop-color="#000000" stop-opacity="0.92"/>
       <stop offset="0.6" stop-color="#000000" stop-opacity="0.72"/>
       <stop offset="1" stop-color="#000000" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="vignette" cx="600" cy="150" r="700" gradientUnits="userSpaceOnUse">
+    <radialGradient id="vignette" cx="600" cy="180" r="720" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#000" stop-opacity="0"/>
       <stop offset="0.72" stop-color="#000" stop-opacity="0"/>
       <stop offset="1" stop-color="#000" stop-opacity="0.7"/>
     </radialGradient>
-    <linearGradient id="metricArea" x1="0" y1="161" x2="0" y2="185" gradientUnits="userSpaceOnUse">
+    <linearGradient id="metricArea" x1="0" y1="177" x2="0" y2="205" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#ffd11a" stop-opacity="0.34"/>
       <stop offset="1" stop-color="#ffd11a" stop-opacity="0"/>
     </linearGradient>
@@ -24,44 +24,80 @@
       <stop offset="0.5" stop-color="#fff" stop-opacity="1"/>
       <stop offset="1" stop-color="#fff" stop-opacity="1"/>
     </linearGradient>
-    <mask id="metricFade"><rect x="150" y="161" width="900" height="24" fill="url(#fadeGrad)"/></mask>
-    <clipPath id="metricClip"><rect x="150" y="161" width="900" height="24"/></clipPath>
-    <clipPath id="rainClip"><rect x="0" y="0" width="1200" height="340"/></clipPath>
-    <clipPath id="subClip"><rect class="type" x="376" y="206" width="448" height="26"/></clipPath>
+    <mask id="metricFade"><rect x="150" y="177" width="900" height="28" fill="url(#fadeGrad)"/></mask>
+    <clipPath id="metricClip"><rect x="150" y="177" width="900" height="28"/></clipPath>
+    <clipPath id="rainClip"><rect x="0" y="0" width="1200" height="360"/></clipPath>
+    <clipPath id="subClip"><rect x="390" y="258" width="420" height="28"><animate attributeName="width" dur="6s" repeatCount="indefinite" calcMode="discrete" keyTimes="0.0;0.01657;0.03314;0.04971;0.06629;0.08286;0.09943;0.116;0.13257;0.14914;0.16571;0.18229;0.19886;0.21543;0.232;0.24857;0.26514;0.28171;0.29829;0.31486;0.33143;0.348;0.36457;0.38114;0.39771;0.41429;0.43086;0.44743;0.464;0.48057;0.49714;0.51371;0.53029;0.54686;0.56343;0.58;1.0" values="0;12;24;36;48;60;72;84;96;108;120;132;144;156;168;180;192;204;216;228;240;252;264;276;288;300;312;324;336;348;360;372;384;396;408;420;420"/></rect></clipPath>
 
     <style>
       .glyphs { font-family: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace; font-size: 19px; font-weight: 500; }
       .logline { font-family: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace; font-size: 15px; fill: #8a7a3a; letter-spacing: 1px; opacity: 0; }
       @keyframes rain { from { transform: translateY(-330px); } to { transform: translateY(0); } }
-      @keyframes typ {
-        0% { transform: scaleX(0); animation-timing-function: steps(35, end); }
-        58%,100% { transform: scaleX(1); }
+      @keyframes scrollx { from { transform: translateX(0); } to { transform: translateX(-900px); } }
+      @keyframes track {
+        0.0% { transform: translateY(200.1px); }
+        2.222% { transform: translateY(195.3px); }
+        4.444% { transform: translateY(190.3px); }
+        6.667% { transform: translateY(196.1px); }
+        8.889% { transform: translateY(190.5px); }
+        11.111% { transform: translateY(189.8px); }
+        13.333% { transform: translateY(185.2px); }
+        15.556% { transform: translateY(189.0px); }
+        17.778% { transform: translateY(188.8px); }
+        20.0% { transform: translateY(189.1px); }
+        22.222% { transform: translateY(190.2px); }
+        24.444% { transform: translateY(199.9px); }
+        26.667% { transform: translateY(186.5px); }
+        28.889% { transform: translateY(183.2px); }
+        31.111% { transform: translateY(196.3px); }
+        33.333% { transform: translateY(187.6px); }
+        35.556% { transform: translateY(184.2px); }
+        37.778% { transform: translateY(190.0px); }
+        40.0% { transform: translateY(198.7px); }
+        42.222% { transform: translateY(184.4px); }
+        44.444% { transform: translateY(199.7px); }
+        46.667% { transform: translateY(196.6px); }
+        48.889% { transform: translateY(198.4px); }
+        51.111% { transform: translateY(188.1px); }
+        53.333% { transform: translateY(183.9px); }
+        55.556% { transform: translateY(194.9px); }
+        57.778% { transform: translateY(194.4px); }
+        60.0% { transform: translateY(185.7px); }
+        62.222% { transform: translateY(200.5px); }
+        64.444% { transform: translateY(190.9px); }
+        66.667% { transform: translateY(188.7px); }
+        68.889% { transform: translateY(196.9px); }
+        71.111% { transform: translateY(197.1px); }
+        73.333% { transform: translateY(190.7px); }
+        75.556% { transform: translateY(183.5px); }
+        77.778% { transform: translateY(196.7px); }
+        80.0% { transform: translateY(190.2px); }
+        82.222% { transform: translateY(198.8px); }
+        84.444% { transform: translateY(193.0px); }
+        86.667% { transform: translateY(186.7px); }
+        88.889% { transform: translateY(184.5px); }
+        91.111% { transform: translateY(199.8px); }
+        93.333% { transform: translateY(190.4px); }
+        95.556% { transform: translateY(194.1px); }
+        97.778% { transform: translateY(185.5px); }
+        100.0% { transform: translateY(200.1px); }
       }
-      @keyframes scrollx { from { transform: translateX(0); } to { transform: translateX(-880px); } }
-      @keyframes pulse { 0%,100% { opacity: .4; transform: scale(1); } 50% { opacity: 1; transform: scale(1.6); } }
-      @keyframes caret {
-        0% { transform: translateX(0); opacity: 1; animation-timing-function: steps(35, end); }
-        58% { transform: translateX(448px); opacity: 1; }
-        64% { opacity: 0; } 70% { opacity: 1; } 76% { opacity: 0; } 82% { opacity: 1; } 88% { opacity: 0; } 94% { opacity: 1; }
-        100% { transform: translateX(448px); opacity: 1; }
-      }
-      .type { transform-box: fill-box; transform-origin: 0% 50%; animation: typ 6s linear infinite; }
+      @keyframes pulse { 0%,100% { opacity: .55; transform: scale(1); } 50% { opacity: 1; transform: scale(1.7); } }
       .metric { animation: scrollx 7s linear infinite; }
+      .track { animation: track 7s linear infinite; }
       .pulse { transform-box: fill-box; transform-origin: center; animation: pulse 1.6s ease-in-out infinite; }
-      .caret { animation: caret 6s step-end infinite; }
       @keyframes log0 { 0%,0.0% {opacity:0} 4.0%,27.3% {opacity:.42} 31.3%,100% {opacity:0} }
       @keyframes log1 { 0%,33.3% {opacity:0} 37.3%,60.7% {opacity:.42} 64.7%,100% {opacity:0} }
       @keyframes log2 { 0%,66.7% {opacity:0} 70.7%,94.0% {opacity:.42} 98.0%,100% {opacity:0} }
       @media (prefers-reduced-motion: reduce) {
-        .glyphs, .type, .metric, .pulse, .caret, .logline { animation: none !important; }
-        .type { transform: scaleX(1); }
-        .caret { transform: translateX(448px); opacity: 1; }
+        .glyphs, .metric, .track, .pulse, .logline { animation: none !important; }
+        .track { transform: translateY(200.1px); }
         .logline { opacity: .18; }
       }
     </style>
   </defs>
 
-  <rect width="1200" height="340" fill="url(#bg)"/>
+  <rect width="1200" height="360" fill="url(#bg)"/>
 
   <!-- matrix glyph rain: latin + greek, dev terminal x ancient script -->
   <g clip-path="url(#rainClip)" opacity="0.62">
@@ -104,36 +140,39 @@
   </g>
 
   <!-- dark halo lifts the wordmark off the rain -->
-  <rect width="1200" height="340" fill="url(#halo)"/>
+  <rect width="1200" height="360" fill="url(#halo)"/>
 
-  <!-- the wordmark -->
-  <text x="600" y="150" text-anchor="middle" fill="#ffd11a" font-family="'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="88" font-weight="700" letter-spacing="6">PALIMPSEST</text>
+  <!-- the wordmark: phonetic spelling of palimpsest -->
+  <text x="600" y="132" text-anchor="middle" fill="#ffd11a" font-family="'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="80" font-weight="700" letter-spacing="2">/&#712;p&#230;l&#601;mp&#716;s&#603;st/</text>
 
   <!-- live metric stream: scrolls left, fades out on the left half -->
   <g mask="url(#metricFade)">
     <g clip-path="url(#metricClip)">
       <g class="metric">
-        <path d="M 150 182.1 L 172 177.3 L 194 172.3 L 216 178.1 L 238 172.5 L 260 171.8 L 282 167.2 L 304 171.0 L 326 170.8 L 348 171.1 L 370 172.2 L 392 181.9 L 414 168.5 L 436 165.2 L 458 178.3 L 480 169.6 L 502 166.2 L 524 172.0 L 546 180.7 L 568 166.4 L 590 181.7 L 612 178.6 L 634 180.4 L 656 170.1 L 678 165.9 L 700 176.9 L 722 176.4 L 744 167.7 L 766 182.5 L 788 172.9 L 810 170.7 L 832 178.9 L 854 179.1 L 876 172.7 L 898 165.5 L 920 178.7 L 942 172.2 L 964 180.8 L 986 175.0 L 1008 168.7 L 1030 182.1 L 1052 177.3 L 1074 172.3 L 1096 178.1 L 1118 172.5 L 1140 171.8 L 1162 167.2 L 1184 171.0 L 1206 170.8 L 1228 171.1 L 1250 172.2 L 1272 181.9 L 1294 168.5 L 1316 165.2 L 1338 178.3 L 1360 169.6 L 1382 166.2 L 1404 172.0 L 1426 180.7 L 1448 166.4 L 1470 181.7 L 1492 178.6 L 1514 180.4 L 1536 170.1 L 1558 165.9 L 1580 176.9 L 1602 176.4 L 1624 167.7 L 1646 182.5 L 1668 172.9 L 1690 170.7 L 1712 178.9 L 1734 179.1 L 1756 172.7 L 1778 165.5 L 1800 178.7 L 1822 172.2 L 1844 180.8 L 1866 175.0 L 1888 168.7 L 1910 182.1 L 1932 177.3 L 1954 172.3 L 1976 178.1 L 1998 172.5 L 1998 185 L 150 185 Z" fill="url(#metricArea)"/>
-        <path d="M 150 182.1 L 172 177.3 L 194 172.3 L 216 178.1 L 238 172.5 L 260 171.8 L 282 167.2 L 304 171.0 L 326 170.8 L 348 171.1 L 370 172.2 L 392 181.9 L 414 168.5 L 436 165.2 L 458 178.3 L 480 169.6 L 502 166.2 L 524 172.0 L 546 180.7 L 568 166.4 L 590 181.7 L 612 178.6 L 634 180.4 L 656 170.1 L 678 165.9 L 700 176.9 L 722 176.4 L 744 167.7 L 766 182.5 L 788 172.9 L 810 170.7 L 832 178.9 L 854 179.1 L 876 172.7 L 898 165.5 L 920 178.7 L 942 172.2 L 964 180.8 L 986 175.0 L 1008 168.7 L 1030 182.1 L 1052 177.3 L 1074 172.3 L 1096 178.1 L 1118 172.5 L 1140 171.8 L 1162 167.2 L 1184 171.0 L 1206 170.8 L 1228 171.1 L 1250 172.2 L 1272 181.9 L 1294 168.5 L 1316 165.2 L 1338 178.3 L 1360 169.6 L 1382 166.2 L 1404 172.0 L 1426 180.7 L 1448 166.4 L 1470 181.7 L 1492 178.6 L 1514 180.4 L 1536 170.1 L 1558 165.9 L 1580 176.9 L 1602 176.4 L 1624 167.7 L 1646 182.5 L 1668 172.9 L 1690 170.7 L 1712 178.9 L 1734 179.1 L 1756 172.7 L 1778 165.5 L 1800 178.7 L 1822 172.2 L 1844 180.8 L 1866 175.0 L 1888 168.7 L 1910 182.1 L 1932 177.3 L 1954 172.3 L 1976 178.1 L 1998 172.5" fill="none" stroke="#ffd11a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        <path d="M 150 200.1 L 170 195.3 L 190 190.3 L 210 196.1 L 230 190.5 L 250 189.8 L 270 185.2 L 290 189.0 L 310 188.8 L 330 189.1 L 350 190.2 L 370 199.9 L 390 186.5 L 410 183.2 L 430 196.3 L 450 187.6 L 470 184.2 L 490 190.0 L 510 198.7 L 530 184.4 L 550 199.7 L 570 196.6 L 590 198.4 L 610 188.1 L 630 183.9 L 650 194.9 L 670 194.4 L 690 185.7 L 710 200.5 L 730 190.9 L 750 188.7 L 770 196.9 L 790 197.1 L 810 190.7 L 830 183.5 L 850 196.7 L 870 190.2 L 890 198.8 L 910 193.0 L 930 186.7 L 950 184.5 L 970 199.8 L 990 190.4 L 1010 194.1 L 1030 185.5 L 1050 200.1 L 1070 195.3 L 1090 190.3 L 1110 196.1 L 1130 190.5 L 1150 189.8 L 1170 185.2 L 1190 189.0 L 1210 188.8 L 1230 189.1 L 1250 190.2 L 1270 199.9 L 1290 186.5 L 1310 183.2 L 1330 196.3 L 1350 187.6 L 1370 184.2 L 1390 190.0 L 1410 198.7 L 1430 184.4 L 1450 199.7 L 1470 196.6 L 1490 198.4 L 1510 188.1 L 1530 183.9 L 1550 194.9 L 1570 194.4 L 1590 185.7 L 1610 200.5 L 1630 190.9 L 1650 188.7 L 1670 196.9 L 1690 197.1 L 1710 190.7 L 1730 183.5 L 1750 196.7 L 1770 190.2 L 1790 198.8 L 1810 193.0 L 1830 186.7 L 1850 184.5 L 1870 199.8 L 1890 190.4 L 1910 194.1 L 1930 185.5 L 1950 200.1 L 1970 195.3 L 1990 190.3 L 2010 196.1 L 2010 205 L 150 205 Z" fill="url(#metricArea)"/>
+        <path d="M 150 200.1 L 170 195.3 L 190 190.3 L 210 196.1 L 230 190.5 L 250 189.8 L 270 185.2 L 290 189.0 L 310 188.8 L 330 189.1 L 350 190.2 L 370 199.9 L 390 186.5 L 410 183.2 L 430 196.3 L 450 187.6 L 470 184.2 L 490 190.0 L 510 198.7 L 530 184.4 L 550 199.7 L 570 196.6 L 590 198.4 L 610 188.1 L 630 183.9 L 650 194.9 L 670 194.4 L 690 185.7 L 710 200.5 L 730 190.9 L 750 188.7 L 770 196.9 L 790 197.1 L 810 190.7 L 830 183.5 L 850 196.7 L 870 190.2 L 890 198.8 L 910 193.0 L 930 186.7 L 950 184.5 L 970 199.8 L 990 190.4 L 1010 194.1 L 1030 185.5 L 1050 200.1 L 1070 195.3 L 1090 190.3 L 1110 196.1 L 1130 190.5 L 1150 189.8 L 1170 185.2 L 1190 189.0 L 1210 188.8 L 1230 189.1 L 1250 190.2 L 1270 199.9 L 1290 186.5 L 1310 183.2 L 1330 196.3 L 1350 187.6 L 1370 184.2 L 1390 190.0 L 1410 198.7 L 1430 184.4 L 1450 199.7 L 1470 196.6 L 1490 198.4 L 1510 188.1 L 1530 183.9 L 1550 194.9 L 1570 194.4 L 1590 185.7 L 1610 200.5 L 1630 190.9 L 1650 188.7 L 1670 196.9 L 1690 197.1 L 1710 190.7 L 1730 183.5 L 1750 196.7 L 1770 190.2 L 1790 198.8 L 1810 193.0 L 1830 186.7 L 1850 184.5 L 1870 199.8 L 1890 190.4 L 1910 194.1 L 1930 185.5 L 1950 200.1 L 1970 195.3 L 1990 190.3 L 2010 196.1" fill="none" stroke="#ffd11a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
       </g>
     </g>
   </g>
-  <line x1="1050" y1="161" x2="1050" y2="185" stroke="#ffcf33" stroke-opacity="0.3" stroke-width="1"/>
-  <circle class="pulse" cx="1050" cy="174" r="3.2" fill="#ffe24a"/>
-
-  <!-- dictionary pronunciation -->
-  <text x="600" y="196" text-anchor="middle" fill="#9a8a3f" font-family="'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="18" letter-spacing="0.5">/&#712;p&#230;l&#601;mp&#716;s&#603;st/</text>
-
-  <!-- typed subtitle + live caret -->
-  <g clip-path="url(#subClip)">
-    <text x="600" y="224" text-anchor="middle" fill="#c9b86a" font-family="'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="19" letter-spacing="1">Postgres WAL-backed live query sync</text>
+  <line x1="1050" y1="177" x2="1050" y2="205" stroke="#ffcf33" stroke-opacity="0.3" stroke-width="1"/>
+  <g class="track">
+    <circle cx="1050" cy="0" r="7" fill="#ffe24a" opacity="0.2"/>
+    <circle class="pulse" cx="1050" cy="0" r="3.2" fill="#ffe24a"/>
   </g>
-  <rect class="caret" x="376" y="210" width="10" height="19" rx="1" fill="#ffe24a"/>
+
+  <!-- typed subtitle (shell-style) + live block caret -->
+  <g clip-path="url(#subClip)">
+    <text x="390" y="280" text-anchor="start" textLength="420" lengthAdjust="spacingAndGlyphs" fill="#c9b86a" font-family="'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="19">Postgres WAL-backed live query sync</text>
+  </g>
+  <rect x="810" y="265" width="11" height="19" rx="1" fill="#ffe24a">
+    <animate attributeName="x" dur="6s" repeatCount="indefinite" calcMode="discrete" keyTimes="0.0;0.01657;0.03314;0.04971;0.06629;0.08286;0.09943;0.116;0.13257;0.14914;0.16571;0.18229;0.19886;0.21543;0.232;0.24857;0.26514;0.28171;0.29829;0.31486;0.33143;0.348;0.36457;0.38114;0.39771;0.41429;0.43086;0.44743;0.464;0.48057;0.49714;0.51371;0.53029;0.54686;0.56343;0.58;1.0" values="390;402;414;426;438;450;462;474;486;498;510;522;534;546;558;570;582;594;606;618;630;642;654;666;678;690;702;714;726;738;750;762;774;786;798;810;810"/>
+    <animate attributeName="opacity" dur="6s" repeatCount="indefinite" calcMode="discrete" keyTimes="0;0.58;0.64;0.7;0.76;0.82;0.88;0.94;1" values="1;1;0;1;0;1;0;1;1"/>
+  </rect>
 
   <!-- overwriting replication log -->
-  <text x="600" y="288" text-anchor="middle" class="logline" style="animation: log0 9.600000000000001s ease-in-out infinite;">BEGIN; -- slot &apos;palimpsest&apos; @ lsn 0/1A2F3C8</text>
-  <text x="600" y="288" text-anchor="middle" class="logline" style="animation: log1 9.600000000000001s ease-in-out infinite;">apply &#916; rows &#8594; rebroadcast to 1,204 subscribers</text>
-  <text x="600" y="288" text-anchor="middle" class="logline" style="animation: log2 9.600000000000001s ease-in-out infinite;">overwrite view :: SELECT * FROM orders WHERE live</text>
+  <text x="600" y="338" text-anchor="middle" class="logline" style="animation: log0 9.600000000000001s ease-in-out infinite;">BEGIN; -- slot &apos;palimpsest&apos; @ lsn 0/1A2F3C8</text>
+  <text x="600" y="338" text-anchor="middle" class="logline" style="animation: log1 9.600000000000001s ease-in-out infinite;">apply &#916; rows &#8594; rebroadcast to 1,204 subscribers</text>
+  <text x="600" y="338" text-anchor="middle" class="logline" style="animation: log2 9.600000000000001s ease-in-out infinite;">overwrite view :: SELECT * FROM orders WHERE live</text>
 
-  <rect width="1200" height="340" fill="url(#vignette)"/>
+  <rect width="1200" height="360" fill="url(#vignette)"/>
 </svg>
