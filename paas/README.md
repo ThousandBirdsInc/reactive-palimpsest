@@ -10,6 +10,85 @@ The existing open-source sync engine remains rooted in `crates/`, `packages/`,
 platform work can evolve without disrupting standalone `palimpsest serve`,
 the current client SDKs, or the existing test harnesses.
 
+## Status: prototype (local use)
+
+> **This is an early prototype, intended primarily for local development and
+> evaluation — not production.**
+>
+> The self-hosted PaaS runs end-to-end on a single machine: it provisions real
+> PostgreSQL 18 instances, drives their lifecycle through an owned Rust control
+> plane and node agent, and exposes an operator console. But several pieces
+> that a production deployment requires are deliberately stubbed or local-only:
+>
+> - **No authentication.** The control-plane API and UI assume a trusted local
+>   caller. The UI sends an `x-actor-id` header for audit attribution only;
+>   there is no login, API-key enforcement on the UI path, or RBAC.
+> - **Single host.** The node agent registers one local host
+>   (`local-dev-host`) and runs Postgres binaries directly on your machine.
+>   There is no multi-host scheduling, failure-domain spreading, or remote
+>   host fleet yet.
+> - **Local secret material by default.** Role passwords use a local-dev
+>   plaintext provider unless you opt into envelope encryption (see below).
+> - **Connection routing falls back to the backend port.** Until a certificate
+>   workflow publishes a database-proxy route, the UI surfaces a direct
+>   `127.0.0.1:<port>` connection string (clearly flagged as a dev fallback).
+>
+> Treat data created here as disposable. Run it on a workstation, not a shared
+> or internet-facing host.
+
+## What it does
+
+The current slice can, entirely on a local machine:
+
+- **Provision managed PostgreSQL 18+ clusters** — create a cluster intent,
+  reconcile it onto the local host, and drive lifecycle actions (pause, resume,
+  resize storage, rotate role credentials, delete / cancel an un-provisioned
+  request).
+- **Copy-on-write database clones** — clone a cluster's database into a new
+  database on the same cluster, and track the clone operations.
+- **Backups, PITR, and recovery** — request base backups, archive WAL,
+  inspect point-in-time-recovery continuity checks, and run restore drills.
+- **High-availability primitives** — prepare standbys, run standby-lag checks,
+  fence a primary, and fail over the environment endpoint to a new cluster.
+- **A read-only SQL console + schema browser** per cluster, with query
+  explain, history, and a one-click sample-dataset seeder for evaluation.
+- **Connection information** for every cluster and clone — host, port,
+  database, role, and ready-to-copy `psql` / libpq URI / keyword DSN / JDBC
+  strings (passwords are never exposed by the API; rotate via the Roles tab).
+- **An operator console (React UI)** with environment overview and per-resource
+  health, plus pages for clusters, node hosts, incidents, quota, gateway and
+  database-proxy routes, and the audit log.
+- **A control plane** that turns desired cluster/deployment state into
+  node-agent commands, tracks operations, records an audit trail, enforces
+  quota policies and alerts, and exposes Prometheus metrics at `/metrics`.
+- **A node agent** that leases queued commands and applies them against local
+  PostgreSQL 18 binaries (or the Postgres 18 container image).
+- **An owned gateway and raw database TCP proxy** for hosted SyncDeployments
+  and managed Postgres endpoints, including PostgreSQL TLS (`SSLRequest`)
+  negotiation, startup-packet validation, and route-level user/database policy.
+- **Hosted SyncDeployment tooling** — render standalone Palimpsest configs from
+  signed deployment specs and classify config-reload behavior.
+
+A more detailed component map is in [Initial Implementation](#initial-implementation)
+below; the UI design is documented in [PAAS-UI-DESIGN.md](PAAS-UI-DESIGN.md).
+
+## Prerequisites
+
+The recommended local workflow ([Tilt](https://tilt.dev/)) needs:
+
+- **Docker** (with `docker compose`) — runs the control-plane PostgreSQL 18
+  container and the Flyway migration job.
+- **Rust** (stable toolchain, `cargo`) — builds and runs the control plane and
+  node agent.
+- **Node.js** (18+) and `npm` — installs and serves the React UI.
+- **Tilt** — orchestrates the resources above.
+
+Local Postgres 18 client/server binaries are used when the node agent applies
+commands directly; the Tilt stack uses `poll-once-container` so the Postgres 18
+container image supplies those binaries instead.
+
+## Design docs
+
 Start with:
 
 - [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) for the repo integration
@@ -22,9 +101,11 @@ Start with:
   and [adr/0002-owned-rust-runtime-no-kubernetes.md](adr/0002-owned-rust-runtime-no-kubernetes.md)
   for the initial platform decisions.
 
-## Run The Local PaaS Stack
+## Run the self-hosted PaaS (local)
 
-The easiest local workflow is Tilt:
+The recommended way to run the whole stack is [Tilt](https://tilt.dev/) — it
+brings up every component in dependency order and watches sources for reload.
+Make sure the [prerequisites](#prerequisites) are installed, then:
 
 ```text
 cd paas
@@ -34,7 +115,16 @@ tilt up
 The [Tiltfile](Tiltfile) starts the control-plane PostgreSQL 18 container,
 applies Flyway migrations, starts the SQL-backed control-plane API, seeds the
 default local scope, starts a node-agent poll loop, installs UI dependencies,
-and starts the React PaaS console.
+and starts the React PaaS console. Open the Tilt UI it prints to watch each
+resource come up; the stack is ready once `paas-ui` and `node-agent` are green.
+
+To tear it down, stop Tilt (`Ctrl-C` / `tilt down`); the control-plane Postgres
+container keeps its volume so state survives restarts. Created clusters write
+PostgreSQL data under `/tmp/palimpsest-paas-tilt` — remove that directory for a
+clean slate.
+
+If you prefer to run components by hand (without Tilt), see
+[Running components individually](#running-components-individually) below.
 
 Local endpoints:
 
@@ -104,6 +194,12 @@ The first implementation slice is deliberately additive:
   actions through the control-plane API.
 
 The UI design is documented in [PAAS-UI-DESIGN.md](PAAS-UI-DESIGN.md).
+
+## Running components individually
+
+`tilt up` is the recommended path. The commands below run the same components
+by hand — useful when you want to iterate on a single piece, or to understand
+what Tilt is doing under the hood.
 
 Run the local UI with:
 
