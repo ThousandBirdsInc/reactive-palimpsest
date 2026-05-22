@@ -17,19 +17,17 @@
     </radialGradient>
     <linearGradient id="scrollL" x1="0" y1="0" x2="200" y2="0" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.2" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.4" stop-color="#0D1117" stop-opacity="0.86"/>
-      <stop offset="0.6" stop-color="#0D1117" stop-opacity="0.55"/>
-      <stop offset="0.8" stop-color="#0D1117" stop-opacity="0.22"/>
-      <stop offset="1" stop-color="#0D1117" stop-opacity="0"/>
+      <stop offset="0.18" stop-color="#0D1117" stop-opacity="1"/>
+      <stop offset="0.45" stop-color="#000000" stop-opacity="1"/>
+      <stop offset="0.72" stop-color="#000000" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
     </linearGradient>
     <linearGradient id="scrollR" x1="1200" y1="0" x2="1000" y2="0" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.2" stop-color="#0D1117" stop-opacity="1"/>
-      <stop offset="0.4" stop-color="#0D1117" stop-opacity="0.86"/>
-      <stop offset="0.6" stop-color="#0D1117" stop-opacity="0.55"/>
-      <stop offset="0.8" stop-color="#0D1117" stop-opacity="0.22"/>
-      <stop offset="1" stop-color="#0D1117" stop-opacity="0"/>
+      <stop offset="0.18" stop-color="#0D1117" stop-opacity="1"/>
+      <stop offset="0.45" stop-color="#000000" stop-opacity="1"/>
+      <stop offset="0.72" stop-color="#000000" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
     </linearGradient>
     <linearGradient id="metricArea" x1="0" y1="161" x2="0" y2="185" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#ffd11a" stop-opacity="0.34"/>
@@ -148,7 +146,7 @@
   <text x="600" y="288" text-anchor="middle" class="logline" style="animation: log1 9.600000000000001s ease-in-out infinite;">apply &#916; rows &#8594; rebroadcast to 1,204 subscribers</text>
   <text x="600" y="288" text-anchor="middle" class="logline" style="animation: log2 9.600000000000001s ease-in-out infinite;">overwrite view :: SELECT * FROM orders WHERE live</text>
 
+  <rect width="1200" height="340" fill="url(#vignette)"/>
   <rect x="0" y="0" width="200" height="340" fill="url(#scrollL)"/>
   <rect x="1000" y="0" width="200" height="340" fill="url(#scrollR)"/>
-  <rect width="1200" height="340" fill="url(#vignette)"/>
 </svg>
