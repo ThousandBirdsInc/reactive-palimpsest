@@ -108,6 +108,24 @@ Build the CLI:
 cargo build --release --bin palimpsest
 ```
 
+Install the CLI from a local checkout:
+
+```sh
+cargo install --path crates/palimpsest-cli
+```
+
+Install the latest published CLI from crates.io:
+
+```sh
+cargo install palimpsest-cli
+```
+
+Release the CLI crate set to crates.io:
+
+```sh
+./publish.sh
+```
+
 Build the Docker image:
 
 ```sh
@@ -128,6 +146,7 @@ Supported commands:
 | --- | --- |
 | `serve [config]` | Run the embedded server. This is the default command. |
 | `validate-config <config>` | Parse TOML config and compile permission rules. |
+| `permissions eval <config> --query <sql>` | Compile configured permissions and show the before/after query rewrite. |
 | `dump-catalog [config]` | Print the configured catalog as JSON. |
 | `dev up\|down\|reset\|status\|env` | Manage the local PostgreSQL 18 + Palimpsest PaaS stack. |
 | `db create` | Create a SQL-backed managed PostgreSQL 18+ cluster intent. |
@@ -138,6 +157,14 @@ Example config:
 
 ```sh
 crates/palimpsest-cli/palimpsest.example.toml
+```
+
+Evaluate the permissions model against a query:
+
+```sh
+palimpsest permissions eval palimpsest.toml \
+  --query 'SELECT id FROM posts' \
+  --user id=42
 ```
 
 Validate it with:

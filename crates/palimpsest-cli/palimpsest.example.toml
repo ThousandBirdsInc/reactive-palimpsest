@@ -23,6 +23,7 @@ kind = "anonymous"
 # [[permissions.rules]]
 # name = "posts_owner"
 # table = "posts"
+# mode = "both"
 # predicate = "author_id = $user.id"
 
 # Optional upstream Postgres connection. Required for `slot-info` and

@@ -7,6 +7,8 @@ Standalone CLI that boots the embedded `palimpsest-server` (§18.14).
 ```
 palimpsest serve [config]              # default if no command given
 palimpsest validate-config <config>    # parse + permission compile; 0 ok, 1 error
+palimpsest permissions eval <config> --query <sql>
+                                       # rewrite query MIR with configured permissions
 palimpsest dump-catalog [config]       # emit catalog as JSON on stdout
 palimpsest dev up|down|reset|status|env # local PostgreSQL 18 + Palimpsest stack
 palimpsest db create ...               # create a managed PostgreSQL 18+ cluster intent
@@ -18,6 +20,48 @@ palimpsest help
 
 If invoked with a single positional argument that isn't a subcommand,
 the CLI behaves as `serve <config>` for backwards compatibility.
+
+Install locally with Cargo:
+
+```sh
+cargo install --path crates/palimpsest-cli
+```
+
+Install the latest published CLI:
+
+```sh
+cargo install palimpsest-cli
+```
+
+Repository maintainers can publish the CLI crate set from the repository root:
+
+```sh
+./publish.sh
+```
+
+## Permission evaluator
+
+`palimpsest permissions eval` compiles the same nested `[permissions]`
+configuration used by `serve`, lowers one or more queries, rewrites them
+with the configured row-visibility rules, and prints canonical MIR before
+and after the rewrite.
+
+```sh
+palimpsest permissions eval palimpsest.toml \
+  --query 'SELECT id FROM posts' \
+  --user id=42
+```
+
+Use repeated `--query` or `--query-file` options to test multiple queries in
+one invocation. User values are typed from `[permissions.user_schema]` and
+can be supplied with repeated `--user field=value` options or a JSON object:
+
+```sh
+palimpsest permissions eval palimpsest.toml \
+  --query 'SELECT id FROM posts' \
+  --user-json '{"id":42,"is_admin":false}' \
+  --json
+```
 
 ## Local PaaS stack
 
@@ -101,6 +145,7 @@ kind = "anonymous"       # or "jwt" (see below)
 # [[permissions.rules]]
 # name = "posts_owner"
 # table = "posts"
+# mode = "both"          # row_visibility, subscribe, or both (default)
 # predicate = "author_id = $user.id"
 
 # Upstream Postgres connection (optional, required for slot-info)

@@ -10,6 +10,9 @@
 //! - `validate-config <config>` — parse the TOML config and compile the
 //!   permission rules; exit 0 on success, 1 with a diagnostic on
 //!   failure. Suitable for CI.
+//! - `permissions eval <config> --query <sql>` — compile permission
+//!   rules, rewrite one or more queries for a supplied user context,
+//!   and print the before/after canonical MIR.
 //! - `dump-catalog [config]` — emit the configured catalog (the demo
 //!   catalog for v1) as pretty JSON on stdout. Useful for shipping
 //!   schemas to clients during development.
@@ -27,11 +30,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use palimpsest_paas_core::{ClusterLifecycleState, ManagedPostgresCluster, PostgresVersion};
-use palimpsest_permissions::{compile_rules, PermissionRule, UserContextSchema};
+use palimpsest_permissions::{
+    compile_rules, rewrite, Mode, PermissionRule, UserContext, UserContextSchema, UserValue,
+};
 use palimpsest_server::{
     AnonymousAuthenticator, EmptyWalRuntime, JwtAuthConfig, JwtAuthenticator, Palimpsest,
 };
-use palimpsest_sql::{Catalog, ColumnType};
+use palimpsest_sql::{canonical::canonical_form, parse_and_lower, Catalog, ColumnType};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{error, info};
@@ -89,6 +94,8 @@ struct PermissionRuleConfig {
     name: String,
     table: String,
     predicate: String,
+    #[serde(default)]
+    mode: Mode,
 }
 
 /// Upstream Postgres connection used by `slot-info` and (in a future
@@ -129,6 +136,8 @@ enum CliError {
     Serve(#[from] palimpsest_server::embed::ServeError),
     #[error("dump-catalog: {0}")]
     DumpCatalog(serde_json::Error),
+    #[error("permissions eval: {0}")]
+    EvalPermissions(String),
     #[error("dev stack: {0}")]
     DevStack(String),
     #[error("db: {0}")]
@@ -169,6 +178,7 @@ async fn run() -> Result<(), CliError> {
     match first {
         Some("serve") => cmd_serve(rest.first().map(PathBuf::from)).await,
         Some("validate-config") => cmd_validate_config(&require_one("validate-config", rest)?),
+        Some("permissions") => cmd_permissions(rest),
         Some("dump-catalog") => cmd_dump_catalog(rest.first().map(PathBuf::from).as_deref()),
         Some("dev") => cmd_dev(rest),
         Some("db") => cmd_db(rest),
@@ -200,6 +210,8 @@ Usage: palimpsest <command> [config]
 Commands:
   serve [config]              Run the embedded server (default).
   validate-config <config>    Parse the TOML config and exit 0/1.
+  permissions eval <config> --query <sql> [--user field=value]
+                              Rewrite query MIR with configured permissions.
   dump-catalog [config]       Print the configured catalog as JSON.
   dev up|down|reset|status|env
                               Manage the local PaaS dev stack.
@@ -261,7 +273,9 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
         .permissions
         .rules
         .iter()
-        .map(|rule| PermissionRule::new(&rule.name, &rule.table, &rule.predicate))
+        .map(|rule| {
+            PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode)
+        })
         .collect();
     let compiled = compile_rules(&rules, &catalog, &user_schema)
         .map_err(|err| CliError::CompilePermissions(err.to_string()))?;
@@ -299,7 +313,9 @@ fn cmd_validate_config(path: &Path) -> Result<(), CliError> {
         .permissions
         .rules
         .iter()
-        .map(|rule| PermissionRule::new(&rule.name, &rule.table, &rule.predicate))
+        .map(|rule| {
+            PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode)
+        })
         .collect();
     let _compiled = compile_rules(&rules, &catalog, &user_schema)
         .map_err(|err| CliError::CompilePermissions(err.to_string()))?;
@@ -314,6 +330,404 @@ fn cmd_validate_config(path: &Path) -> Result<(), CliError> {
         println!("note: no [upstream] section — `slot-info` will be unavailable.");
     }
     Ok(())
+}
+
+fn cmd_permissions(rest: &[String]) -> Result<(), CliError> {
+    let Some(action) = rest.first().map(String::as_str) else {
+        print_permissions_help();
+        return Ok(());
+    };
+
+    match action {
+        "eval"
+            if rest
+                .get(1)
+                .is_some_and(|arg| arg == "--help" || arg == "-h") =>
+        {
+            print_permissions_help();
+            Ok(())
+        }
+        "eval" => cmd_permissions_eval(&rest[1..]),
+        "help" | "--help" | "-h" => {
+            print_permissions_help();
+            Ok(())
+        }
+        other => Err(CliError::Usage(format!(
+            "permissions: unknown action '{other}' (expected eval)"
+        ))),
+    }
+}
+
+fn print_permissions_help() {
+    println!(
+        "palimpsest permissions — inspect permission-rule behavior
+
+Usage:
+  palimpsest permissions eval <config> --query <sql> [options]
+
+Options:
+  --query <sql>               Query to evaluate; may be repeated.
+  --query-file <path>         Read a query from a file; may be repeated.
+  --user <field=value>        Bind a user-context value; may be repeated.
+  --user-json <json>          Bind user-context values from a JSON object.
+  --format text|json          Output format (default: text).
+  --json                      Alias for --format json.
+
+Values are parsed using [permissions.user_schema] from the config."
+    );
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PermissionEvalOptions {
+    config_path: PathBuf,
+    queries: Vec<String>,
+    user_values: BTreeMap<String, UserValue>,
+    output: PermissionEvalOutput,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum PermissionEvalOutput {
+    #[default]
+    Text,
+    Json,
+}
+
+fn cmd_permissions_eval(rest: &[String]) -> Result<(), CliError> {
+    let options = parse_permission_eval_options(rest)?;
+    let config = read_config(&options.config_path)?;
+    let catalog = Catalog::demo();
+    let user_schema =
+        build_user_schema(&config.permissions.user_schema).map_err(CliError::EvalPermissions)?;
+    let rules: Vec<_> = config
+        .permissions
+        .rules
+        .iter()
+        .map(|rule| {
+            PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode)
+        })
+        .collect();
+    let compiled = compile_rules(&rules, &catalog, &user_schema)
+        .map_err(|err| CliError::EvalPermissions(format!("compile permissions: {err}")))?;
+    let user_context = UserContext::new(options.user_values.clone());
+    user_context
+        .validate(&user_schema)
+        .map_err(|err| CliError::EvalPermissions(format!("validate user context: {err}")))?;
+
+    let mut query_reports = Vec::with_capacity(options.queries.len());
+    for query in &options.queries {
+        let before = parse_and_lower(query)
+            .map_err(|err| CliError::EvalPermissions(format!("parse query: {err}")))?;
+        let outcome = rewrite(&before, &compiled, &user_context)
+            .map_err(|err| CliError::EvalPermissions(format!("rewrite query: {err}")))?;
+        query_reports.push(PermissionQueryEvalReport {
+            query: query.clone(),
+            canonical_before: canonical_form(&before),
+            canonical_after: canonical_form(&outcome.graph),
+            stats: PermissionEvalStats {
+                base_tables_visited: outcome.stats.base_tables_visited,
+                filters_inserted: outcome.stats.filters_inserted,
+                rules_elided: outcome.stats.rules_elided,
+            },
+        });
+    }
+
+    let report = PermissionEvalReport {
+        config: options.config_path.display().to_string(),
+        rules_compiled: compiled.len(),
+        user_context: options.user_values,
+        queries: query_reports,
+    };
+
+    match options.output {
+        PermissionEvalOutput::Text => print_permission_eval_text(&report),
+        PermissionEvalOutput::Json => {
+            let json = serde_json::to_string_pretty(&report)
+                .map_err(|err| CliError::EvalPermissions(format!("serialize report: {err}")))?;
+            println!("{json}");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct PermissionEvalReport {
+    config: String,
+    rules_compiled: usize,
+    user_context: BTreeMap<String, UserValue>,
+    queries: Vec<PermissionQueryEvalReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct PermissionQueryEvalReport {
+    query: String,
+    canonical_before: String,
+    canonical_after: String,
+    stats: PermissionEvalStats,
+}
+
+#[derive(Debug, Serialize)]
+struct PermissionEvalStats {
+    base_tables_visited: usize,
+    filters_inserted: usize,
+    rules_elided: usize,
+}
+
+fn print_permission_eval_text(report: &PermissionEvalReport) {
+    println!("permission evaluation: ok");
+    println!("config: {}", report.config);
+    println!("rules_compiled: {}", report.rules_compiled);
+    println!("user_context:");
+    if report.user_context.is_empty() {
+        println!("  <empty>");
+    } else {
+        for (field, value) in &report.user_context {
+            println!("  {field} = {}", user_value_label(value));
+        }
+    }
+
+    for (index, query) in report.queries.iter().enumerate() {
+        if report.queries.len() > 1 {
+            println!("\nquery {}:", index + 1);
+        } else {
+            println!("\nquery:");
+        }
+        println!("  {}", query.query);
+        println!("canonical_before:");
+        println!("  {}", query.canonical_before);
+        println!("canonical_after:");
+        println!("  {}", query.canonical_after);
+        println!(
+            "stats: base_tables_visited={} filters_inserted={} rules_elided={}",
+            query.stats.base_tables_visited, query.stats.filters_inserted, query.stats.rules_elided
+        );
+    }
+}
+
+fn user_value_label(value: &UserValue) -> String {
+    match value {
+        UserValue::Bool(value) => format!("bool:{value}"),
+        UserValue::Int(value) => format!("int:{value}"),
+        UserValue::Float(value) => format!("float:{value}"),
+        UserValue::Text(value) => format!("text:{value:?}"),
+        UserValue::Timestamp(value) => format!("timestamp:{value:?}"),
+        UserValue::Null => "null".to_owned(),
+    }
+}
+
+fn parse_permission_eval_options(rest: &[String]) -> Result<PermissionEvalOptions, CliError> {
+    if rest
+        .first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        print_permissions_help();
+        return Err(CliError::Usage(
+            "permissions eval help requested".to_owned(),
+        ));
+    }
+    let config_path = rest
+        .first()
+        .map(PathBuf::from)
+        .ok_or_else(|| CliError::Usage("permissions eval: expected a config path".to_owned()))?;
+    let config = read_config(&config_path)?;
+    let mut user_values = BTreeMap::new();
+    let mut queries = Vec::new();
+    let mut output = PermissionEvalOutput::Text;
+    let mut iter = rest[1..].iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--query" => queries.push(next_arg(arg, iter.next())?),
+            "--query-file" => {
+                let path = PathBuf::from(next_arg(arg, iter.next())?);
+                let query = fs::read_to_string(&path).map_err(|err| {
+                    CliError::EvalPermissions(format!(
+                        "read query file '{}': {err}",
+                        path.display()
+                    ))
+                })?;
+                queries.push(query);
+            }
+            "--user" => {
+                let assignment = next_arg(arg, iter.next())?;
+                parse_user_assignment(
+                    &assignment,
+                    &config.permissions.user_schema,
+                    &mut user_values,
+                )?;
+            }
+            "--user-json" => {
+                let raw = next_arg(arg, iter.next())?;
+                parse_user_json(&raw, &config.permissions.user_schema, &mut user_values)?;
+            }
+            "--format" => {
+                output = parse_permission_eval_output(&next_arg(arg, iter.next())?)?;
+            }
+            "--json" => output = PermissionEvalOutput::Json,
+            "--help" | "-h" => {
+                print_permissions_help();
+                return Err(CliError::Usage(
+                    "permissions eval help requested".to_owned(),
+                ));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "permissions eval: unknown option '{other}'"
+                )));
+            }
+        }
+    }
+
+    if queries.is_empty() {
+        return Err(CliError::Usage(
+            "permissions eval: expected at least one --query or --query-file".to_owned(),
+        ));
+    }
+
+    Ok(PermissionEvalOptions {
+        config_path,
+        queries,
+        user_values,
+        output,
+    })
+}
+
+fn next_arg(flag: &str, value: Option<&String>) -> Result<String, CliError> {
+    value
+        .cloned()
+        .ok_or_else(|| CliError::Usage(format!("{flag}: expected a value")))
+}
+
+fn parse_permission_eval_output(value: &str) -> Result<PermissionEvalOutput, CliError> {
+    match value {
+        "text" => Ok(PermissionEvalOutput::Text),
+        "json" => Ok(PermissionEvalOutput::Json),
+        other => Err(CliError::Usage(format!(
+            "permissions eval: unknown --format '{other}' (expected text or json)"
+        ))),
+    }
+}
+
+fn parse_user_assignment(
+    assignment: &str,
+    schema: &BTreeMap<String, String>,
+    output: &mut BTreeMap<String, UserValue>,
+) -> Result<(), CliError> {
+    let (field, raw_value) = assignment.split_once('=').ok_or_else(|| {
+        CliError::Usage(format!(
+            "permissions eval: --user value must be field=value, got '{assignment}'"
+        ))
+    })?;
+    if field.is_empty() {
+        return Err(CliError::Usage(
+            "permissions eval: --user field name cannot be empty".to_owned(),
+        ));
+    }
+    let value = parse_user_value(field, raw_value, schema)?;
+    output.insert(field.to_owned(), value);
+    Ok(())
+}
+
+fn parse_user_json(
+    raw: &str,
+    schema: &BTreeMap<String, String>,
+    output: &mut BTreeMap<String, UserValue>,
+) -> Result<(), CliError> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|err| CliError::EvalPermissions(format!("parse --user-json: {err}")))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| CliError::EvalPermissions("--user-json must be a JSON object".to_owned()))?;
+
+    for (field, value) in object {
+        let user_value = parse_json_user_value(field, value, schema)?;
+        output.insert(field.clone(), user_value);
+    }
+    Ok(())
+}
+
+fn parse_json_user_value(
+    field: &str,
+    value: &serde_json::Value,
+    schema: &BTreeMap<String, String>,
+) -> Result<UserValue, CliError> {
+    if value.is_null() {
+        return Ok(UserValue::Null);
+    }
+    match schema_type(field, schema)? {
+        ColumnType::Bool => value
+            .as_bool()
+            .map(UserValue::Bool)
+            .ok_or_else(|| user_value_type_error(field, "boolean", value)),
+        ColumnType::Int => value
+            .as_i64()
+            .map(UserValue::Int)
+            .ok_or_else(|| user_value_type_error(field, "integer", value)),
+        ColumnType::Float => value
+            .as_f64()
+            .map(UserValue::Float)
+            .ok_or_else(|| user_value_type_error(field, "number", value)),
+        ColumnType::Text => value
+            .as_str()
+            .map(|value| UserValue::Text(value.to_owned()))
+            .ok_or_else(|| user_value_type_error(field, "string", value)),
+        ColumnType::Timestamp => value
+            .as_str()
+            .map(|value| UserValue::Timestamp(value.to_owned()))
+            .ok_or_else(|| user_value_type_error(field, "string timestamp", value)),
+        ColumnType::Unknown => Err(CliError::EvalPermissions(format!(
+            "unknown user-context type for field '{field}'"
+        ))),
+    }
+}
+
+fn user_value_type_error(field: &str, expected: &str, value: &serde_json::Value) -> CliError {
+    CliError::EvalPermissions(format!(
+        "user field '{field}' expects {expected}, got {value}"
+    ))
+}
+
+fn parse_user_value(
+    field: &str,
+    raw_value: &str,
+    schema: &BTreeMap<String, String>,
+) -> Result<UserValue, CliError> {
+    if raw_value.eq_ignore_ascii_case("null") {
+        return Ok(UserValue::Null);
+    }
+
+    match schema_type(field, schema)? {
+        ColumnType::Bool => match raw_value {
+            "true" => Ok(UserValue::Bool(true)),
+            "false" => Ok(UserValue::Bool(false)),
+            other => Err(CliError::EvalPermissions(format!(
+                "user field '{field}' expects bool, got '{other}'"
+            ))),
+        },
+        ColumnType::Int => raw_value.parse::<i64>().map(UserValue::Int).map_err(|_| {
+            CliError::EvalPermissions(format!(
+                "user field '{field}' expects int, got '{raw_value}'"
+            ))
+        }),
+        ColumnType::Float => raw_value.parse::<f64>().map(UserValue::Float).map_err(|_| {
+            CliError::EvalPermissions(format!(
+                "user field '{field}' expects float, got '{raw_value}'"
+            ))
+        }),
+        ColumnType::Text => Ok(UserValue::Text(raw_value.to_owned())),
+        ColumnType::Timestamp => Ok(UserValue::Timestamp(raw_value.to_owned())),
+        ColumnType::Unknown => Err(CliError::EvalPermissions(format!(
+            "unknown user-context type for field '{field}'"
+        ))),
+    }
+}
+
+fn schema_type(field: &str, schema: &BTreeMap<String, String>) -> Result<ColumnType, CliError> {
+    let raw_type = schema.get(field).ok_or_else(|| {
+        CliError::EvalPermissions(format!(
+            "user field '{field}' is not declared in [permissions.user_schema]"
+        ))
+    })?;
+    parse_column_type(raw_type).map_err(CliError::EvalPermissions)
 }
 
 #[derive(Serialize)]
@@ -1068,5 +1482,101 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn permissions_eval_parses_typed_user_assignments() {
+        let schema = BTreeMap::from([
+            ("id".to_owned(), "int".to_owned()),
+            ("is_admin".to_owned(), "bool".to_owned()),
+            ("name".to_owned(), "text".to_owned()),
+        ]);
+        let mut values = BTreeMap::new();
+
+        parse_user_assignment("id=42", &schema, &mut values).expect("id should parse");
+        parse_user_assignment("is_admin=false", &schema, &mut values).expect("bool should parse");
+        parse_user_json(r#"{"name":"Ada"}"#, &schema, &mut values)
+            .expect("JSON user context should parse");
+
+        assert_eq!(values.get("id"), Some(&UserValue::Int(42)));
+        assert_eq!(values.get("is_admin"), Some(&UserValue::Bool(false)));
+        assert_eq!(values.get("name"), Some(&UserValue::Text("Ada".to_owned())));
+    }
+
+    #[test]
+    fn permissions_eval_rejects_unknown_user_field() {
+        let schema = BTreeMap::from([("id".to_owned(), "int".to_owned())]);
+        let mut values = BTreeMap::new();
+
+        let result = parse_user_assignment("org_id=7", &schema, &mut values);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn permissions_eval_options_support_json_output_and_repeated_queries() {
+        let config_path = write_temp_permissions_config("options", "");
+        let options = parse_permission_eval_options(&[
+            config_path.display().to_string(),
+            "--query".to_owned(),
+            "SELECT id FROM posts".to_owned(),
+            "--query".to_owned(),
+            "SELECT id FROM authors".to_owned(),
+            "--user".to_owned(),
+            "id=42".to_owned(),
+            "--json".to_owned(),
+        ])
+        .expect("permissions eval options should parse");
+
+        assert_eq!(options.config_path, config_path);
+        assert_eq!(options.queries.len(), 2);
+        assert_eq!(options.user_values.get("id"), Some(&UserValue::Int(42)));
+        assert_eq!(options.output, PermissionEvalOutput::Json);
+
+        let _ = std::fs::remove_file(options.config_path);
+    }
+
+    #[test]
+    fn permissions_eval_runs_rewriter_against_query() {
+        let config_path = write_temp_permissions_config(
+            "rewrite",
+            r#"
+[[permissions.rules]]
+name = "posts_owner"
+table = "posts"
+mode = "row_visibility"
+predicate = "author_id = $user.id"
+"#,
+        );
+
+        let result = cmd_permissions_eval(&[
+            config_path.display().to_string(),
+            "--query".to_owned(),
+            "SELECT id FROM posts".to_owned(),
+            "--user".to_owned(),
+            "id=42".to_owned(),
+        ]);
+
+        assert!(result.is_ok());
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    fn write_temp_permissions_config(name: &str, rules: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "palimpsest-cli-{name}-{}-{}.toml",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let content = format!(
+            r#"
+[permissions.user_schema]
+id = "int"
+is_admin = "bool"
+name = "text"
+{rules}
+"#
+        );
+        std::fs::write(&path, content).expect("temp config should be writable");
+        path
     }
 }
