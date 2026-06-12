@@ -34,21 +34,13 @@ version="$(
     | cut -d'"' -f4
 )"
 
-echo "==> Running dry-runs for Palimpsest CLI release v${version}..."
-for package in "${PACKAGES[@]}"; do
-  echo ""
-  echo "==> Dry-run: ${package}"
-  cargo publish -p "${package}" --dry-run
-done
-
-echo ""
 echo "The following crates will be published to crates.io in dependency order:"
 for package in "${PACKAGES[@]}"; do
   echo "  - ${package} v${version}"
 done
 
 echo ""
-read -r -p "Dry-runs passed. Publish these crates to crates.io? [y/N] " confirm
+read -r -p "Dry-run and publish these crates to crates.io? [y/N] " confirm
 if [[ "${confirm}" != [yY] ]]; then
   echo "Aborted."
   exit 0
@@ -76,6 +68,10 @@ publish_with_retry() {
 }
 
 for package in "${PACKAGES[@]}"; do
+  echo ""
+  echo "==> Dry-run: ${package}"
+  cargo publish -p "${package}" --dry-run
+
   publish_with_retry "${package}"
 done
 
