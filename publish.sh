@@ -14,6 +14,7 @@ PACKAGES=(
   palimpsest-paas-core
   palimpsest-cli
 )
+PUBLISH_RETRY_SLEEP_SECONDS="${PUBLISH_RETRY_SLEEP_SECONDS:-90}"
 
 if [[ ! -f Cargo.toml || ! -d crates/palimpsest-cli ]]; then
   echo "Error: must be run from the repository root"
@@ -57,17 +58,35 @@ publish_with_retry() {
       return 0
     fi
 
+    if crate_version_published "${package}"; then
+      echo "${package} v${version} is already available on crates.io; continuing."
+      return 0
+    fi
+
     if [[ "${attempt}" == "5" ]]; then
       echo "Error: failed to publish ${package}"
       return 1
     fi
 
-    echo "Publish failed. Waiting for crates.io index propagation before retrying..."
-    sleep 20
+    echo "Publish failed. Waiting ${PUBLISH_RETRY_SLEEP_SECONDS}s before retrying..."
+    sleep "${PUBLISH_RETRY_SLEEP_SECONDS}"
   done
 }
 
+crate_version_published() {
+  local package="$1"
+
+  cargo search "${package}" --limit 1 2>/dev/null \
+    | grep -Eq "^${package} = \"${version}\""
+}
+
 for package in "${PACKAGES[@]}"; do
+  if crate_version_published "${package}"; then
+    echo ""
+    echo "==> Skipping ${package}; v${version} is already published."
+    continue
+  fi
+
   echo ""
   echo "==> Dry-run: ${package}"
   cargo publish -p "${package}" --dry-run
