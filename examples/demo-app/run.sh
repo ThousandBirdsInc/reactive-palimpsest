@@ -10,18 +10,21 @@
 #   ./run.sh --logs      # tail logs of already-running containers
 #   ./run.sh --down      # stop and remove containers
 #   ./run.sh --help
+# Defaults:
+#   WEB_PORT=18080 API_PORT=13017 GRPC_PORT=56051
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
-WEB_PORT=8080
-API_PORT=3000
-GRPC_PORT=50051
+WEB_PORT="${WEB_PORT:-18080}"
+API_PORT="${API_PORT:-13017}"
+GRPC_PORT="${GRPC_PORT:-56051}"
+export WEB_PORT API_PORT GRPC_PORT
 
 usage() {
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 }
 

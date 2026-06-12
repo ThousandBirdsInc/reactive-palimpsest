@@ -8,16 +8,21 @@
 # This starts:
 # - control-plane PostgreSQL 18 through Docker Compose
 # - Flyway migrations
-# - SQL-backed Rust control-plane API on 127.0.0.1:8088
+# - SQL-backed Rust control-plane API on Starling's control-plane-api URL
 # - a local Rust node-agent poll loop for managed Postgres commands
-# - the React PaaS UI on 127.0.0.1:8090
+# - the React PaaS UI on Starling's paas-ui URL
 
-CONTROL_PLANE_URL = "http://127.0.0.1:8088"
-DATABASE_URL = "postgres://palimpsest_control:palimpsest_control@127.0.0.1:54330/palimpsest_control"
+CONTROL_PLANE_POSTGRES_PORT = starling_port("control-plane-postgres", preferred=54330)
+AGENT_FIRST_PORT = starling_port("node-agent-managed-postgres", preferred=56000)
+SMOKE_POSTGRES_PORT = starling_port("paas-smoke-postgres", preferred=54331)
+SMOKE_API_PORT = starling_port("paas-smoke-api", preferred=8188)
+SMOKE_AGENT_FIRST_PORT = starling_port("paas-smoke-managed-postgres", preferred=57000)
+
+CONTROL_PLANE_URL = "${STARLING_CONTROL_PLANE_API_URL:-http://127.0.0.1:18088}"
+DATABASE_URL = "postgres://palimpsest_control:palimpsest_control@127.0.0.1:" + CONTROL_PLANE_POSTGRES_PORT + "/palimpsest_control"
 AGENT_HOST_ID = "local-dev-host"
 AGENT_RUNTIME_ROOT = "/tmp/palimpsest-paas-tilt"
 AGENT_OBJECT_STORE = "/tmp/palimpsest-paas-tilt-object-store"
-AGENT_FIRST_PORT = "56000"
 
 CONTROL_PLANE_API_DEPS = [
     "../Cargo.toml",
@@ -44,13 +49,19 @@ PAAS_SMOKE_DEPS = [
 
 local_resource(
     "control-plane-postgres",
-    cmd="docker compose -f control-plane/docker-compose.yaml up -d control-plane-postgres",
+    cmd=(
+        "PALIMPSEST_PAAS_CONTROL_PLANE_POSTGRES_PORT=" + CONTROL_PLANE_POSTGRES_PORT + " " +
+        "docker compose -f control-plane/docker-compose.yaml up -d control-plane-postgres"
+    ),
     deps=["control-plane/docker-compose.yaml"],
 )
 
 local_resource(
     "control-plane-migrations",
-    cmd="docker compose -f control-plane/docker-compose.yaml run --rm flyway",
+    cmd=(
+        "PALIMPSEST_PAAS_CONTROL_PLANE_POSTGRES_PORT=" + CONTROL_PLANE_POSTGRES_PORT + " " +
+        "docker compose -f control-plane/docker-compose.yaml run --rm flyway"
+    ),
     deps=["control-plane/flyway.conf", "control-plane/migrations"],
     resource_deps=["control-plane-postgres"],
 )
@@ -61,12 +72,11 @@ local_resource(
         "cd .. && " +
         "PALIMPSEST_PAAS_SECRET_PROVIDER=local-dev " +
         "cargo run -p palimpsest-paas-control-plane -- " +
-        "serve-sql-api 127.0.0.1:8088 " +
+        "serve-sql-api ${HOST}:${PORT} " +
         DATABASE_URL
     ),
     deps=CONTROL_PLANE_API_DEPS,
     resource_deps=["control-plane-migrations"],
-    links=[CONTROL_PLANE_URL + "/metrics"],
 )
 
 local_resource(
@@ -74,7 +84,7 @@ local_resource(
     cmd=r"""
 set -eu
 
-api="http://127.0.0.1:8088"
+api="${STARLING_CONTROL_PLANE_API_URL:-http://127.0.0.1:18088}"
 
 echo "waiting for control-plane API at ${api}"
 attempts=0
@@ -151,7 +161,11 @@ local_resource(
 
 local_resource(
     "paas-ui",
-    serve_cmd="cd ui && npm run dev -- --host 127.0.0.1",
+    serve_cmd=(
+        "cd ui && " +
+        "VITE_PAAS_API_PROXY_TARGET=${STARLING_CONTROL_PLANE_API_URL:-http://127.0.0.1:18088} " +
+        "npm run dev -- --host ${HOST} --port ${PORT} --strictPort"
+    ),
     deps=[
         "ui/index.html",
         "ui/package.json",
@@ -161,7 +175,6 @@ local_resource(
         "ui/src",
     ],
     resource_deps=["paas-ui-deps", "control-plane-api"],
-    links=["http://127.0.0.1:8090/"],
 )
 
 local_resource(
@@ -170,10 +183,10 @@ local_resource(
         "COMPOSE_PROJECT_NAME=palimpsest-paas-smoke " +
         "PALIMPSEST_PAAS_CONTROL_PLANE_POSTGRES_CONTAINER=palimpsest-control-plane-postgres-smoke " +
         "PALIMPSEST_PAAS_CONTROL_PLANE_POSTGRES_VOLUME=palimpsest-control-plane-postgres-smoke-data " +
-        "PALIMPSEST_PAAS_CONTROL_PLANE_POSTGRES_PORT=54331 " +
-        "PALIMPSEST_PAAS_API_ADDR=127.0.0.1:8188 " +
-        "PALIMPSEST_PAAS_DATABASE_URL=postgres://palimpsest_control:palimpsest_control@127.0.0.1:54331/palimpsest_control " +
-        "PALIMPSEST_PAAS_AGENT_FIRST_PORT=57000 " +
+        "PALIMPSEST_PAAS_CONTROL_PLANE_POSTGRES_PORT=" + SMOKE_POSTGRES_PORT + " " +
+        "PALIMPSEST_PAAS_API_ADDR=127.0.0.1:" + SMOKE_API_PORT + " " +
+        "PALIMPSEST_PAAS_DATABASE_URL=postgres://palimpsest_control:palimpsest_control@127.0.0.1:" + SMOKE_POSTGRES_PORT + "/palimpsest_control " +
+        "PALIMPSEST_PAAS_AGENT_FIRST_PORT=" + SMOKE_AGENT_FIRST_PORT + " " +
         "PALIMPSEST_PAAS_AGENT_RUNTIME_ROOT=/tmp/palimpsest-paas-smoke-tilt " +
         "PALIMPSEST_PAAS_BACKUP_OBJECT_STORE_DIR=/tmp/palimpsest-paas-smoke-tilt-object-store " +
         "PALIMPSEST_PAAS_BILLING_EXPORT_DIR=/tmp/palimpsest-paas-smoke-tilt-billing-exports " +

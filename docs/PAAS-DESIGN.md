@@ -112,7 +112,11 @@ The dashboard is the primary operator UI. It should include:
   query execution on managed PostgreSQL 18+ clusters through the Rust control
   plane. Queries are limited to one SELECT/WITH statement and execute through
   `sqlx` in a read-only transaction.
-- Permission rule editor with dry-run and sample user contexts.
+- Permission editor covering two models: a per-environment
+  `palimpsest-permissions` Rule DSL document edited in a code editor and run
+  through a verifier that compiles the rules against a catalog (a built-in demo
+  catalog or a live cluster schema) before activation, and per-table query
+  permission policies with dry-run against sample user contexts.
 - Query explorer that shows canonical form, explain output, sharing behavior,
   current result size, and estimated cost.
 - API-key, JWT issuer, and team access configuration backed by scoped control
@@ -125,6 +129,12 @@ The dashboard is the primary operator UI. It should include:
   control plane, supports scoped list/detail and dry-run APIs, and exposes a
   query-inspection endpoint that returns canonical SQL plus PostgreSQL
   `EXPLAIN (FORMAT JSON)` cost metadata without returning row data.
+  A separate per-environment Rule DSL document (`permission_rule_documents`)
+  holds the `palimpsest-permissions` TOML config; `POST /v1/permissions/verify`
+  compiles it with `palimpsest_permissions::{parse_config, compile_rules}`
+  against a catalog and reports per-rule compilation, user-context fields, and
+  tautology elision. Verification is currently an explicit author-time check
+  rather than a save-time gate.
 - Live subscriptions view with lag, fanout, resync reasons, and slow clients.
 - Metrics, logs, traces, incidents, deploy history, and audit events.
   Managed Postgres status views should include durable operation history and
@@ -886,6 +896,10 @@ Minimum metadata tables:
 | `config_versions` | Versioned config bundle, validation result, deployment status. |
 | `node_host_agent_credentials` | Per-host node-agent signing credentials, rotation/revocation state, encrypted secret refs, and last-used metadata. |
 | `node_host_hardening_checks` | Per-host hardening evidence for image, OS, kernel, PostgreSQL 18+ support floor, runtime, disk encryption, firewall, unattended upgrades, and patch freshness. |
+| `node_host_observed_clusters` | Per-host observed managed Postgres clusters (data directory, running state) reported on node-agent heartbeat for desired-vs-observed drift detection. |
+| `node_host_observed_sync_deployments` | Per-host observed SyncDeployments and running state reported on node-agent heartbeat. |
+| `permission_rule_documents` | One per-environment `palimpsest-permissions` DSL (TOML) document authored in the UI and compiled by the verifier against a catalog. |
+| `query_permission_policies` | Per-table read/subscribe predicate policies with draft/active status and sample-context dry-run. |
 | `api_keys` | Control-plane and server-side keys. |
 | `jwt_issuers` | Accepted client auth issuers. |
 | `gateway_routes` | Hosted sync endpoint hostnames, upstreams, TLS policy, and per-environment limits. |

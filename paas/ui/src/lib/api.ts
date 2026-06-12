@@ -18,6 +18,11 @@ import type {
   ManagedPostgresEndpoint,
   NodeHost,
   Organization,
+  PermissionRuleDocument,
+  PermissionVerifyCatalogTable,
+  PermissionVerifyResponse,
+  QueryPermissionPolicy,
+  QueryPermissionPolicyDryRunResponse,
   PitrCheck,
   Project,
   QuotaAlert,
@@ -174,15 +179,56 @@ export class PaasApi {
       "domains",
     );
   }
-  listAuditEvents(limit = 100): Promise<AuditEvent[]> {
+  listAuditEvents(limit = 100, environmentId?: string): Promise<AuditEvent[]> {
     const params = new URLSearchParams({
-      environment_id: this.scope.environmentId,
+      environment_id: environmentId ?? this.scope.environmentId,
       limit: String(limit),
     });
     return this.list(`/v1/audit-events?${params.toString()}`, "events");
   }
   getMetricsText(): Promise<string> {
     return this.getText("/metrics").catch(() => "");
+  }
+
+  // ---- permission rule DSL + verifier ----
+
+  getPermissionRuleDocument(): Promise<PermissionRuleDocument | null> {
+    return this.getJson<PermissionRuleDocument>(
+      `/v1/environments/${encodeURIComponent(this.scope.environmentId)}/permission-rule-document`,
+    ).catch(() => null);
+  }
+  savePermissionRuleDocument(dsl: string): Promise<PermissionRuleDocument> {
+    return this.putJson(
+      `/v1/environments/${encodeURIComponent(this.scope.environmentId)}/permission-rule-document`,
+      { dsl },
+    ) as Promise<PermissionRuleDocument>;
+  }
+  verifyPermissions(
+    dsl: string,
+    catalog?: PermissionVerifyCatalogTable[],
+  ): Promise<PermissionVerifyResponse> {
+    return this.postJson("/v1/permissions/verify", {
+      dsl,
+      catalog: catalog && catalog.length > 0 ? catalog : null,
+    }) as Promise<PermissionVerifyResponse>;
+  }
+  listQueryPermissionPolicies(): Promise<QueryPermissionPolicy[]> {
+    return this.list(
+      `/v1/query-permission-policies?environment_id=${encodeURIComponent(this.scope.environmentId)}`,
+      "policies",
+    );
+  }
+  upsertQueryPermissionPolicy(policy: QueryPermissionPolicy): Promise<QueryPermissionPolicy> {
+    return this.postJson("/v1/query-permission-policies", policy) as Promise<QueryPermissionPolicy>;
+  }
+  dryRunQueryPermissionPolicy(
+    policyId: string,
+    sampleContext?: Record<string, unknown>,
+  ): Promise<QueryPermissionPolicyDryRunResponse> {
+    return this.postJson(
+      `/v1/query-permission-policies/${encodeURIComponent(policyId)}/dry-run`,
+      { sample_context: sampleContext ?? null },
+    ) as Promise<QueryPermissionPolicyDryRunResponse>;
   }
 
   // ---- cluster mutations ----
@@ -254,6 +300,18 @@ export class PaasApi {
   private async postJson(path: string, body: unknown): Promise<unknown> {
     const response = await fetch(this.url(path), {
       method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "x-actor-id": this.scope.actorId,
+      },
+      body: JSON.stringify(body),
+    });
+    return this.readJson(response);
+  }
+  private async putJson(path: string, body: unknown): Promise<unknown> {
+    const response = await fetch(this.url(path), {
+      method: "PUT",
       headers: {
         accept: "application/json",
         "content-type": "application/json",

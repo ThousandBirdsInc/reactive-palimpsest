@@ -1924,6 +1924,8 @@ dependencies = [
  "axum",
  "base64",
  "palimpsest-paas-core",
+ "palimpsest-permissions",
+ "palimpsest-sql",
  "rcgen",
  "ring",
  "rustls",

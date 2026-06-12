@@ -1,0 +1,28 @@
+name: Setup protoc
+description: Install the Protocol Buffers compiler used by prost-build.
+runs:
+  using: composite
+  steps:
+    - name: Install protoc
+      shell: bash
+      run: |
+        if command -v protoc >/dev/null 2>&1; then
+          protoc --version
+          exit 0
+        fi
+
+        case "$RUNNER_OS" in
+          Linux)
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+            ;;
+          macOS)
+            brew install protobuf
+            ;;
+          *)
+            echo "::error::Unsupported runner OS for protoc installation: $RUNNER_OS"
+            exit 1
+            ;;
+        esac
+
+        protoc --version

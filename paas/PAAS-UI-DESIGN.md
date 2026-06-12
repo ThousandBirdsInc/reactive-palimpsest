@@ -1,6 +1,7 @@
 # Palimpsest PaaS Operator UI Design
 
-**Status:** Redesigned (v2)
+**Status:** Redesigned (v2); updated to match shipped console (Sync,
+Permissions, SQL console, and Clones pages have landed since the v2 rewrite).
 **Scope:** Routed multi-page console for operating the Palimpsest PaaS
 control plane, with a path to first-class live updates via Palimpsest itself.
 
@@ -43,6 +44,8 @@ These overlap heavily, so the UI is **one app with shared IA**, not three
 │ Incidents│                                                               │
 │ Quota    │                                                               │
 │ Routes   │                                                               │
+│ Sync     │                                                               │
+│ Perms    │                                                               │
 │ Audit    │                                                               │
 │ Settings │                                                               │
 └──────────┴───────────────────────────────────────────────────────────────┘
@@ -64,13 +67,37 @@ These overlap heavily, so the UI is **one app with shared IA**, not three
 |---|---|---|
 | `/` | Overview | env health, counts, recent audit, incidents, capacity |
 | `/clusters` | Clusters list | `managed_postgres_clusters` |
-| `/clusters/:id` | Cluster detail (tabs) | one cluster + its backups/PITR/roles/operations/audit |
-| `/hosts` | Hosts | `node_hosts`, capacity, hardening checks |
+| `/clusters/:id` | Cluster detail (tabs) | one cluster + its SQL console, clones, backups, PITR, roles, operations, audit |
+| `/hosts` | Hosts | `node_hosts`, capacity, hardening checks, observed clusters/deployments |
 | `/incidents` | Incidents | `incidents` |
 | `/quota` | Quota | `quota_policies` + `quota_alerts` |
 | `/routes` | Routes | `gateway_routes` + `database_proxy_routes` + `domains` |
+| `/sync-deployments` | Sync | `sync_deployments` (deploy state + history) |
+| `/permissions` | Permissions | `permission_rule_documents` (Rule DSL) + `query_permission_policies` |
 | `/audit` | Audit log | `audit_events` (filterable) |
 | `/settings` | Settings | api keys, sso, webhooks, secret-encryption-keys |
+
+The nav order itself is owned by `src/shell/nav.ts` (`NAV_ITEMS`), and the
+cluster-detail tab order by `CLUSTER_TABS` in the same file, so the shell,
+command palette, and pages stay in sync from one source.
+
+The **Cluster detail** tabs are: Overview, **SQL** (read-only console +
+schema browser), **Clones** (database-clone / restore-drill history), Backups,
+PITR, Roles, Operations, Audit.
+
+The **Permissions** page hosts two related-but-distinct models as tabs:
+
+- **Rule DSL** — a single `palimpsest-permissions` TOML document per
+  environment, edited in a syntax-highlighted code editor and run through the
+  verifier (`POST /v1/permissions/verify`), which compiles the rules against a
+  catalog (a built-in demo catalog or a live cluster schema) and reports
+  per-rule compilation, user-context fields, and tautology elision. The
+  document is persisted independently of verification via the
+  permission-rule-document API; verification is an explicit author-time check,
+  not yet a save-time gate.
+- **Query policies** — individual per-table read/subscribe predicates stored as
+  `query_permission_policies` rows, each with a draft/active status and a
+  dry-run check against a sample JSON user context.
 
 Each detail page owns the entire vertical slice for that resource. Today's v1
 "resource panels" become **summary widgets on Overview that link into their
@@ -157,7 +184,7 @@ The redesign is shaped to make step 3 a one-file change per resource.
 
 ## 7. API contract (used today)
 
-Default local API base: `/api`, proxied by Vite to `http://127.0.0.1:8088`.
+Default local API base: `/api`, proxied by Vite to `http://127.0.0.1:18088`.
 
 REST endpoints the UI reads:
 
@@ -167,8 +194,17 @@ REST endpoints the UI reads:
 - `GET /v1/managed-postgres/clusters/{id}` (+ `/operations`, `/backups`,
   `/pitr-checks`, `/failovers`, `/standbys`, `/restores`, `/restore-drills`,
   `/agent-commands`, `/runtime-checks`)
-- `GET /v1/node-hosts` (+ `/hardening-checks`, `/commands`)
+- `GET /v1/managed-postgres/clusters/{id}/schema` and
+  `POST /v1/managed-postgres/clusters/{id}/sql-console/query` — SQL tab
+- `POST /v1/managed-postgres/clusters/{id}/database-clones` — Clones tab
+- `GET /v1/node-hosts` (+ `/hardening-checks`, `/commands`) — host detail also
+  surfaces observed clusters/sync-deployments reported on heartbeat
 - `GET /v1/sync-deployments?environment_id=…`
+- `GET`/`PUT /v1/environments/{env}/permission-rule-document` and
+  `POST /v1/permissions/verify` — Permissions · Rule DSL
+- `GET /v1/query-permission-policies?environment_id=…`,
+  `POST /v1/query-permission-policies`, and
+  `POST /v1/query-permission-policies/{id}/dry-run` — Permissions · Query policies
 - `GET /v1/incidents?environment_id=…`
 - `GET /v1/quota-policies`, `/v1/quota-alerts?environment_id=…`
 - `GET /v1/gateway-routes?environment_id=…`, `/v1/database-proxy-routes?environment_id=…`,
@@ -185,16 +221,26 @@ approve/revoke. All carry `x-actor-id` from the session.
 - Authentication / login. The UI today assumes the API is reachable; the
   session and `x-actor-id` are stubbed. Wire up API-key login + actor display
   before going past internal use.
-- Schema browser + SQL console. The endpoints exist
-  (`/managed-postgres/clusters/{id}/sql-console/query`,
-  `/schema`, `/query-explorer/inspect`); UI is a deferred screen behind
-  Cluster detail.
 - Certificate/ACME workflow UI.
 - Form flows for backup retention, IP allowlist, maintenance windows,
   static egress, domains.
 - Prometheus-backed metric charts (the `/metrics` scrape today gives one
   scalar at a time; real charts need a metrics backend).
 - Mobile / narrow viewport: explicitly out of scope. Console is desktop.
+
+### Shipped since the v2 redesign (no longer out of scope)
+
+- **Schema browser + read-only SQL console** as the Cluster detail **SQL** tab,
+  over `/schema` and `/sql-console/query`.
+- **Database clones / restore-drill history** as the Cluster detail **Clones**
+  tab.
+- **Permissions** page (Rule DSL editor + verifier, and Query policies with
+  dry-run), backed by a shared `CodeEditor` component (`components/CodeEditor.tsx`)
+  with lightweight TOML/SQL highlighting in `lib/highlight.ts`.
+- **Sync** page for SyncDeployment state and history.
+
+The query-explorer `inspect` endpoint exists on the backend but is not yet a
+dedicated UI surface.
 
 ## 9. Local development
 
@@ -208,7 +254,7 @@ Run the SQL control plane separately:
 
 ```sh
 cargo run -p palimpsest-paas-control-plane -- serve-sql-api \
-  127.0.0.1:8088 \
+  127.0.0.1:18088 \
   postgres://palimpsest_control:palimpsest_control@127.0.0.1:54330/palimpsest_control
 ```
 
@@ -230,12 +276,14 @@ paas/ui/
     ├── shell/
     │   ├── AppShell.tsx         // sidebar + topbar + <Outlet/>
     │   ├── ScopePicker.tsx
-    │   └── CommandPalette.tsx
+    │   ├── CommandPalette.tsx
+    │   └── nav.ts               // NAV_ITEMS + CLUSTER_TABS (single source)
     ├── lib/
     │   ├── api.ts               // PaasApi (one-shot reads + mutations)
     │   ├── scope.ts             // useScope() context
     │   ├── state.ts             // stateTone() + status labels
     │   ├── format.ts            // bytes, durations, relative time
+    │   ├── highlight.ts         // highlightToml() / highlightSql()
     │   └── live/
     │       ├── index.ts         // usePaasResource()
     │       ├── polling.ts       // PollingLiveSource
@@ -244,11 +292,15 @@ paas/ui/
     ├── pages/
     │   ├── Overview.tsx
     │   ├── ClustersList.tsx
-    │   ├── ClusterDetail.tsx    // tabs: Overview/Backups/PITR/Roles/Ops/Audit
+    │   ├── ClusterDetail.tsx    // tabs: Overview/SQL/Clones/Backups/PITR/Roles/Operations/Audit
+    │   ├── ClusterConsole.tsx   // SQL tab: schema browser + read-only console
+    │   ├── ClusterClones.tsx    // Clones tab: clone / restore-drill history
     │   ├── Hosts.tsx
     │   ├── Incidents.tsx
     │   ├── Quota.tsx
     │   ├── Routes.tsx
+    │   ├── SyncDeployments.tsx
+    │   ├── Permissions.tsx      // tabs: Rule DSL (verifier) + Query policies
     │   ├── Audit.tsx
     │   └── Settings.tsx
     ├── components/
@@ -256,6 +308,7 @@ paas/ui/
     │   ├── StatePill.tsx
     │   ├── PageHeader.tsx
     │   ├── Empty.tsx
+    │   ├── CodeEditor.tsx       // highlighted textarea for TOML/SQL editing
     │   └── ConfirmButton.tsx    // wraps destructive actions
     └── types.ts
 ```

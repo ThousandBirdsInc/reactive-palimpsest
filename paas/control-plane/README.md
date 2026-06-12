@@ -14,13 +14,13 @@ The current `palimpsest-paas-control-plane` binary can start an in-memory HTTP
 API for local development:
 
 ```text
-cargo run -p palimpsest-paas-control-plane -- serve-api 127.0.0.1:8088
+cargo run -p palimpsest-paas-control-plane -- serve-api 127.0.0.1:18088
 ```
 
 It can also serve the same initial API surface from the durable SQL store:
 
 ```text
-cargo run -p palimpsest-paas-control-plane -- serve-sql-api 127.0.0.1:8088 postgres://user:pass@localhost:5432/palimpsest_control
+cargo run -p palimpsest-paas-control-plane -- serve-sql-api 127.0.0.1:18088 postgres://user:pass@localhost:5432/palimpsest_control
 ```
 
 Initial routes on both API variants:
@@ -467,7 +467,7 @@ After a host is registered, operators can rotate it onto a database-backed
 per-host signing key with:
 
 ```sh
-curl -X POST http://127.0.0.1:8088/v1/node-hosts/local-dev-host/agent-credentials
+curl -X POST http://127.0.0.1:18088/v1/node-hosts/local-dev-host/agent-credentials
 ```
 
 The response contains `key_id` and `signing_key_base64`; install them as

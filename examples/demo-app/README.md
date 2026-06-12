@@ -10,9 +10,9 @@ one long-lived connection.
 
 ## What You Get
 
-- React + Vite frontend served by nginx on `http://localhost:8080`.
-- Rust `axum` write API on `http://localhost:3000`.
-- Embedded Palimpsest gRPC SyncEngine on `localhost:50051`.
+- React + Vite frontend served by nginx on `http://localhost:18080`.
+- Rust `axum` write API on `http://localhost:13017`.
+- Embedded Palimpsest gRPC SyncEngine on `localhost:56051`.
 - Browser-compatible WebSocket bridge at `/ws/subscribe`.
 - In-memory `posts` table with create, publish/unpublish, and delete
   actions.
@@ -27,7 +27,7 @@ one long-lived connection.
 ```text
 Browser
   |
-  | http://localhost:8080
+  | http://localhost:18080
   v
 nginx web container
   |-- serves React + Vite + palimpsest-client-js WASM bundle
@@ -87,7 +87,7 @@ From this directory:
 Open:
 
 ```text
-http://localhost:8080
+http://localhost:18080
 ```
 
 The first run can take a few minutes because Docker builds the Rust
@@ -109,6 +109,10 @@ Use Ctrl-C in the foreground terminal to stop the stack.
 | `./run.sh --down` | Stop and remove the containers. |
 | `./run.sh --help` | Print usage. |
 
+By default the script maps the Docker services to less common host ports:
+`WEB_PORT=18080`, `API_PORT=13017`, and `GRPC_PORT=56051`. Set any of those
+environment variables before running the script to override them.
+
 You can also run Compose directly:
 
 ```sh
@@ -120,9 +124,9 @@ docker compose down
 
 | Port | Owner | Purpose |
 | --- | --- | --- |
-| `8080` | nginx web container | Browser UI and same-origin proxy. |
-| `3000` | Rust server | Write API and WebSocket bridge. |
-| `50051` | Rust server | Palimpsest gRPC SyncEngine. Not directly browseable. |
+| `18080` | nginx web container | Browser UI and same-origin proxy. |
+| `13017` | Rust server | Write API and WebSocket bridge. |
+| `56051` | Rust server | Palimpsest gRPC SyncEngine. Not directly browseable. |
 
 ## Using the App
 
@@ -145,7 +149,7 @@ The API speaks JSON.
 ### Health
 
 ```sh
-curl http://localhost:3000/api/health
+curl http://localhost:13017/api/health
 ```
 
 Response:
@@ -157,7 +161,7 @@ Response:
 ### List Posts
 
 ```sh
-curl http://localhost:3000/api/posts
+curl http://localhost:13017/api/posts
 ```
 
 Response:
@@ -171,7 +175,7 @@ Response:
 ### Create Post
 
 ```sh
-curl -X POST http://localhost:3000/api/posts \
+curl -X POST http://localhost:13017/api/posts \
   -H 'content-type: application/json' \
   -d '{"title":"Hello from curl","published":true}'
 ```
@@ -179,7 +183,7 @@ curl -X POST http://localhost:3000/api/posts \
 ### Update Publish State
 
 ```sh
-curl -X PATCH http://localhost:3000/api/posts/1 \
+curl -X PATCH http://localhost:13017/api/posts/1 \
   -H 'content-type: application/json' \
   -d '{"published":false}'
 ```
@@ -187,7 +191,7 @@ curl -X PATCH http://localhost:3000/api/posts/1 \
 ### Delete Post
 
 ```sh
-curl -X DELETE http://localhost:3000/api/posts/1
+curl -X DELETE http://localhost:13017/api/posts/1
 ```
 
 ## Frontend Subscriptions
@@ -369,9 +373,10 @@ Start Docker Desktop or the Docker daemon, then rerun:
 
 ### A port is already in use
 
-Stop the conflicting process or run the server locally with alternate
-addresses as shown in "Alternate Ports". The Compose file currently maps
-fixed host ports `8080`, `3000`, and `50051`.
+Stop the conflicting process, override `WEB_PORT`, `API_PORT`, or
+`GRPC_PORT` for Docker runs, or run the server locally with alternate
+addresses as shown in "Alternate Ports". The Compose file defaults to host
+ports `18080`, `13017`, and `56051`.
 
 ### The UI loads but never opens a subscription
 

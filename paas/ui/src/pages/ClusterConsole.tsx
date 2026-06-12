@@ -25,7 +25,9 @@ import {
 } from "lucide-react";
 import { useApi } from "../lib/scope";
 import { usePaasResource } from "../lib/live";
+import { highlightSql } from "../lib/highlight";
 import { Empty } from "../components/Empty";
+import { CodeEditor } from "../components/CodeEditor";
 import { ConfirmButton } from "../components/ConfirmButton";
 import type {
   ClusterOperation,
@@ -504,27 +506,26 @@ export function ClusterConsoleTab({ clusterId }: Props) {
               </button>
             </div>
           )}
-          <div className="sql-editor-wrap">
-            <textarea
-              ref={textareaRef}
-              className="sql-editor"
-              spellCheck={false}
-              value={sql}
-              onChange={onSqlChange}
-              onKeyDown={onKeyDown}
-              onBlur={() => window.setTimeout(closeCompletion, 120)}
-              onClick={() => closeCompletion()}
-              placeholder="SELECT 1;"
-              rows={8}
-            />
-            {completion.open && (
-              <CompletionMenu
-                completion={completion}
-                onHover={(active) => setCompletion((prev) => ({ ...prev, active }))}
-                onPick={applyCompletion}
-              />
-            )}
-          </div>
+          <CodeEditor
+            ref={textareaRef}
+            value={sql}
+            highlight={highlightSql}
+            onChange={onSqlChange}
+            onKeyDown={onKeyDown}
+            onBlur={() => window.setTimeout(closeCompletion, 120)}
+            onClick={() => closeCompletion()}
+            placeholder="SELECT 1;"
+            rows={8}
+            overlay={
+              completion.open ? (
+                <CompletionMenu
+                  completion={completion}
+                  onHover={(active) => setCompletion((prev) => ({ ...prev, active }))}
+                  onPick={applyCompletion}
+                />
+              ) : null
+            }
+          />
 
           {error && <div className="error-banner">{error}</div>}
 

@@ -27,6 +27,9 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
 
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+
       - name: Cache Cargo registry
         uses: actions/cache@v4
         with:

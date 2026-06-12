@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTROL_PLANE_DIR="$ROOT/paas/control-plane"
-API_ADDR="${PALIMPSEST_PAAS_API_ADDR:-127.0.0.1:8088}"
+API_ADDR="${PALIMPSEST_PAAS_API_ADDR:-127.0.0.1:18088}"
 API_URL="http://${API_ADDR}"
 DATABASE_URL="${PALIMPSEST_PAAS_DATABASE_URL:-postgres://palimpsest_control:palimpsest_control@127.0.0.1:54330/palimpsest_control}"
 export PALIMPSEST_PAAS_AGENT_HOST_ID="${PALIMPSEST_PAAS_AGENT_HOST_ID:-local-dev-host}"

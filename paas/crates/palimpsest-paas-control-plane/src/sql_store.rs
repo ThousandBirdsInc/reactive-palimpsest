@@ -30,17 +30,17 @@ use palimpsest_paas_core::{
     ManagedPostgresRuntimeCheck, ManagedPostgresStandby, ManagedPostgresStandbyCheck,
     ManagedPostgresSupportAccessSession, ManagedPostgresWalArchiveSegment, NodeAgentAction,
     NodeAgentBackupArtifact, NodeAgentCommand, NodeHost, NodeHostAgentCredential,
-    NodeHostAgentCredentialState, NodeHostHardeningCheck, NodeHostHardeningStatus,
-    NodeHostHeartbeat, NodeHostState, OperationKind, OperationRecord, OperationStatus,
-    Organization, PitrCheckStatus, PostgresVersion, Project, QueryPermissionOperation,
-    QueryPermissionPolicy, QueryPermissionPolicyStatus, QueuedNodeAgentCommand, QuotaAlert,
-    QuotaAlertState, QuotaEnforcement, QuotaPolicy, RateLimitPolicy, RestoreLifecycleState,
-    RuntimeCheckStatus, SecretEncryptionKey, SecretEncryptionKeyStatus, SecretRef,
-    SecretRewrapPlan, SecretRewrapPlanStatus, SsoIdentityProvider, SsoProviderKind,
-    SsoProviderStatus, StandbyCheckStatus, StandbyLifecycleState, StaticEgressIp,
-    StaticEgressIpStatus, SupportAccessStatus, SyncDeployment, SyncDeploymentLifecycleState,
-    TeamMembership, TeamRole, TlsPolicy, UsageEvent, WalArchiveSegmentStatus, WebhookEndpoint,
-    WebhookEndpointStatus,
+    NodeHostAgentCredentialState, NodeHostClusterObservation, NodeHostHardeningCheck,
+    NodeHostHardeningStatus, NodeHostHeartbeat, NodeHostState, NodeHostSyncDeploymentObservation,
+    OperationKind, OperationRecord, OperationStatus, Organization, PermissionRuleDocument,
+    PitrCheckStatus, PostgresVersion, Project, QueryPermissionOperation, QueryPermissionPolicy,
+    QueryPermissionPolicyStatus, QueuedNodeAgentCommand, QuotaAlert, QuotaAlertState,
+    QuotaEnforcement, QuotaPolicy, RateLimitPolicy, RestoreLifecycleState, RuntimeCheckStatus,
+    SecretEncryptionKey, SecretEncryptionKeyStatus, SecretRef, SecretRewrapPlan,
+    SecretRewrapPlanStatus, SsoIdentityProvider, SsoProviderKind, SsoProviderStatus,
+    StandbyCheckStatus, StandbyLifecycleState, StaticEgressIp, StaticEgressIpStatus,
+    SupportAccessStatus, SyncDeployment, SyncDeploymentLifecycleState, TeamMembership, TeamRole,
+    TlsPolicy, UsageEvent, WalArchiveSegmentStatus, WebhookEndpoint, WebhookEndpointStatus,
 };
 use rcgen::{CertificateParams, CertifiedKey, KeyPair};
 use ring::{
@@ -466,6 +466,26 @@ fn database_health_for_cluster(
         | ClusterLifecycleState::Verifying => (
             CustomerEnvironmentHealthState::Degraded,
             format!("managed Postgres cluster {cluster_id} is still provisioning"),
+        ),
+    }
+}
+
+fn observed_database_health_for_cluster(
+    cluster_id: &str,
+    postgres_running: Option<bool>,
+) -> (CustomerEnvironmentHealthState, String) {
+    match postgres_running {
+        Some(true) => (
+            CustomerEnvironmentHealthState::Healthy,
+            format!("managed Postgres cluster {cluster_id} is observed running"),
+        ),
+        Some(false) => (
+            CustomerEnvironmentHealthState::Degraded,
+            format!("managed Postgres cluster {cluster_id} is ready but not observed running"),
+        ),
+        None => (
+            CustomerEnvironmentHealthState::Degraded,
+            format!("managed Postgres cluster {cluster_id} has no host runtime observation"),
         ),
     }
 }
@@ -1248,6 +1268,49 @@ impl SqlControlPlaneStore {
         Ok(())
     }
 
+    pub async fn replace_node_host_observations(
+        &self,
+        host_id: &str,
+        clusters: &[NodeHostClusterObservation],
+        sync_deployments: &[NodeHostSyncDeploymentObservation],
+    ) -> Result<(), SqlStoreError> {
+        sqlx::query("DELETE FROM node_host_observed_clusters WHERE host_id = $1")
+            .bind(host_id)
+            .execute(&self.pool)
+            .await?;
+        for cluster in clusters {
+            sqlx::query(
+                "INSERT INTO node_host_observed_clusters \
+                    (host_id, cluster_id, data_dir, postgres_running, observed_at) \
+                 VALUES ($1, $2, $3, $4, now())",
+            )
+            .bind(host_id)
+            .bind(&cluster.cluster_id)
+            .bind(&cluster.data_dir)
+            .bind(cluster.postgres_running)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        sqlx::query("DELETE FROM node_host_observed_sync_deployments WHERE host_id = $1")
+            .bind(host_id)
+            .execute(&self.pool)
+            .await?;
+        for deployment in sync_deployments {
+            sqlx::query(
+                "INSERT INTO node_host_observed_sync_deployments \
+                    (host_id, deployment_id, running, observed_at) \
+                 VALUES ($1, $2, $3, now())",
+            )
+            .bind(host_id)
+            .bind(&deployment.deployment_id)
+            .bind(deployment.running)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     pub async fn node_host(&self, host_id: &str) -> Result<Option<NodeHost>, SqlStoreError> {
         let row = sqlx::query(
             "SELECT id, region, failure_domain, data_root, first_port, state, max_clusters, assigned_clusters, storage_gib, used_storage_gib \
@@ -1437,6 +1500,12 @@ impl SqlControlPlaneStore {
         if result.rows_affected() == 0 {
             return Err(SqlStoreError::MissingResource(host_id.to_owned()));
         }
+        self.replace_node_host_observations(
+            host_id,
+            &heartbeat.observed_clusters,
+            &heartbeat.observed_sync_deployments,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1590,6 +1659,112 @@ impl SqlControlPlaneStore {
         .await?;
 
         rows.into_iter().map(sync_deployment_from_row).collect()
+    }
+
+    pub async fn update_sync_deployment_lifecycle_state(
+        &self,
+        deployment_id: &str,
+        state: SyncDeploymentLifecycleState,
+    ) -> Result<(), SqlStoreError> {
+        let result = sqlx::query(
+            "UPDATE sync_deployments SET lifecycle_state = $2, updated_at = now() WHERE id = $1",
+        )
+        .bind(deployment_id)
+        .bind(sync_deployment_lifecycle_state_label(state))
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(SqlStoreError::MissingResource(deployment_id.to_owned()));
+        }
+        Ok(())
+    }
+
+    pub async fn ready_clusters_assigned_to_host(
+        &self,
+        host_id: &str,
+    ) -> Result<Vec<ManagedPostgresCluster>, SqlStoreError> {
+        let rows = sqlx::query(
+            "SELECT id, organization_id, project_id, environment_id, host_id, region, \
+                    postgres_version, tier, storage_gib, lifecycle_state, host_data_dir, host_port \
+             FROM managed_postgres_clusters \
+             WHERE host_id = $1 AND lifecycle_state = 'ready' \
+             ORDER BY id",
+        )
+        .bind(host_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(managed_postgres_cluster_from_row)
+            .collect()
+    }
+
+    pub async fn desired_sync_deployments_assigned_to_host(
+        &self,
+        host_id: &str,
+    ) -> Result<Vec<SyncDeployment>, SqlStoreError> {
+        let rows = sqlx::query(
+            "SELECT sync_deployments.id, sync_deployments.organization_id, \
+                    sync_deployments.project_id, sync_deployments.environment_id, \
+                    sync_deployments.managed_postgres_cluster_id, \
+                    sync_deployments.config_version, sync_deployments.lifecycle_state \
+             FROM sync_deployments \
+             JOIN managed_postgres_clusters \
+               ON managed_postgres_clusters.id = sync_deployments.managed_postgres_cluster_id \
+             WHERE managed_postgres_clusters.host_id = $1 \
+               AND managed_postgres_clusters.lifecycle_state = 'ready' \
+               AND sync_deployments.lifecycle_state IN ('requested', 'starting', 'running') \
+             ORDER BY sync_deployments.id",
+        )
+        .bind(host_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(sync_deployment_from_row).collect()
+    }
+
+    pub async fn pending_or_running_agent_command_exists(
+        &self,
+        host_id: &str,
+        cluster_id: &str,
+        action_kind: &str,
+    ) -> Result<bool, SqlStoreError> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS ( \
+                SELECT 1 FROM agent_commands \
+                WHERE host_id = $1 \
+                  AND cluster_id = $2 \
+                  AND status IN ('pending', 'running') \
+                  AND action->>'kind' = $3 \
+             )",
+        )
+        .bind(host_id)
+        .bind(cluster_id)
+        .bind(action_kind)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
+    pub async fn observed_cluster_running(
+        &self,
+        host_id: &str,
+        cluster_id: &str,
+        data_dir: &str,
+    ) -> Result<Option<bool>, SqlStoreError> {
+        let row = sqlx::query(
+            "SELECT postgres_running \
+             FROM node_host_observed_clusters \
+             WHERE host_id = $1 AND (cluster_id = $2 OR data_dir = $3) \
+             ORDER BY observed_at DESC \
+             LIMIT 1",
+        )
+        .bind(host_id)
+        .bind(cluster_id)
+        .bind(data_dir)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| row.try_get("postgres_running"))
+            .transpose()
+            .map_err(SqlStoreError::from)
     }
 
     pub async fn upsert_gateway_route(&self, route: &GatewayRoute) -> Result<(), SqlStoreError> {
@@ -2168,7 +2343,23 @@ impl SqlControlPlaneStore {
             "INSERT INTO managed_postgres_endpoints \
                 (environment_id, active_cluster_id) \
              VALUES ($1, $2) \
-             ON CONFLICT (environment_id) DO NOTHING \
+             ON CONFLICT (environment_id) DO UPDATE SET \
+                active_cluster_id = CASE \
+                    WHEN EXISTS ( \
+                        SELECT 1 FROM managed_postgres_clusters \
+                        WHERE id = managed_postgres_endpoints.active_cluster_id \
+                          AND lifecycle_state <> 'deleted' \
+                    ) THEN managed_postgres_endpoints.active_cluster_id \
+                    ELSE EXCLUDED.active_cluster_id \
+                END, \
+                updated_at = CASE \
+                    WHEN EXISTS ( \
+                        SELECT 1 FROM managed_postgres_clusters \
+                        WHERE id = managed_postgres_endpoints.active_cluster_id \
+                          AND lifecycle_state <> 'deleted' \
+                    ) THEN managed_postgres_endpoints.updated_at \
+                    ELSE now() \
+                END \
              RETURNING environment_id, active_cluster_id, updated_by_failover_id, \
                 database_proxy_listen_addr, active_certificate_id",
         )
@@ -5466,6 +5657,45 @@ impl SqlControlPlaneStore {
         Ok(Some((cluster_id, next)))
     }
 
+    pub async fn advance_sync_deployment_after_agent_command(
+        &self,
+        host_id: &str,
+        command_id: &str,
+        status: AgentCommandStatus,
+    ) -> Result<Option<(String, SyncDeploymentLifecycleState)>, SqlStoreError> {
+        let row = sqlx::query("SELECT action FROM agent_commands WHERE host_id = $1 AND id = $2")
+            .bind(host_id)
+            .bind(command_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Err(SqlStoreError::MissingResource(command_id.to_owned()));
+        };
+        let action: Json<NodeAgentAction> = row.try_get("action")?;
+        let (deployment_id, success_state) = match &action.0 {
+            NodeAgentAction::StartSyncDeployment { deployment_id, .. } => (
+                deployment_id.as_str(),
+                SyncDeploymentLifecycleState::Running,
+            ),
+            NodeAgentAction::StopSyncDeployment { deployment_id } => (
+                deployment_id.as_str(),
+                SyncDeploymentLifecycleState::Stopped,
+            ),
+            _ => return Ok(None),
+        };
+
+        let next = if status == AgentCommandStatus::Succeeded {
+            success_state
+        } else if status == AgentCommandStatus::Failed {
+            SyncDeploymentLifecycleState::Failed
+        } else {
+            return Ok(None);
+        };
+        self.update_sync_deployment_lifecycle_state(deployment_id, next)
+            .await?;
+        Ok(Some((deployment_id.to_owned(), next)))
+    }
+
     pub async fn advance_operation_after_agent_command(
         &self,
         host_id: &str,
@@ -7108,6 +7338,44 @@ impl SqlControlPlaneStore {
             .collect()
     }
 
+    pub async fn permission_rule_document(
+        &self,
+        environment_id: &str,
+    ) -> Result<Option<PermissionRuleDocument>, SqlStoreError> {
+        let row = sqlx::query(
+            "SELECT environment_id, organization_id, project_id, dsl, updated_at::text AS updated_at \
+             FROM permission_rule_documents WHERE environment_id = $1",
+        )
+        .bind(environment_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(permission_rule_document_from_row).transpose()
+    }
+
+    pub async fn upsert_permission_rule_document(
+        &self,
+        document: &PermissionRuleDocument,
+    ) -> Result<PermissionRuleDocument, SqlStoreError> {
+        let row = sqlx::query(
+            "INSERT INTO permission_rule_documents \
+                (environment_id, organization_id, project_id, dsl) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (environment_id) DO UPDATE SET \
+                organization_id = EXCLUDED.organization_id, \
+                project_id = EXCLUDED.project_id, \
+                dsl = EXCLUDED.dsl, \
+                updated_at = now() \
+             RETURNING environment_id, organization_id, project_id, dsl, updated_at::text AS updated_at",
+        )
+        .bind(&document.environment_id)
+        .bind(&document.organization_id)
+        .bind(&document.project_id)
+        .bind(&document.dsl)
+        .fetch_one(&self.pool)
+        .await?;
+        permission_rule_document_from_row(row)
+    }
+
     pub async fn environment_health(
         &self,
         environment_id: &str,
@@ -7126,11 +7394,16 @@ impl SqlControlPlaneStore {
             "SELECT managed_postgres_clusters.id AS cluster_id, \
                     managed_postgres_clusters.lifecycle_state, \
                     managed_postgres_clusters.host_id, \
+                    observed.postgres_running, \
                     node_hosts.storage_gib, \
                     node_hosts.used_storage_gib \
              FROM managed_postgres_clusters \
              LEFT JOIN node_hosts ON node_hosts.id = managed_postgres_clusters.host_id \
+             LEFT JOIN node_host_observed_clusters observed \
+               ON observed.host_id = managed_postgres_clusters.host_id \
+              AND observed.cluster_id = managed_postgres_clusters.id \
              WHERE managed_postgres_clusters.environment_id = $1 \
+               AND managed_postgres_clusters.lifecycle_state <> 'deleted' \
              ORDER BY managed_postgres_clusters.id",
         )
         .bind(environment_id)
@@ -7152,6 +7425,12 @@ impl SqlControlPlaneStore {
             let lifecycle_state = parse_lifecycle_state(&lifecycle_state)?;
             let (state, detail) = database_health_for_cluster(&cluster_id, lifecycle_state);
             push_health_component(&mut components, "database", state, detail);
+            if lifecycle_state == ClusterLifecycleState::Ready {
+                let postgres_running: Option<bool> = row.try_get("postgres_running")?;
+                let (state, detail) =
+                    observed_database_health_for_cluster(&cluster_id, postgres_running);
+                push_health_component(&mut components, "database_runtime", state, detail);
+            }
 
             let storage_gib: Option<i32> = row.try_get("storage_gib")?;
             let used_storage_gib: Option<i32> = row.try_get("used_storage_gib")?;
@@ -7170,6 +7449,7 @@ impl SqlControlPlaneStore {
                 LIMIT 1 \
              ) backup ON true \
              WHERE managed_postgres_clusters.environment_id = $1 \
+               AND managed_postgres_clusters.lifecycle_state <> 'deleted' \
              ORDER BY managed_postgres_clusters.id",
         )
         .bind(environment_id)
@@ -7192,6 +7472,7 @@ impl SqlControlPlaneStore {
                 LIMIT 1 \
              ) drill ON true \
              WHERE managed_postgres_clusters.environment_id = $1 \
+               AND managed_postgres_clusters.lifecycle_state <> 'deleted' \
              ORDER BY managed_postgres_clusters.id",
         )
         .bind(environment_id)
@@ -7213,6 +7494,7 @@ impl SqlControlPlaneStore {
              LEFT JOIN managed_postgres_wal_archives \
                 ON managed_postgres_wal_archives.cluster_id = managed_postgres_clusters.id \
              WHERE managed_postgres_clusters.environment_id = $1 \
+               AND managed_postgres_clusters.lifecycle_state <> 'deleted' \
              GROUP BY managed_postgres_clusters.id \
              ORDER BY managed_postgres_clusters.id",
         )
@@ -7238,6 +7520,7 @@ impl SqlControlPlaneStore {
                 LIMIT 1 \
              ) pitr ON true \
              WHERE managed_postgres_clusters.environment_id = $1 \
+               AND managed_postgres_clusters.lifecycle_state <> 'deleted' \
              ORDER BY managed_postgres_clusters.id",
         )
         .bind(environment_id)
@@ -7262,6 +7545,7 @@ impl SqlControlPlaneStore {
                 LIMIT 1 \
              ) standby_check ON true \
              WHERE managed_postgres_clusters.environment_id = $1 \
+               AND managed_postgres_clusters.lifecycle_state <> 'deleted' \
              ORDER BY managed_postgres_clusters.id, managed_postgres_standbys.id",
         )
         .bind(environment_id)
@@ -9054,6 +9338,18 @@ fn query_permission_policy_from_row(
     })
 }
 
+fn permission_rule_document_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<PermissionRuleDocument, SqlStoreError> {
+    Ok(PermissionRuleDocument {
+        environment_id: row.try_get("environment_id")?,
+        organization_id: row.try_get("organization_id")?,
+        project_id: row.try_get("project_id")?,
+        dsl: row.try_get("dsl")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 fn billing_export_from_row(row: sqlx::postgres::PgRow) -> Result<BillingExport, SqlStoreError> {
     let event_count: i64 = row.try_get("event_count")?;
     let quantity_total: i64 = row.try_get("quantity_total")?;
@@ -10376,6 +10672,14 @@ fn next_state_after_agent_command_for_operation(
     status: AgentCommandStatus,
     operation_kind: Option<&str>,
 ) -> Option<ClusterLifecycleState> {
+    if matches!(
+        action,
+        NodeAgentAction::StartSyncDeployment { .. }
+            | NodeAgentAction::StopSyncDeployment { .. }
+            | NodeAgentAction::ReportSyncDeployment { .. }
+    ) {
+        return None;
+    }
     if status == AgentCommandStatus::Failed
         && operation_kind == Some("rotate_credentials")
         && current == ClusterLifecycleState::ConfiguringReplication
@@ -11557,5 +11861,16 @@ mod tests {
             Some("create_cluster"),
         );
         assert_eq!(next, Some(ClusterLifecycleState::Failed));
+
+        let next = next_state_after_agent_command_for_operation(
+            ClusterLifecycleState::Ready,
+            &NodeAgentAction::StartSyncDeployment {
+                deployment_id: "sync_123".to_owned(),
+                config_version: "config_001".to_owned(),
+            },
+            AgentCommandStatus::Failed,
+            Some("start_sync_deployment"),
+        );
+        assert_eq!(next, None);
     }
 }

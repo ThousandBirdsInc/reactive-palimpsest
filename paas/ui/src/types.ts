@@ -257,3 +257,80 @@ export interface EnvironmentOverview {
   node_hosts?: NodeHost[];
   [key: string]: unknown;
 }
+
+// ----- permission rule DSL + verifier -----
+
+export type PermissionRuleMode = "row_visibility" | "subscribe" | "both";
+
+export interface PermissionRuleDocument {
+  environment_id: string;
+  organization_id: string;
+  project_id: string;
+  dsl: string;
+  updated_at: string | null;
+}
+
+export interface PermissionUserContextField {
+  name: string;
+  type: string;
+}
+
+export interface PermissionVerifyRule {
+  name: string;
+  table: string;
+  mode: PermissionRuleMode;
+  predicate: string;
+  canonical: string | null;
+  user_fields: string[];
+  tautology: boolean;
+}
+
+export interface PermissionVerifyResponse {
+  ok: boolean;
+  error: string | null;
+  catalog_source: string;
+  catalog_tables: string[];
+  user_context: PermissionUserContextField[];
+  rules: PermissionVerifyRule[];
+}
+
+export interface PermissionVerifyCatalogColumn {
+  name: string;
+  type: string;
+}
+
+export interface PermissionVerifyCatalogTable {
+  name: string;
+  columns: PermissionVerifyCatalogColumn[];
+}
+
+// ----- query permission policies (per-table row/subscribe predicates) -----
+
+export type QueryPermissionOperation = "read" | "subscribe";
+export type QueryPermissionPolicyStatus = "draft" | "active";
+
+export interface QueryPermissionPolicy {
+  policy_id: string;
+  organization_id: string;
+  project_id: string;
+  environment_id: string;
+  name: string;
+  table_schema: string;
+  table_name: string;
+  operation: QueryPermissionOperation;
+  principal_claim: string;
+  predicate_sql: string;
+  sample_context: Record<string, unknown>;
+  status: QueryPermissionPolicyStatus;
+}
+
+export interface QueryPermissionPolicyDryRunResponse {
+  policy_id: string;
+  accepted: boolean;
+  table_schema: string;
+  table_name: string;
+  operation: QueryPermissionOperation;
+  checked_predicate_sql: string;
+  sample_context: Record<string, unknown>;
+  decision_detail: string;
+}

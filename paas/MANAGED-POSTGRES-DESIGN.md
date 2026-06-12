@@ -555,6 +555,15 @@ Deletion:
   completes.
 - Audit events record who requested deletion and when data became
   unrecoverable.
+- Endpoint integrity after deletion is a known gap. The environment
+  `managed_postgres_endpoints.active_cluster_id` is **not** automatically
+  reassigned or cleared when its cluster is deleted, so an endpoint can be left
+  pointing at a `deleted` cluster until a new primary is configured. Migration
+  `V49__repair_deleted_managed_postgres_endpoints.sql` was a one-time backfill
+  that repointed such dangling endpoints at the newest `ready` cluster in the
+  same environment. Production readiness requires making this reassignment an
+  explicit, audited step in the deletion/failover flow (clear the endpoint, or
+  cut it over to a designated replacement) rather than a repair migration.
 
 ## 13. Networking
 
@@ -756,6 +765,16 @@ managed support role, samples connection count, max connections,
 replication-slot lag bytes, long-running query count, blocked locks, oldest
 transaction age, and autovacuum activity, then exposes scoped list/detail
 history for operator dashboards.
+
+The node-agent heartbeat also reports observed local state: which managed
+Postgres clusters and SyncDeployments the agent actually finds on the host,
+each with its data directory and running flag. The control plane reconciles
+this into `node_host_observed_clusters` and
+`node_host_observed_sync_deployments`, replacing the per-host snapshot on each
+heartbeat. This gives operators a desired-vs-observed drift signal (a cluster
+the control plane believes is assigned to a host but the agent does not see, or
+a process the agent sees running that the control plane did not place) and feeds
+the host detail view.
 
 Customer-facing health should compress internal detail into actionable states:
 

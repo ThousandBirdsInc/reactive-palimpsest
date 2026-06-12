@@ -41,8 +41,8 @@ use palimpsest_paas_core::{
     ManagedPostgresWalArchiveSegment, NodeAgentAction, NodeAgentCommand, NodeAgentCommandResult,
     NodeHost, NodeHostAgentCredential, NodeHostAgentCredentialState, NodeHostHardeningCheck,
     NodeHostHardeningStatus, NodeHostHeartbeat, NodeHostState, OperationKind, OperationRecord,
-    OperationStatus, Organization, PitrCheckStatus, PostgresVersion, Project,
-    QueryPermissionOperation, QueryPermissionPolicy, QueryPermissionPolicyStatus,
+    OperationStatus, Organization, PermissionRuleDocument, PitrCheckStatus, PostgresVersion,
+    Project, QueryPermissionOperation, QueryPermissionPolicy, QueryPermissionPolicyStatus,
     QueuedNodeAgentCommand, QuotaAlert, QuotaAlertState, QuotaPolicy, RestoreLifecycleState,
     RuntimeCheckStatus, SecretEncryptionKey, SecretEncryptionKeyStatus, SecretRewrapPlan,
     SecretRewrapPlanStatus, SsoIdentityProvider, SsoProviderKind, SsoProviderStatus,
@@ -995,6 +995,11 @@ pub fn sql_control_plane_router(store: SharedSqlControlPlaneStore) -> Router {
             post(sql_api_dry_run_query_permission_policy),
         )
         .route(
+            "/v1/environments/:environment_id/permission-rule-document",
+            get(sql_api_get_permission_rule_document).put(sql_api_put_permission_rule_document),
+        )
+        .route("/v1/permissions/verify", post(sql_api_verify_permissions))
+        .route(
             "/v1/managed-postgres/clusters/:cluster_id/operations",
             get(sql_api_list_managed_postgres_operations),
         )
@@ -1649,7 +1654,151 @@ async fn sql_api_record_node_heartbeat(
 ) -> Result<Json<ApiOk>, SqlApiError> {
     require_agent_auth(&store, &headers, AgentAuthScope::new(&host_id, "heartbeat")).await?;
     store.record_node_heartbeat(&host_id, &payload).await?;
+    reconcile_node_host_observed_resources(&store, &host_id, &payload).await?;
     Ok(Json(ApiOk::new("node_host.heartbeat_recorded")))
+}
+
+async fn reconcile_node_host_observed_resources(
+    store: &SharedSqlControlPlaneStore,
+    host_id: &str,
+    heartbeat: &NodeHostHeartbeat,
+) -> Result<(), SqlApiError> {
+    let observed_clusters: BTreeMap<&str, bool> = heartbeat
+        .observed_clusters
+        .iter()
+        .map(|observed| (observed.cluster_id.as_str(), observed.postgres_running))
+        .collect();
+    let observed_cluster_dirs: BTreeMap<&str, bool> = heartbeat
+        .observed_clusters
+        .iter()
+        .map(|observed| (observed.data_dir.as_str(), observed.postgres_running))
+        .collect();
+    for cluster in store.ready_clusters_assigned_to_host(host_id).await? {
+        let Some(assignment) = cluster.host_assignment.as_ref() else {
+            continue;
+        };
+        let running = observed_clusters
+            .get(cluster.cluster_id.as_str())
+            .copied()
+            .or_else(|| {
+                observed_cluster_dirs
+                    .get(assignment.data_dir.as_str())
+                    .copied()
+            })
+            .unwrap_or(false);
+        if running {
+            continue;
+        }
+        if store
+            .pending_or_running_agent_command_exists(host_id, &cluster.cluster_id, "start_postgres")
+            .await?
+        {
+            continue;
+        }
+        enqueue_cluster_start_repair(store, host_id, &cluster, "node-agent").await?;
+    }
+
+    let observed_sync: BTreeMap<&str, bool> = heartbeat
+        .observed_sync_deployments
+        .iter()
+        .map(|observed| (observed.deployment_id.as_str(), observed.running))
+        .collect();
+    for deployment in store
+        .desired_sync_deployments_assigned_to_host(host_id)
+        .await?
+    {
+        let running = observed_sync
+            .get(deployment.deployment_id.as_str())
+            .copied()
+            .unwrap_or(false);
+        if running {
+            if deployment.lifecycle_state != SyncDeploymentLifecycleState::Running {
+                store
+                    .update_sync_deployment_lifecycle_state(
+                        &deployment.deployment_id,
+                        SyncDeploymentLifecycleState::Running,
+                    )
+                    .await?;
+            }
+            continue;
+        }
+        if store
+            .pending_or_running_agent_command_exists(
+                host_id,
+                &deployment.managed_postgres_cluster_id,
+                "start_sync_deployment",
+            )
+            .await?
+        {
+            continue;
+        }
+        store
+            .update_sync_deployment_lifecycle_state(
+                &deployment.deployment_id,
+                SyncDeploymentLifecycleState::Starting,
+            )
+            .await?;
+        let command = NodeAgentCommand {
+            command_id: format!(
+                "{}:repair-start-sync:{}",
+                deployment.deployment_id,
+                monotonic_nanos()
+            ),
+            cluster_id: deployment.managed_postgres_cluster_id.clone(),
+            action: NodeAgentAction::StartSyncDeployment {
+                deployment_id: deployment.deployment_id.clone(),
+                config_version: deployment.config_version.clone(),
+            },
+        };
+        let operation = operation_for_agent_command(
+            OperationKind::StartSyncDeployment,
+            &deployment.deployment_id,
+            &command,
+        );
+        store.insert_operation(&operation).await?;
+        store
+            .enqueue_agent_command(host_id, Some(&operation.operation_id), &command)
+            .await?;
+        store
+            .append_audit_event(&audit_event(
+                "node-agent",
+                "sync_deployment.repair_start_enqueued",
+                &deployment.deployment_id,
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn enqueue_cluster_start_repair(
+    store: &SharedSqlControlPlaneStore,
+    host_id: &str,
+    cluster: &ManagedPostgresCluster,
+    actor_id: &str,
+) -> Result<(), SqlApiError> {
+    let command = NodeAgentCommand {
+        command_id: format!(
+            "{}:repair-start-postgres:{}",
+            cluster.cluster_id,
+            monotonic_nanos()
+        ),
+        cluster_id: cluster.cluster_id.clone(),
+        action: NodeAgentAction::StartPostgres,
+    };
+    let operation =
+        operation_for_agent_command(OperationKind::StartCluster, &cluster.cluster_id, &command);
+    store.insert_operation(&operation).await?;
+    store
+        .enqueue_agent_command(host_id, Some(&operation.operation_id), &command)
+        .await?;
+    store
+        .append_audit_event(&audit_event(
+            actor_id,
+            "managed_postgres_cluster.repair_start_enqueued",
+            &cluster.cluster_id,
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn sql_api_enqueue_agent_command(
@@ -1724,6 +1873,9 @@ async fn sql_api_complete_agent_command(
         .await?;
     let advanced_cluster = store
         .advance_cluster_after_agent_command(&host_id, &command_id, payload.status)
+        .await?;
+    store
+        .advance_sync_deployment_after_agent_command(&host_id, &command_id, payload.status)
         .await?;
     store
         .advance_operation_after_agent_command(
@@ -2885,11 +3037,66 @@ async fn sql_api_get_managed_postgres_schema(
         .await?
         .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
     auth.require_scope(ResourceScope::from_cluster(&cluster))?;
+    if let Some(assignment) = cluster.host_assignment.as_ref() {
+        if store
+            .observed_cluster_running(
+                &assignment.host_id,
+                &cluster.cluster_id,
+                &assignment.data_dir,
+            )
+            .await?
+            == Some(false)
+        {
+            if !store
+                .pending_or_running_agent_command_exists(
+                    &assignment.host_id,
+                    &cluster.cluster_id,
+                    "start_postgres",
+                )
+                .await?
+            {
+                enqueue_cluster_start_repair(
+                    &store,
+                    &assignment.host_id,
+                    &cluster,
+                    auth.actor_id(),
+                )
+                .await?;
+            }
+            return Err(SqlApiError::BadRequest(format!(
+                "managed Postgres cluster {} is ready in control-plane state but not observed running; start repair was enqueued",
+                cluster.cluster_id
+            )));
+        }
+    }
     let endpoint = endpoint_for_database(
         store.managed_postgres_app_endpoint(&cluster).await?,
         query.database.as_deref(),
     )?;
-    let schema = read_managed_postgres_schema(&endpoint).await?;
+    let schema = match read_managed_postgres_schema(&endpoint).await {
+        Ok(schema) => schema,
+        Err(err) => {
+            if let Some(assignment) = cluster.host_assignment.as_ref() {
+                if !store
+                    .pending_or_running_agent_command_exists(
+                        &assignment.host_id,
+                        &cluster.cluster_id,
+                        "start_postgres",
+                    )
+                    .await?
+                {
+                    enqueue_cluster_start_repair(
+                        &store,
+                        &assignment.host_id,
+                        &cluster,
+                        auth.actor_id(),
+                    )
+                    .await?;
+                }
+            }
+            return Err(err);
+        }
+    };
     Ok(Json(schema))
 }
 
@@ -3136,6 +3343,67 @@ async fn sql_api_dry_run_query_permission_policy(
     }))
 }
 
+async fn sql_api_get_permission_rule_document(
+    State(store): State<SharedSqlControlPlaneStore>,
+    headers: HeaderMap,
+    Path(environment_id): Path<String>,
+) -> Result<Json<PermissionRuleDocument>, SqlApiError> {
+    let auth = sql_read_auth_context(&store, &headers).await?;
+    let scope = resolve_resource_scope(&store, None, None, Some(&environment_id)).await?;
+    auth.require_scope(scope.as_resource_scope())?;
+    // Absent document reads back as an empty draft so the editor always has
+    // something to load for a valid environment.
+    let document = store
+        .permission_rule_document(&environment_id)
+        .await?
+        .unwrap_or_else(|| PermissionRuleDocument {
+            environment_id: environment_id.clone(),
+            organization_id: scope.organization_id.clone().unwrap_or_default(),
+            project_id: scope.project_id.clone().unwrap_or_default(),
+            dsl: String::new(),
+            updated_at: None,
+        });
+    Ok(Json(document))
+}
+
+async fn sql_api_put_permission_rule_document(
+    State(store): State<SharedSqlControlPlaneStore>,
+    headers: HeaderMap,
+    Path(environment_id): Path<String>,
+    Json(payload): Json<PermissionRuleDocumentSaveRequest>,
+) -> Result<Json<PermissionRuleDocument>, SqlApiError> {
+    let auth = sql_mutation_auth_context(&store, &headers).await?;
+    let scope = resolve_resource_scope(&store, None, None, Some(&environment_id)).await?;
+    auth.require_scope(scope.as_resource_scope())?;
+    let document = PermissionRuleDocument {
+        environment_id: environment_id.clone(),
+        organization_id: scope.organization_id.clone().unwrap_or_default(),
+        project_id: scope.project_id.clone().unwrap_or_default(),
+        dsl: payload.dsl,
+        updated_at: None,
+    };
+    let saved = store.upsert_permission_rule_document(&document).await?;
+    store
+        .append_audit_event(&audit_event(
+            auth.actor_id(),
+            "permission_rule_document.save",
+            &environment_id,
+        ))
+        .await?;
+    Ok(Json(saved))
+}
+
+async fn sql_api_verify_permissions(
+    State(store): State<SharedSqlControlPlaneStore>,
+    headers: HeaderMap,
+    Json(payload): Json<PermissionVerifyRequest>,
+) -> Result<Json<PermissionVerifyResponse>, SqlApiError> {
+    // Verification is a pure compile against a supplied catalog; it touches
+    // no environment-scoped state, so it only requires a valid read actor.
+    let _auth = sql_read_auth_context(&store, &headers).await?;
+    Ok(Json(verify_permissions_dsl(&payload)))
+}
+
 async fn sql_api_list_managed_postgres_operations(
     State(store): State<SharedSqlControlPlaneStore>,
     headers: HeaderMap,
@@ -3232,7 +3500,78 @@ async fn sql_api_create_sync_deployment(
             &resource_id,
         ))
         .await?;
+    enqueue_sync_deployment_start_if_ready(&store, auth.actor_id(), &payload).await?;
     Ok(Json(ApiOk::new("sync_deployment.created")))
+}
+
+async fn enqueue_sync_deployment_start_if_ready(
+    store: &SharedSqlControlPlaneStore,
+    actor_id: &str,
+    deployment: &SyncDeployment,
+) -> Result<(), SqlApiError> {
+    if !matches!(
+        deployment.lifecycle_state,
+        SyncDeploymentLifecycleState::Requested | SyncDeploymentLifecycleState::Starting
+    ) {
+        return Ok(());
+    }
+    let cluster = store
+        .managed_postgres_cluster(&deployment.managed_postgres_cluster_id)
+        .await?
+        .ok_or_else(|| {
+            SqlApiError::MissingResource(deployment.managed_postgres_cluster_id.clone())
+        })?;
+    if cluster.lifecycle_state != ClusterLifecycleState::Ready {
+        return Ok(());
+    }
+    let Some(assignment) = cluster.host_assignment.as_ref() else {
+        return Ok(());
+    };
+    if store
+        .pending_or_running_agent_command_exists(
+            &assignment.host_id,
+            &cluster.cluster_id,
+            "start_sync_deployment",
+        )
+        .await?
+    {
+        return Ok(());
+    }
+    store
+        .update_sync_deployment_lifecycle_state(
+            &deployment.deployment_id,
+            SyncDeploymentLifecycleState::Starting,
+        )
+        .await?;
+    let command = NodeAgentCommand {
+        command_id: format!(
+            "{}:start-sync:{}",
+            deployment.deployment_id,
+            monotonic_nanos()
+        ),
+        cluster_id: cluster.cluster_id.clone(),
+        action: NodeAgentAction::StartSyncDeployment {
+            deployment_id: deployment.deployment_id.clone(),
+            config_version: deployment.config_version.clone(),
+        },
+    };
+    let operation = operation_for_agent_command(
+        OperationKind::StartSyncDeployment,
+        &deployment.deployment_id,
+        &command,
+    );
+    store.insert_operation(&operation).await?;
+    store
+        .enqueue_agent_command(&assignment.host_id, Some(&operation.operation_id), &command)
+        .await?;
+    store
+        .append_audit_event(&audit_event(
+            actor_id,
+            "sync_deployment.start_enqueued",
+            &deployment.deployment_id,
+        ))
+        .await?;
+    Ok(())
 }
 
 async fn sql_api_list_sync_deployments(
@@ -7718,6 +8057,9 @@ fn node_agent_action_step(action: &NodeAgentAction) -> &'static str {
         NodeAgentAction::ResizePostgresStorage { .. } => "resize_postgres_storage",
         NodeAgentAction::UpdatePostgresMinor { .. } => "update_postgres_minor",
         NodeAgentAction::UpgradePostgresMajor { .. } => "upgrade_postgres_major",
+        NodeAgentAction::StartSyncDeployment { .. } => "start_sync_deployment",
+        NodeAgentAction::StopSyncDeployment { .. } => "stop_sync_deployment",
+        NodeAgentAction::ReportSyncDeployment { .. } => "report_sync_deployment",
     }
 }
 
@@ -8777,6 +9119,67 @@ struct QueryPermissionPolicyDryRunResponse {
     checked_predicate_sql: String,
     sample_context: JsonValue,
     decision_detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PermissionRuleDocumentSaveRequest {
+    dsl: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PermissionVerifyRequest {
+    dsl: String,
+    /// Optional inline catalog (table/column schema) to compile against. When
+    /// absent or empty, the built-in demo catalog is used. The UI populates
+    /// this from a selected cluster's live schema.
+    #[serde(default)]
+    catalog: Option<Vec<PermissionVerifyCatalogTable>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PermissionVerifyCatalogTable {
+    name: String,
+    #[serde(default)]
+    columns: Vec<PermissionVerifyCatalogColumn>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PermissionVerifyCatalogColumn {
+    name: String,
+    #[serde(rename = "type", default)]
+    ty: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PermissionVerifyResponse {
+    /// True when the DSL parsed and every rule compiled against the catalog.
+    ok: bool,
+    /// First parse or compile error, verbatim, when `ok` is false.
+    error: Option<String>,
+    /// Which catalog the rules were compiled against (`demo` or `inline`).
+    catalog_source: String,
+    /// Table names available in the catalog, for operator reference.
+    catalog_tables: Vec<String>,
+    /// User-context fields declared by the document.
+    user_context: Vec<palimpsest_permissions::UserContextField>,
+    /// Per-rule results. Populated with compiled detail when `ok`, otherwise
+    /// the parsed rules (without canonical predicates).
+    rules: Vec<PermissionVerifyRule>,
+}
+
+#[derive(Debug, Serialize)]
+struct PermissionVerifyRule {
+    name: String,
+    table: String,
+    mode: palimpsest_permissions::Mode,
+    predicate: String,
+    /// Canonical predicate text with `$user.*` references encoded as
+    /// sentinels; present only when the rule compiled.
+    canonical: Option<String>,
+    /// User-context fields the predicate reads.
+    user_fields: Vec<String>,
+    /// True when the predicate is a tautology the rewriter would elide.
+    tautology: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10601,6 +11004,133 @@ fn canonicalize_sql_fragment(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Runs the permission-rule DSL through the real `palimpsest-permissions`
+/// verifier: parse the TOML, then compile every rule against a catalog.
+/// Compilation is what validates column references, `$user.*` fields,
+/// predicate depth, and ambiguity, so the result mirrors what the runtime
+/// rewriter would accept.
+fn verify_permissions_dsl(request: &PermissionVerifyRequest) -> PermissionVerifyResponse {
+    use palimpsest_permissions::{compile_rules, parse_config};
+    use palimpsest_sql::{Catalog, ColumnSchema, TableSchema};
+
+    let (catalog, catalog_source) = match &request.catalog {
+        Some(tables) if !tables.is_empty() => {
+            let schemas = tables.iter().map(|table| {
+                TableSchema::new(
+                    table.name.clone(),
+                    table
+                        .columns
+                        .iter()
+                        .map(|column| {
+                            ColumnSchema::new(
+                                column.name.clone(),
+                                parse_verify_column_type(&column.ty),
+                            )
+                        })
+                        .collect(),
+                )
+            });
+            (Catalog::new(schemas), "inline".to_owned())
+        }
+        _ => (Catalog::demo(), "demo".to_owned()),
+    };
+    let catalog_tables: Vec<String> = catalog.tables().map(|table| table.name.clone()).collect();
+
+    let config = match parse_config(&request.dsl) {
+        Ok(config) => config,
+        Err(err) => {
+            return PermissionVerifyResponse {
+                ok: false,
+                error: Some(err.to_string()),
+                catalog_source,
+                catalog_tables,
+                user_context: Vec::new(),
+                rules: Vec::new(),
+            };
+        }
+    };
+
+    let user_context = config.user_context.clone();
+    let schema = config.user_context_schema();
+
+    match compile_rules(&config.rules(), &catalog, &schema) {
+        Ok(compiled) => {
+            let rules = compiled
+                .iter()
+                .map(|rule| PermissionVerifyRule {
+                    name: rule.name.clone(),
+                    table: rule.table.clone(),
+                    mode: rule.mode,
+                    predicate: config
+                        .rules
+                        .iter()
+                        .find(|raw| raw.name == rule.name)
+                        .map(|raw| raw.predicate.clone())
+                        .unwrap_or_default(),
+                    canonical: Some(rule.predicate.canonical.clone()),
+                    user_fields: rule.predicate.user_fields.iter().cloned().collect(),
+                    tautology: rule.predicate.is_tautology(),
+                })
+                .collect();
+            PermissionVerifyResponse {
+                ok: true,
+                error: None,
+                catalog_source,
+                catalog_tables,
+                user_context,
+                rules,
+            }
+        }
+        Err(err) => {
+            // Parse succeeded but a rule failed to compile; surface the parsed
+            // rules so the editor can still show structure alongside the error.
+            let rules = config
+                .rules
+                .iter()
+                .map(|raw| PermissionVerifyRule {
+                    name: raw.name.clone(),
+                    table: raw.table.clone(),
+                    mode: raw.mode,
+                    predicate: raw.predicate.clone(),
+                    canonical: None,
+                    user_fields: Vec::new(),
+                    tautology: false,
+                })
+                .collect();
+            PermissionVerifyResponse {
+                ok: false,
+                error: Some(err.to_string()),
+                catalog_source,
+                catalog_tables,
+                user_context,
+                rules,
+            }
+        }
+    }
+}
+
+/// Maps a column-type string (our coarse names or raw PostgreSQL `data_type`
+/// labels forwarded by the UI) onto the verifier's [`ColumnType`]. Unknown
+/// types are treated as compatible with everything.
+fn parse_verify_column_type(ty: &str) -> palimpsest_sql::ColumnType {
+    use palimpsest_sql::ColumnType;
+    match ty.trim().to_ascii_lowercase().as_str() {
+        "bool" | "boolean" => ColumnType::Bool,
+        "int" | "integer" | "bigint" | "smallint" | "int2" | "int4" | "int8" | "serial"
+        | "bigserial" => ColumnType::Int,
+        "float" | "double" | "double precision" | "real" | "numeric" | "decimal" | "float4"
+        | "float8" => ColumnType::Float,
+        "text" | "varchar" | "char" | "character varying" | "character" | "name" | "citext"
+        | "uuid" => ColumnType::Text,
+        "timestamp"
+        | "timestamptz"
+        | "timestamp with time zone"
+        | "timestamp without time zone"
+        | "date" => ColumnType::Timestamp,
+        _ => ColumnType::Unknown,
+    }
+}
+
 fn sql_tokens(sql: &str) -> Vec<String> {
     sql.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
         .filter(|token| !token.is_empty())
@@ -10737,6 +11267,89 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    const DEMO_DSL: &str = "\
+[[user_context]]
+name = \"id\"
+type = \"int\"
+
+[[rule]]
+name = \"posts_owner\"
+table = \"posts\"
+mode = \"both\"
+predicate = \"author_id = $user.id\"
+";
+
+    #[test]
+    fn verify_compiles_against_demo_catalog() {
+        let response = verify_permissions_dsl(&PermissionVerifyRequest {
+            dsl: DEMO_DSL.to_owned(),
+            catalog: None,
+        });
+        assert!(response.ok, "expected ok, got {:?}", response.error);
+        assert_eq!(response.catalog_source, "demo");
+        assert_eq!(response.rules.len(), 1);
+        let rule = &response.rules[0];
+        assert_eq!(rule.name, "posts_owner");
+        assert!(rule.canonical.is_some());
+        assert_eq!(rule.user_fields, vec!["id".to_owned()]);
+    }
+
+    #[test]
+    fn verify_reports_unknown_table() {
+        let dsl = "\
+[[rule]]
+name = \"x\"
+table = \"not_a_table\"
+predicate = \"true\"
+";
+        let response = verify_permissions_dsl(&PermissionVerifyRequest {
+            dsl: dsl.to_owned(),
+            catalog: None,
+        });
+        assert!(!response.ok);
+        assert!(response.error.unwrap().contains("not_a_table"));
+        // Parsed structure is still surfaced for the editor.
+        assert_eq!(response.rules.len(), 1);
+    }
+
+    #[test]
+    fn verify_uses_inline_catalog() {
+        let dsl = "\
+[[user_context]]
+name = \"id\"
+type = \"int\"
+
+[[rule]]
+name = \"tenant_rows\"
+table = \"widgets\"
+predicate = \"owner_id = $user.id\"
+";
+        let response = verify_permissions_dsl(&PermissionVerifyRequest {
+            dsl: dsl.to_owned(),
+            catalog: Some(vec![PermissionVerifyCatalogTable {
+                name: "widgets".to_owned(),
+                columns: vec![PermissionVerifyCatalogColumn {
+                    name: "owner_id".to_owned(),
+                    ty: "integer".to_owned(),
+                }],
+            }]),
+        });
+        assert!(response.ok, "expected ok, got {:?}", response.error);
+        assert_eq!(response.catalog_source, "inline");
+        assert_eq!(response.catalog_tables, vec!["widgets".to_owned()]);
+    }
+
+    #[test]
+    fn verify_reports_toml_parse_error() {
+        let response = verify_permissions_dsl(&PermissionVerifyRequest {
+            dsl: "this is = not valid = toml".to_owned(),
+            catalog: None,
+        });
+        assert!(!response.ok);
+        assert!(response.error.is_some());
+        assert!(response.rules.is_empty());
+    }
 
     fn cluster(state: ClusterLifecycleState) -> ManagedPostgresCluster {
         ManagedPostgresCluster {

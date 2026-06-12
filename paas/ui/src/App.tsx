@@ -10,6 +10,8 @@ import { Hosts } from "./pages/Hosts";
 import { Incidents } from "./pages/Incidents";
 import { Quota } from "./pages/Quota";
 import { Routes as RoutesPage } from "./pages/Routes";
+import { SyncDeployments } from "./pages/SyncDeployments";
+import { Permissions } from "./pages/Permissions";
 import { Audit } from "./pages/Audit";
 import { SettingsPage } from "./pages/Settings";
 
@@ -31,6 +33,8 @@ export function App() {
           <Route path="incidents" element={<Incidents />} />
           <Route path="quota" element={<Quota />} />
           <Route path="routes" element={<RoutesPage />} />
+          <Route path="sync-deployments" element={<SyncDeployments />} />
+          <Route path="permissions" element={<Permissions />} />
           <Route path="audit" element={<Audit />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>

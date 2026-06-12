@@ -42,10 +42,9 @@ services:
     ports:
       # Write API: only nginx in the web container needs to reach
       # this (over docker DNS at `server:3000`), so host-side
-      # exposure is optional. Commented out to avoid colliding with
-      # Next.js dev servers on the developer's host.
-      # - "3000:3000"
-      - "50051:50051"              # palimpsest gRPC-Web
+      # exposure is mostly for local debugging.
+      - "${API_PORT:-13017}:3000"
+      - "${GRPC_PORT:-56051}:50051" # palimpsest gRPC-Web
     environment:
       RUST_LOG: "info,palimpsest_demo_server=debug,palimpsest_server=info"
       # Postgres connection (the consumer + write client both use it).
@@ -69,7 +68,7 @@ services:
     image: palimpsest-demo-web:dev
     container_name: palimpsest-demo-web
     ports:
-      - "8080:80"
+      - "${WEB_PORT:-18080}:80"
     depends_on:
       server:
         condition: service_started

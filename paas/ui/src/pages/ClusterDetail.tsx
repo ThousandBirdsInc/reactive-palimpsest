@@ -1,4 +1,4 @@
-// Cluster detail page — five tabs around one cluster_id. Each tab owns its
+// Cluster detail page — eight tabs around one cluster_id. Each tab owns its
 // own data fetch so leaving the page tears one resource down at a time.
 
 import { useCallback, useEffect, useState } from "react";
@@ -134,7 +134,10 @@ export function ClusterDetail() {
         <Route path="pitr" element={<ClusterPitrTab clusterId={clusterId} />} />
         <Route path="roles" element={<ClusterRolesTab onRotate={() => run("rotate", () => api.rotateRoles(clusterId))} />} />
         <Route path="operations" element={<ClusterOpsTab clusterId={clusterId} />} />
-        <Route path="audit" element={<ClusterAuditTab clusterId={clusterId} />} />
+        <Route
+          path="audit"
+          element={<ClusterAuditTab clusterId={clusterId} environmentId={c?.environment_id} />}
+        />
       </Routes>
     </div>
   );
@@ -380,13 +383,31 @@ function ClusterOpsTab({ clusterId }: { clusterId: string }) {
   );
 }
 
-function ClusterAuditTab({ clusterId }: { clusterId: string }) {
+function ClusterAuditTab({
+  clusterId,
+  environmentId,
+}: {
+  clusterId: string;
+  environmentId?: string;
+}) {
   const api = useApi();
+  // Scope the feed to the cluster's OWN environment, not the scope picker's —
+  // a cluster is addressable by id regardless of the selected environment, so
+  // the picker may point elsewhere.
   const events = usePaasResource<AuditEvent[]>(
-    useCallback(() => api.listAuditEvents(100), [api]),
+    useCallback(
+      () => (environmentId ? api.listAuditEvents(100, environmentId) : Promise.resolve([])),
+      [api, environmentId],
+    ),
     [],
+    { deps: [environmentId] },
   );
-  const rows = events.data.filter((e) => e.resource?.includes(clusterId));
+  // Match the cluster exactly or as a resource prefix (e.g. clone targets are
+  // "<clusterId>:<db>"). A bare includes() would collide on id prefixes such as
+  // "cluster_1" vs "cluster_12".
+  const rows = events.data.filter(
+    (e) => e.resource === clusterId || e.resource?.startsWith(`${clusterId}:`),
+  );
   if (events.error) return <div className="error-banner">{events.error}</div>;
   if (rows.length === 0) return <Empty title="No audit events for this cluster" />;
   return (

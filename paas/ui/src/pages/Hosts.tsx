@@ -18,7 +18,7 @@ export function Hosts() {
     <div>
       <PageHeader
         title="Node hosts"
-        subtitle={`${hosts.data.length} total`}
+        subtitle={`${hosts.data.length} total · fleet-wide (ignores the selected environment)`}
         onRefresh={hosts.refresh}
         loading={hosts.loading}
       />

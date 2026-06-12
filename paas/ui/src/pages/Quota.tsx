@@ -21,7 +21,7 @@ export function Quota() {
     <div>
       <PageHeader
         title="Quota"
-        subtitle={`${alerts.data.length} alerts · ${policies.data.length} policies`}
+        subtitle={`${alerts.data.length} environment alerts · ${policies.data.length} organization policies`}
         onRefresh={() => {
           alerts.refresh();
           policies.refresh();
@@ -32,7 +32,7 @@ export function Quota() {
         <div className="error-banner">{alerts.error ?? policies.error}</div>
       )}
 
-      <div className="section-label">Alerts</div>
+      <div className="section-label">Alerts (environment)</div>
       <div className="table-wrap" style={{ marginBottom: 14 }}>
         <table>
           <thead>
@@ -61,7 +61,7 @@ export function Quota() {
         {alerts.data.length === 0 && <Empty title="No quota alerts" />}
       </div>
 
-      <div className="section-label">Policies</div>
+      <div className="section-label">Policies (organization)</div>
       <div className="table-wrap">
         <table>
           <thead>

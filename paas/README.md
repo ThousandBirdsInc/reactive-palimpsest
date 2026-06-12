@@ -95,6 +95,8 @@ Start with:
   and buildout plan.
 - [MANAGED-POSTGRES-DESIGN.md](MANAGED-POSTGRES-DESIGN.md) for the
   PostgreSQL 18+ runtime, Rust control plane, and host-agent design.
+- [PRODUCTION-READINESS-DESIGN.md](PRODUCTION-READINESS-DESIGN.md) for the
+  concrete work needed to move the current prototype to a production PaaS.
 - [../docs/PAAS-DESIGN.md](../docs/PAAS-DESIGN.md) for the product and
   systems design.
 - [adr/0001-managed-postgres-version-floor.md](adr/0001-managed-postgres-version-floor.md)
@@ -129,8 +131,8 @@ If you prefer to run components by hand (without Tilt), see
 Local endpoints:
 
 - PaaS UI: `http://127.0.0.1:8090/`
-- Control-plane API: `http://127.0.0.1:8088`
-- Control-plane metrics: `http://127.0.0.1:8088/metrics`
+- Control-plane API: `http://127.0.0.1:18088`
+- Control-plane metrics: `http://127.0.0.1:18088/metrics`
 - Control-plane Postgres: `127.0.0.1:54330`
 - Managed Postgres clusters created by the Tilt node-agent start at port `56000`
 
@@ -210,7 +212,7 @@ npm run dev -- --host 127.0.0.1
 ```
 
 The Vite development server proxies `/api` to the SQL control plane at
-`http://127.0.0.1:8088`, so run `serve-sql-api` separately when you want live
+`http://127.0.0.1:18088`, so run `serve-sql-api` separately when you want live
 data and mutating actions.
 
 Run the focused checks with:
@@ -239,7 +241,7 @@ passwords instead of local-dev plaintext secret material:
 PALIMPSEST_PAAS_SECRET_PROVIDER=env-envelope \
 PALIMPSEST_PAAS_SECRET_KEY_REF=local-control-plane-key \
 PALIMPSEST_PAAS_SECRET_KEY_BASE64=<32-byte-base64-key> \
-  cargo run -p palimpsest-paas-control-plane -- serve-sql-api 127.0.0.1:8088 postgres://user:pass@localhost:5432/palimpsest_control
+  cargo run -p palimpsest-paas-control-plane -- serve-sql-api 127.0.0.1:18088 postgres://user:pass@localhost:5432/palimpsest_control
 ```
 
 Render host-local node-agent steps:
@@ -260,11 +262,11 @@ cargo run -p palimpsest-paas-node-agent -- apply paas/examples/node-agent.prepar
 Poll the SQL-backed control-plane queue once:
 
 ```text
-cargo run -p palimpsest-paas-node-agent -- register http://127.0.0.1:8088
-cargo run -p palimpsest-paas-node-agent -- heartbeat http://127.0.0.1:8088
-cargo run -p palimpsest-paas-node-agent -- poll-once http://127.0.0.1:8088
-cargo run -p palimpsest-paas-node-agent -- poll-once-container http://127.0.0.1:8088
-cargo run -p palimpsest-paas-node-agent -- poll-once-dry-run http://127.0.0.1:8088
+cargo run -p palimpsest-paas-node-agent -- register http://127.0.0.1:18088
+cargo run -p palimpsest-paas-node-agent -- heartbeat http://127.0.0.1:18088
+cargo run -p palimpsest-paas-node-agent -- poll-once http://127.0.0.1:18088
+cargo run -p palimpsest-paas-node-agent -- poll-once-container http://127.0.0.1:18088
+cargo run -p palimpsest-paas-node-agent -- poll-once-dry-run http://127.0.0.1:18088
 ```
 
 `register` upserts the local node host, `heartbeat` updates capacity and
@@ -328,7 +330,7 @@ PALIMPSEST_GATEWAY_ROUTES=paas/examples/gateway-route.json \
 Or start it from SQL-backed control-plane route discovery:
 
 ```text
-PALIMPSEST_GATEWAY_CONTROL_PLANE_URL=http://127.0.0.1:8088 \
+PALIMPSEST_GATEWAY_CONTROL_PLANE_URL=http://127.0.0.1:18088 \
   PALIMPSEST_GATEWAY_ROUTE_REFRESH_SECS=15 \
   cargo run -p palimpsest-paas-gateway
 ```
@@ -356,7 +358,7 @@ PALIMPSEST_DB_PROXY_ROUTES=paas/examples/database-proxy-route.json \
 Or start it from SQL-backed control-plane route discovery:
 
 ```text
-PALIMPSEST_DB_PROXY_CONTROL_PLANE_URL=http://127.0.0.1:8088 \
+PALIMPSEST_DB_PROXY_CONTROL_PLANE_URL=http://127.0.0.1:18088 \
   cargo run -p palimpsest-paas-gateway --bin palimpsest-paas-db-proxy
 ```
 
@@ -371,7 +373,7 @@ For managed Postgres, configure the stable environment endpoint through the
 control plane instead of hand-writing the route:
 
 ```text
-curl -X POST http://127.0.0.1:8088/v1/environments/env_123/managed-postgres-endpoint/database-proxy-route \
+curl -X POST http://127.0.0.1:18088/v1/environments/env_123/managed-postgres-endpoint/database-proxy-route \
   -H 'content-type: application/json' \
   -H 'x-actor-id: local-dev' \
   --data '{"listen_addr":"127.0.0.1:55430"}'
@@ -384,7 +386,7 @@ SQL-backed `database_proxy_routes` row during failover cutover.
 Issue a local-dev endpoint certificate record:
 
 ```text
-curl -X POST http://127.0.0.1:8088/v1/environments/env_123/managed-postgres-endpoint/certificates \
+curl -X POST http://127.0.0.1:18088/v1/environments/env_123/managed-postgres-endpoint/certificates \
   -H 'content-type: application/json' \
   -H 'x-actor-id: local-dev' \
   --data '{"common_name":"db.env-123.palimpsest.local","validity_days":30}'

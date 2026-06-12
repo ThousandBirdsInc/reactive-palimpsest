@@ -450,6 +450,10 @@ tbody tr:hover {
   background: var(--surface-2);
 }
 
+tbody tr.row-selectable.selected {
+  background: var(--accent-soft);
+}
+
 td.mono,
 .mono {
   font-family: var(--mono);
@@ -1288,6 +1292,88 @@ td.mono,
 .sql-editor:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(38, 93, 203, 0.25);
+}
+
+/* ----- overlay code editor (highlighted <pre> behind a textarea) ----- */
+
+.code-editor-wrap {
+  position: relative;
+}
+
+.code-pre {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  border-color: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.code-pre code {
+  font: inherit;
+  display: block;
+}
+
+.code-input {
+  position: relative;
+  z-index: 1;
+  display: block;
+  background: transparent;
+  color: transparent;
+  caret-color: #e4e9f3;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* color:transparent would otherwise make the placeholder invisible too. */
+.code-input::placeholder {
+  color: #5a6477;
+}
+
+.code-input::selection {
+  background: rgba(38, 93, 203, 0.35);
+}
+
+.tok-comment {
+  color: #6b7689;
+  font-style: italic;
+}
+.tok-section {
+  color: #7aa2f7;
+  font-weight: 600;
+}
+.tok-key {
+  color: #9ece6a;
+}
+.tok-op {
+  color: #89ddff;
+}
+.tok-string {
+  color: #e0af68;
+}
+.tok-user {
+  color: #f7768e;
+}
+.tok-number {
+  color: #ff9e64;
+}
+.tok-bool {
+  color: #bb9af7;
+}
+.tok-keyword {
+  color: #7aa2f7;
+  font-weight: 600;
+}
+.tok-function {
+  color: #7dcfff;
+}
+.tok-ident {
+  color: #c0caf5;
 }
 
 .sql-completion-menu {

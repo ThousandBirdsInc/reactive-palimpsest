@@ -1071,6 +1071,16 @@ pub enum NodeAgentAction {
         target_postgres_version: PostgresVersion,
         strategy: ManagedPostgresMajorUpgradeStrategy,
     },
+    StartSyncDeployment {
+        deployment_id: String,
+        config_version: String,
+    },
+    StopSyncDeployment {
+        deployment_id: String,
+    },
+    ReportSyncDeployment {
+        deployment_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1142,10 +1152,27 @@ pub enum NodeHostAgentCredentialState {
     Revoked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeHostHeartbeat {
     pub state: NodeHostState,
     pub capacity: NodeHostCapacity,
+    #[serde(default)]
+    pub observed_clusters: Vec<NodeHostClusterObservation>,
+    #[serde(default)]
+    pub observed_sync_deployments: Vec<NodeHostSyncDeploymentObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeHostClusterObservation {
+    pub cluster_id: String,
+    pub data_dir: String,
+    pub postgres_running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeHostSyncDeploymentObservation {
+    pub deployment_id: String,
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1468,6 +1495,20 @@ pub struct QueryPermissionPolicy {
     pub predicate_sql: String,
     pub sample_context: serde_json::Value,
     pub status: QueryPermissionPolicyStatus,
+}
+
+/// Per-environment permission-rule DSL document authored in the PaaS UI.
+///
+/// The `dsl` field holds the raw `palimpsest-permissions` TOML config; it is
+/// stored verbatim so operators can keep drafts, and is compiled by the
+/// verifier on demand (see the `/v1/permissions/verify` endpoint).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionRuleDocument {
+    pub environment_id: String,
+    pub organization_id: String,
+    pub project_id: String,
+    pub dsl: String,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

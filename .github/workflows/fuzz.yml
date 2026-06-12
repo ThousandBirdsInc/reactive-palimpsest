@@ -41,6 +41,9 @@ jobs:
       - name: Install Rust nightly (cargo-fuzz requires nightly)
         uses: dtolnay/rust-toolchain@nightly
 
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 

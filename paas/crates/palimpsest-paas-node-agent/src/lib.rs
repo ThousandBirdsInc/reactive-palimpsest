@@ -18,8 +18,9 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palimpsest_paas_core::{
     AgentCommandStatus, CloneRedactionMethod, DatabaseRoleCredential, DatabaseRoleKind,
     ManagedPostgresCloneRedactionPolicy, NodeAgentAction, NodeAgentBackupArtifact,
-    NodeAgentCommand, NodeAgentCommandResult, NodeHost, NodeHostCapacity, NodeHostHardeningCheck,
-    NodeHostHardeningStatus, NodeHostHeartbeat, NodeHostState, QueuedNodeAgentCommand,
+    NodeAgentCommand, NodeAgentCommandResult, NodeHost, NodeHostCapacity,
+    NodeHostClusterObservation, NodeHostHardeningCheck, NodeHostHardeningStatus, NodeHostHeartbeat,
+    NodeHostState, NodeHostSyncDeploymentObservation, QueuedNodeAgentCommand,
     MIN_SUPPORTED_POSTGRES_MAJOR,
 };
 use ring::{digest, hmac};
@@ -234,6 +235,19 @@ pub enum AgentStep {
     ProbeStatus {
         data_dir: PathBuf,
     },
+    StartSyncDeployment {
+        deployment_id: String,
+        config_version: String,
+        runtime_dir: PathBuf,
+    },
+    StopSyncDeployment {
+        deployment_id: String,
+        runtime_dir: PathBuf,
+    },
+    ProbeSyncDeployment {
+        deployment_id: String,
+        runtime_dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,7 +312,53 @@ impl NodeAgent {
         NodeHostHeartbeat {
             state: host.state,
             capacity: host.capacity,
+            observed_clusters: self.observed_clusters(),
+            observed_sync_deployments: self.observed_sync_deployments(),
         }
+    }
+
+    fn observed_clusters(&self) -> Vec<NodeHostClusterObservation> {
+        let root = self.config.runtime_root.join("postgres");
+        let Ok(entries) = fs::read_dir(root) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                if !file_type.is_dir() {
+                    return None;
+                }
+                let cluster_id = entry.file_name().to_string_lossy().into_owned();
+                let data_dir = entry.path();
+                Some(NodeHostClusterObservation {
+                    cluster_id,
+                    data_dir: data_dir.display().to_string(),
+                    postgres_running: data_dir.join("postmaster.pid").exists(),
+                })
+            })
+            .collect()
+    }
+
+    fn observed_sync_deployments(&self) -> Vec<NodeHostSyncDeploymentObservation> {
+        let root = self.config.runtime_root.join("sync");
+        let Ok(entries) = fs::read_dir(root) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                if !file_type.is_dir() {
+                    return None;
+                }
+                let deployment_id = entry.file_name().to_string_lossy().into_owned();
+                Some(NodeHostSyncDeploymentObservation {
+                    deployment_id,
+                    running: entry.path().join("running.json").exists(),
+                })
+            })
+            .collect()
     }
 
     pub fn hardening_check(&self) -> NodeHostHardeningCheck {
@@ -439,6 +499,26 @@ impl NodeAgent {
             NodeAgentAction::ReportStatus => vec![AgentStep::ProbeStatus {
                 data_dir: self.cluster_data_dir(&command.cluster_id),
             }],
+            NodeAgentAction::StartSyncDeployment {
+                deployment_id,
+                config_version,
+            } => vec![AgentStep::StartSyncDeployment {
+                deployment_id: deployment_id.clone(),
+                config_version: config_version.clone(),
+                runtime_dir: self.sync_deployment_runtime_dir(deployment_id),
+            }],
+            NodeAgentAction::StopSyncDeployment { deployment_id } => {
+                vec![AgentStep::StopSyncDeployment {
+                    deployment_id: deployment_id.clone(),
+                    runtime_dir: self.sync_deployment_runtime_dir(deployment_id),
+                }]
+            }
+            NodeAgentAction::ReportSyncDeployment { deployment_id } => {
+                vec![AgentStep::ProbeSyncDeployment {
+                    deployment_id: deployment_id.clone(),
+                    runtime_dir: self.sync_deployment_runtime_dir(deployment_id),
+                }]
+            }
             NodeAgentAction::CheckPostgresStandbyLag {
                 source_data_dir,
                 source_port,
@@ -1375,6 +1455,68 @@ impl NodeAgent {
                     },
                 })
             }
+            AgentStep::StartSyncDeployment {
+                deployment_id,
+                config_version,
+                runtime_dir,
+            } => {
+                ensure_under_root(runtime_dir, &self.config.runtime_root)?;
+                fs::create_dir_all(runtime_dir).map_err(|err| NodeAgentError::Io {
+                    action: format!("create directory {}", runtime_dir.display()),
+                    source: err,
+                })?;
+                let marker_path = runtime_dir.join("running.json");
+                let payload = serde_json::json!({
+                    "deployment_id": deployment_id,
+                    "config_version": config_version,
+                    "started_at_unix_seconds": unix_timestamp_seconds(),
+                });
+                fs::write(&marker_path, payload.to_string()).map_err(|err| NodeAgentError::Io {
+                    action: format!("write {}", marker_path.display()),
+                    source: err,
+                })?;
+                Ok(succeeded(
+                    step,
+                    format!("started sync deployment {deployment_id}"),
+                ))
+            }
+            AgentStep::StopSyncDeployment {
+                deployment_id,
+                runtime_dir,
+            } => {
+                ensure_under_root(runtime_dir, &self.config.runtime_root)?;
+                let marker_path = runtime_dir.join("running.json");
+                match fs::remove_file(&marker_path) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        return Err(NodeAgentError::Io {
+                            action: format!("remove {}", marker_path.display()),
+                            source: err,
+                        });
+                    }
+                }
+                Ok(succeeded(
+                    step,
+                    format!("stopped sync deployment {deployment_id}"),
+                ))
+            }
+            AgentStep::ProbeSyncDeployment {
+                deployment_id,
+                runtime_dir,
+            } => {
+                ensure_under_root(runtime_dir, &self.config.runtime_root)?;
+                let running = runtime_dir.join("running.json").exists();
+                Ok(AgentStepOutcome {
+                    step: step.clone(),
+                    status: AgentStepStatus::Reported,
+                    detail: if running {
+                        format!("sync deployment {deployment_id} marker present")
+                    } else {
+                        format!("sync deployment {deployment_id} marker absent")
+                    },
+                })
+            }
         }
     }
 
@@ -1387,6 +1529,13 @@ impl NodeAgent {
             .runtime_root
             .join("postgres")
             .join(sanitize_component(cluster_id))
+    }
+
+    fn sync_deployment_runtime_dir(&self, deployment_id: &str) -> PathBuf {
+        self.config
+            .runtime_root
+            .join("sync")
+            .join(sanitize_component(deployment_id))
     }
 }
 
@@ -2146,11 +2295,21 @@ pub fn result_from_execution_report(
     host_id: &str,
     report: &ExecutionReport,
 ) -> NodeAgentCommandResult {
+    let detail = report
+        .outcomes
+        .iter()
+        .map(|outcome| outcome.detail.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
     NodeAgentCommandResult {
         command_id: report.command_id.clone(),
         host_id: host_id.to_owned(),
         status: AgentCommandStatus::Succeeded,
-        detail: Some(format!("executed {} step(s)", report.outcomes.len())),
+        detail: Some(if detail.is_empty() {
+            format!("executed {} step(s)", report.outcomes.len())
+        } else {
+            detail
+        }),
         operation_token: None,
         backup_artifacts: backup_artifacts_from_report(report),
     }
@@ -2405,6 +2564,8 @@ impl DockerPostgresRunner {
             "-d".to_owned(),
             "--name".to_owned(),
             Self::container_name_for_data_dir(data_dir)?,
+            "--restart".to_owned(),
+            "unless-stopped".to_owned(),
             "-v".to_owned(),
             volume,
         ];
@@ -5008,6 +5169,8 @@ mod tests {
         assert!(args.contains(&"-d".to_owned()));
         assert!(args.contains(&"--name".to_owned()));
         assert!(args.contains(&"palimpsest-pg-cluster_123".to_owned()));
+        assert!(args.contains(&"--restart".to_owned()));
+        assert!(args.contains(&"unless-stopped".to_owned()));
         assert!(args.contains(&"127.0.0.1:55000:55000".to_owned()));
         assert!(args.contains(&"postgres:18".to_owned()));
         assert!(args.contains(&data_dir.display().to_string()));
@@ -5113,6 +5276,72 @@ mod tests {
             ));
             Ok(())
         }
+    }
+
+    #[test]
+    fn heartbeat_reports_observed_postgres_and_sync_resources() {
+        let root = unique_temp_root("heartbeat-observed");
+        let _ = fs::remove_dir_all(&root);
+        let postgres_dir = root.join("postgres").join("cluster_123");
+        let sync_dir = root.join("sync").join("sync_123");
+        fs::create_dir_all(&postgres_dir).expect("postgres dir exists");
+        fs::create_dir_all(&sync_dir).expect("sync dir exists");
+        fs::write(postgres_dir.join("postmaster.pid"), "123\n").expect("pid marker writes");
+        fs::write(sync_dir.join("running.json"), "{}").expect("sync marker writes");
+        let agent = NodeAgent::new(AgentConfig {
+            host_id: "test-host".to_owned(),
+            postgres_bin_dir: PathBuf::from("/pg18/bin"),
+            runtime_root: root.clone(),
+        });
+
+        let heartbeat = agent.heartbeat();
+
+        assert_eq!(heartbeat.observed_clusters.len(), 1);
+        assert_eq!(heartbeat.observed_clusters[0].cluster_id, "cluster_123");
+        assert!(heartbeat.observed_clusters[0].postgres_running);
+        assert_eq!(heartbeat.observed_sync_deployments.len(), 1);
+        assert_eq!(
+            heartbeat.observed_sync_deployments[0].deployment_id,
+            "sync_123"
+        );
+        assert!(heartbeat.observed_sync_deployments[0].running);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn start_sync_deployment_records_running_marker() {
+        let root = unique_temp_root("start-sync");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root exists");
+        let agent = NodeAgent::new(AgentConfig {
+            host_id: "test-host".to_owned(),
+            postgres_bin_dir: PathBuf::from("/pg18/bin"),
+            runtime_root: root.clone(),
+        });
+        let command = NodeAgentCommand {
+            command_id: "cmd_sync_start".to_owned(),
+            cluster_id: "cluster_123".to_owned(),
+            action: NodeAgentAction::StartSyncDeployment {
+                deployment_id: "sync_123".to_owned(),
+                config_version: "config_001".to_owned(),
+            },
+        };
+        let runner = RecordingRunner::default();
+
+        let report = agent
+            .execute_with_runner(&command, &runner)
+            .expect("sync start succeeds");
+
+        assert_eq!(report.outcomes.len(), 1);
+        let marker = root.join("sync").join("sync_123").join("running.json");
+        let marker_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(marker).expect("marker exists"))
+                .expect("marker parses");
+        assert_eq!(marker_json["deployment_id"], "sync_123");
+        assert_eq!(marker_json["config_version"], "config_001");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     fn unique_temp_root(label: &str) -> PathBuf {

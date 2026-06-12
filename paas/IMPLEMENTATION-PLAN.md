@@ -571,7 +571,11 @@ Acceptance criteria:
   region, and failure-domain filters for capacity and maintenance views.
   Hardening evidence is exposed through
   `POST /v1/node-hosts/{host_id}/hardening-checks`,
-  `GET /v1/node-hosts/{host_id}/hardening-checks`, and check detail routes.**
+  `GET /v1/node-hosts/{host_id}/hardening-checks`, and check detail routes.
+  Node-agent heartbeats now also report observed local clusters and
+  SyncDeployments (data directory + running flag), which the control plane
+  reconciles into `node_host_observed_clusters` and
+  `node_host_observed_sync_deployments` as a desired-vs-observed drift signal.**
 - Control-plane reconciliation can now place a SQL-backed managed Postgres
   cluster on an active node host, persist next cluster state, and enqueue
   resulting node-agent commands. **Started with
@@ -811,7 +815,14 @@ Deliverables:
   `POST /v1/managed-postgres/clusters/{cluster_id}/query-explorer/inspect`,
   which validates read-only SQL and returns canonical SQL plus PostgreSQL
   `EXPLAIN (FORMAT JSON)` estimate metadata without returning row data. The
-  local smoke verifies both paths against a live PostgreSQL 18 container.**
+  local smoke verifies both paths against a live PostgreSQL 18 container. A
+  per-environment Rule DSL document is now also durable in
+  `permission_rule_documents` with `GET`/`PUT
+  /v1/environments/{environment_id}/permission-rule-document`, and
+  `POST /v1/permissions/verify` compiles the `palimpsest-permissions` TOML
+  against a demo or live-schema catalog with
+  `palimpsest_permissions::{parse_config, compile_rules}`. The UI ships a
+  `CodeEditor`-based Rule DSL editor plus verifier and a Query policies tab.**
 - Config deploy history and rollback-to-previous-config action. **Started with
   SQL-backed config history listing and rollback creation endpoints.**
 - API key, JWT issuer, and team RBAC screens. **Started at the control-plane
