@@ -13,6 +13,8 @@
 //! - `permissions eval <config> --query <sql>` — compile permission
 //!   rules, rewrite one or more queries for a supplied user context,
 //!   and print the before/after canonical MIR.
+//! - `skills install` — install Codex and Claude skills that teach
+//!   agents how to operate the Palimpsest CLI.
 //! - `dump-catalog [config]` — emit the configured catalog (the demo
 //!   catalog for v1) as pretty JSON on stdout. Useful for shipping
 //!   schemas to clients during development.
@@ -138,6 +140,8 @@ enum CliError {
     DumpCatalog(serde_json::Error),
     #[error("permissions eval: {0}")]
     EvalPermissions(String),
+    #[error("skills: {0}")]
+    Skills(String),
     #[error("dev stack: {0}")]
     DevStack(String),
     #[error("db: {0}")]
@@ -179,6 +183,7 @@ async fn run() -> Result<(), CliError> {
         Some("serve") => cmd_serve(rest.first().map(PathBuf::from)).await,
         Some("validate-config") => cmd_validate_config(&require_one("validate-config", rest)?),
         Some("permissions") => cmd_permissions(rest),
+        Some("skills") => cmd_skills(rest),
         Some("dump-catalog") => cmd_dump_catalog(rest.first().map(PathBuf::from).as_deref()),
         Some("dev") => cmd_dev(rest),
         Some("db") => cmd_db(rest),
@@ -212,6 +217,7 @@ Commands:
   validate-config <config>    Parse the TOML config and exit 0/1.
   permissions eval <config> --query <sql> [--user field=value]
                               Rewrite query MIR with configured permissions.
+  skills install [options]    Install Codex and Claude skills for this CLI.
   dump-catalog [config]       Print the configured catalog as JSON.
   dev up|down|reset|status|env
                               Manage the local PaaS dev stack.
@@ -728,6 +734,307 @@ fn schema_type(field: &str, schema: &BTreeMap<String, String>) -> Result<ColumnT
         ))
     })?;
     parse_column_type(raw_type).map_err(CliError::EvalPermissions)
+}
+
+fn cmd_skills(rest: &[String]) -> Result<(), CliError> {
+    let Some(action) = rest.first().map(String::as_str) else {
+        print_skills_help();
+        return Ok(());
+    };
+
+    match action {
+        "install"
+            if rest
+                .get(1)
+                .is_some_and(|arg| arg == "--help" || arg == "-h") =>
+        {
+            print_skills_help();
+            Ok(())
+        }
+        "install" => cmd_skills_install(&rest[1..]),
+        "help" | "--help" | "-h" => {
+            print_skills_help();
+            Ok(())
+        }
+        other => Err(CliError::Usage(format!(
+            "skills: unknown action '{other}' (expected install)"
+        ))),
+    }
+}
+
+fn print_skills_help() {
+    println!(
+        "palimpsest skills - install agent skills for operating the CLI
+
+Usage:
+  palimpsest skills install [options]
+
+Options:
+  --all                       Install both Codex and Claude skills (default).
+  --codex                     Install only/also the Codex skill.
+  --claude                    Install only/also the Claude skill.
+  --codex-dir <path>          Codex skills root (default: CODEX_HOME/skills or ~/.codex/skills).
+  --claude-dir <path>         Claude skills root (default: CLAUDE_HOME/skills or ~/.claude/skills).
+  --force                     Replace an existing modified skill.
+  --dry-run                   Print intended writes without changing files.
+
+The installed skill is named palimpsest-cli."
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillsInstallOptions {
+    targets: Vec<SkillTarget>,
+    codex_dir: PathBuf,
+    claude_dir: PathBuf,
+    force: bool,
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillTarget {
+    Codex,
+    Claude,
+}
+
+impl SkillTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SkillInstallStatus {
+    Created,
+    Updated,
+    Unchanged,
+    DryRunCreate,
+    DryRunUpdate,
+    DryRunUnchanged,
+}
+
+impl SkillInstallStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Updated => "updated",
+            Self::Unchanged => "unchanged",
+            Self::DryRunCreate => "would create",
+            Self::DryRunUpdate => "would update",
+            Self::DryRunUnchanged => "would leave unchanged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillInstallReport {
+    target: SkillTarget,
+    path: PathBuf,
+    status: SkillInstallStatus,
+}
+
+const PALIMPSEST_CLI_SKILL_NAME: &str = "palimpsest-cli";
+
+const PALIMPSEST_CLI_SKILL: &str = r#"---
+name: palimpsest-cli
+description: Use when operating the Palimpsest CLI, including config validation, permission query evaluation, local PaaS stack management, managed Postgres helper commands, and CLI installation checks.
+---
+
+# Palimpsest CLI
+
+Use the `palimpsest` binary for local operation and diagnostics. Start with `palimpsest help` when the current command surface matters.
+
+## Core Commands
+
+- `palimpsest validate-config <config>`: parse TOML and compile permission rules.
+- `palimpsest permissions eval <config> --query <sql> --user field=value`: compile configured permissions and show canonical query MIR before and after rewriting.
+- `palimpsest dump-catalog [config]`: print the configured demo catalog as JSON.
+- `palimpsest dev status`: inspect the local PaaS development stack.
+- `palimpsest dev up`: start the local PostgreSQL 18 and Palimpsest stack.
+- `palimpsest dev env`: print `.env`-compatible local connection settings.
+- `palimpsest dev down`: stop the local stack when the user asks to stop services.
+- `palimpsest db psql --local [--role app|admin|replication]`: open `psql` against the local dev stack.
+- `palimpsest db create ...`: create a managed PostgreSQL 18+ cluster intent through the control plane.
+- `palimpsest slot-info <config>`: inspect upstream replication slot status when the binary was built with `--features slot-info`.
+
+## Preferred Workflow
+
+1. Run `palimpsest validate-config <config>` before serving or debugging permission behavior.
+2. Use `palimpsest permissions eval` for permission model questions instead of inferring rewrites by inspection.
+3. Check `palimpsest dev status` before starting or stopping the local stack.
+4. Prefer `palimpsest dev env` and `palimpsest db psql --local` over manually reconstructing local database URLs.
+5. Use `cargo install palimpsest-cli` for the published CLI, or `cargo install --path crates/palimpsest-cli` from a checkout.
+"#;
+
+fn cmd_skills_install(rest: &[String]) -> Result<(), CliError> {
+    let options = parse_skills_install_options(rest)?;
+    let mut reports = Vec::with_capacity(options.targets.len());
+
+    for target in &options.targets {
+        let base_dir = match target {
+            SkillTarget::Codex => &options.codex_dir,
+            SkillTarget::Claude => &options.claude_dir,
+        };
+        reports.push(install_skill_target(
+            *target,
+            base_dir,
+            options.force,
+            options.dry_run,
+        )?);
+    }
+
+    for report in reports {
+        println!(
+            "{}: {} {}",
+            report.target.label(),
+            report.status.label(),
+            report.path.display()
+        );
+    }
+    Ok(())
+}
+
+fn parse_skills_install_options(rest: &[String]) -> Result<SkillsInstallOptions, CliError> {
+    let mut codex = false;
+    let mut claude = false;
+    let mut codex_dir = None;
+    let mut claude_dir = None;
+    let mut force = false;
+    let mut dry_run = false;
+    let mut iter = rest.iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--all" => {
+                codex = true;
+                claude = true;
+            }
+            "--codex" => codex = true,
+            "--claude" => claude = true,
+            "--codex-dir" => codex_dir = Some(PathBuf::from(next_arg(arg, iter.next())?)),
+            "--claude-dir" => claude_dir = Some(PathBuf::from(next_arg(arg, iter.next())?)),
+            "--force" => force = true,
+            "--dry-run" => dry_run = true,
+            "--help" | "-h" => {
+                print_skills_help();
+                return Err(CliError::Usage("skills install help requested".to_owned()));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "skills install: unknown option '{other}'"
+                )));
+            }
+        }
+    }
+
+    if !codex && !claude {
+        codex = true;
+        claude = true;
+    }
+
+    let mut targets = Vec::new();
+    if codex {
+        targets.push(SkillTarget::Codex);
+    }
+    if claude {
+        targets.push(SkillTarget::Claude);
+    }
+
+    Ok(SkillsInstallOptions {
+        targets,
+        codex_dir: codex_dir.unwrap_or_else(default_codex_skills_dir),
+        claude_dir: claude_dir.unwrap_or_else(default_claude_skills_dir),
+        force,
+        dry_run,
+    })
+}
+
+fn default_codex_skills_dir() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_relative(".codex"))
+        .join("skills")
+}
+
+fn default_claude_skills_dir() -> PathBuf {
+    std::env::var_os("CLAUDE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_relative(".claude"))
+        .join("skills")
+}
+
+fn home_relative(path: &str) -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(path)
+}
+
+fn install_skill_target(
+    target: SkillTarget,
+    base_dir: &Path,
+    force: bool,
+    dry_run: bool,
+) -> Result<SkillInstallReport, CliError> {
+    let skill_dir = base_dir.join(PALIMPSEST_CLI_SKILL_NAME);
+    let skill_path = skill_dir.join("SKILL.md");
+    let existing = match fs::read_to_string(&skill_path) {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(CliError::Skills(format!(
+                "read existing skill '{}': {err}",
+                skill_path.display()
+            )));
+        }
+    };
+
+    let status = match existing {
+        Some(content) if content == PALIMPSEST_CLI_SKILL => {
+            if dry_run {
+                SkillInstallStatus::DryRunUnchanged
+            } else {
+                SkillInstallStatus::Unchanged
+            }
+        }
+        Some(_) if !force => {
+            return Err(CliError::Skills(format!(
+                "{} skill already exists at {}; pass --force to replace it",
+                target.label(),
+                skill_path.display()
+            )));
+        }
+        Some(_) if dry_run => SkillInstallStatus::DryRunUpdate,
+        Some(_) => {
+            fs::write(&skill_path, PALIMPSEST_CLI_SKILL).map_err(|err| {
+                CliError::Skills(format!("write skill '{}': {err}", skill_path.display()))
+            })?;
+            SkillInstallStatus::Updated
+        }
+        None if dry_run => SkillInstallStatus::DryRunCreate,
+        None => {
+            fs::create_dir_all(&skill_dir).map_err(|err| {
+                CliError::Skills(format!(
+                    "create skill directory '{}': {err}",
+                    skill_dir.display()
+                ))
+            })?;
+            fs::write(&skill_path, PALIMPSEST_CLI_SKILL).map_err(|err| {
+                CliError::Skills(format!("write skill '{}': {err}", skill_path.display()))
+            })?;
+            SkillInstallStatus::Created
+        }
+    };
+
+    Ok(SkillInstallReport {
+        target,
+        path: skill_path,
+        status,
+    })
 }
 
 #[derive(Serialize)]
@@ -1485,6 +1792,76 @@ mod tests {
     }
 
     #[test]
+    fn skills_install_defaults_to_codex_and_claude() {
+        let options = parse_skills_install_options(&[]).expect("skills options should parse");
+
+        assert_eq!(
+            options.targets,
+            vec![SkillTarget::Codex, SkillTarget::Claude]
+        );
+        assert!(options.codex_dir.ends_with(".codex/skills"));
+        assert!(options.claude_dir.ends_with(".claude/skills"));
+        assert!(!options.force);
+        assert!(!options.dry_run);
+    }
+
+    #[test]
+    fn skills_install_supports_target_and_directory_overrides() {
+        let options = parse_skills_install_options(&[
+            "--codex".to_owned(),
+            "--codex-dir".to_owned(),
+            "/tmp/codex-skills".to_owned(),
+            "--claude-dir".to_owned(),
+            "/tmp/claude-skills".to_owned(),
+            "--force".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .expect("skills options should parse");
+
+        assert_eq!(options.targets, vec![SkillTarget::Codex]);
+        assert_eq!(options.codex_dir, PathBuf::from("/tmp/codex-skills"));
+        assert_eq!(options.claude_dir, PathBuf::from("/tmp/claude-skills"));
+        assert!(options.force);
+        assert!(options.dry_run);
+    }
+
+    #[test]
+    fn skills_install_creates_skill_and_is_idempotent() {
+        let base_dir = temp_test_dir("skills-create");
+        let first = install_skill_target(SkillTarget::Codex, &base_dir, false, false)
+            .expect("skill should install");
+        let second = install_skill_target(SkillTarget::Codex, &base_dir, false, false)
+            .expect("same skill should be unchanged");
+
+        assert_eq!(first.status, SkillInstallStatus::Created);
+        assert_eq!(second.status, SkillInstallStatus::Unchanged);
+        assert_eq!(
+            std::fs::read_to_string(base_dir.join("palimpsest-cli").join("SKILL.md"))
+                .expect("skill should be readable"),
+            PALIMPSEST_CLI_SKILL
+        );
+
+        let _ = std::fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn skills_install_refuses_modified_existing_skill_without_force() {
+        let base_dir = temp_test_dir("skills-force");
+        let skill_dir = base_dir.join("palimpsest-cli");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir should be writable");
+        std::fs::write(skill_dir.join("SKILL.md"), "custom").expect("skill should be writable");
+
+        let result = install_skill_target(SkillTarget::Claude, &base_dir, false, false);
+        assert!(result.is_err());
+
+        let forced = install_skill_target(SkillTarget::Claude, &base_dir, true, false)
+            .expect("force should replace skill");
+        assert_eq!(forced.status, SkillInstallStatus::Updated);
+
+        let _ = std::fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
     fn permissions_eval_parses_typed_user_assignments() {
         let schema = BTreeMap::from([
             ("id".to_owned(), "int".to_owned()),
@@ -1562,11 +1939,7 @@ predicate = "author_id = $user.id"
     }
 
     fn write_temp_permissions_config(name: &str, rules: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "palimpsest-cli-{name}-{}-{}.toml",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let path = temp_test_path(name, "toml");
         let content = format!(
             r#"
 [permissions.user_schema]
@@ -1578,5 +1951,21 @@ name = "text"
         );
         std::fs::write(&path, content).expect("temp config should be writable");
         path
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let path = temp_test_path(name, "dir");
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    fn temp_test_path(name: &str, suffix: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "palimpsest-cli-{name}-{}-{}.toml",
+                std::process::id(),
+                std::thread::current().name().unwrap_or("test"),
+            ))
+            .with_extension(suffix)
     }
 }

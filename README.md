@@ -147,6 +147,7 @@ Supported commands:
 | `serve [config]` | Run the embedded server. This is the default command. |
 | `validate-config <config>` | Parse TOML config and compile permission rules. |
 | `permissions eval <config> --query <sql>` | Compile configured permissions and show the before/after query rewrite. |
+| `skills install` | Install Codex and Claude skills for operating the CLI. |
 | `dump-catalog [config]` | Print the configured catalog as JSON. |
 | `dev up\|down\|reset\|status\|env` | Manage the local PostgreSQL 18 + Palimpsest PaaS stack. |
 | `db create` | Create a SQL-backed managed PostgreSQL 18+ cluster intent. |
@@ -165,6 +166,12 @@ Evaluate the permissions model against a query:
 palimpsest permissions eval palimpsest.toml \
   --query 'SELECT id FROM posts' \
   --user id=42
+```
+
+Install agent skills for operating the CLI:
+
+```sh
+palimpsest skills install
 ```
 
 Validate it with:

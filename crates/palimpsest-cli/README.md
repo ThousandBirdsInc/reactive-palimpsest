@@ -9,6 +9,7 @@ palimpsest serve [config]              # default if no command given
 palimpsest validate-config <config>    # parse + permission compile; 0 ok, 1 error
 palimpsest permissions eval <config> --query <sql>
                                        # rewrite query MIR with configured permissions
+palimpsest skills install              # install Codex and Claude skills for this CLI
 palimpsest dump-catalog [config]       # emit catalog as JSON on stdout
 palimpsest dev up|down|reset|status|env # local PostgreSQL 18 + Palimpsest stack
 palimpsest db create ...               # create a managed PostgreSQL 18+ cluster intent
@@ -38,6 +39,19 @@ Repository maintainers can publish the CLI crate set from the repository root:
 ```sh
 ./publish.sh
 ```
+
+## Agent skills
+
+Install the Palimpsest CLI skill for both Codex and Claude:
+
+```sh
+palimpsest skills install
+```
+
+By default this writes `palimpsest-cli/SKILL.md` under
+`$CODEX_HOME/skills` or `~/.codex/skills`, and `$CLAUDE_HOME/skills` or
+`~/.claude/skills`. Use `--codex`, `--claude`, `--codex-dir`,
+`--claude-dir`, `--dry-run`, or `--force` to control the install.
 
 ## Permission evaluator
 
