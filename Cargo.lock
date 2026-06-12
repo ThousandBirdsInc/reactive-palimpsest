@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "palimpsest-paas-core",
  "palimpsest-permissions",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-client-js"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "js-sys",
  "palimpsest-client",
@@ -1858,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-conformance"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "futures",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-dataflow"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -1904,7 +1904,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-integration-tests"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "palimpsest-dataflow",
  "palimpsest-permissions",
@@ -1919,7 +1919,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-paas-control-plane"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-paas-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1949,7 +1949,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-paas-gateway"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bytes",
@@ -1970,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-paas-node-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "palimpsest-paas-core",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-paas-sync-wrapper"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "ring",
@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-permissions"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "insta",
  "palimpsest-sql",
@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-properties"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "palimpsest-dataflow",
  "palimpsest-permissions",
@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bincode",
  "prost",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-soak"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "palimpsest-dataflow",
  "palimpsest-permissions",
@@ -2088,7 +2088,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-sql"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "insta",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-test-harness"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "palimpsest-sql",
@@ -2110,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-wal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "criterion",
@@ -4485,7 +4485,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flate2",
 ]

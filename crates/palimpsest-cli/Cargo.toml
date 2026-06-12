@@ -20,10 +20,10 @@ default = []
 slot-info = ["dep:tokio-postgres"]
 
 [dependencies]
-palimpsest-paas-core = { path = "../../paas/crates/palimpsest-paas-core", version = "0.1.0" }
-palimpsest-permissions = { path = "../palimpsest-permissions", version = "0.1.0" }
-palimpsest-server = { path = "../palimpsest-server", version = "0.1.0" }
-palimpsest-sql = { path = "../palimpsest-sql", version = "0.1.0" }
+palimpsest-paas-core = { path = "../../paas/crates/palimpsest-paas-core", version = "0.1.1" }
+palimpsest-permissions = { path = "../palimpsest-permissions", version = "0.1.1" }
+palimpsest-server = { path = "../palimpsest-server", version = "0.1.1" }
+palimpsest-sql = { path = "../palimpsest-sql", version = "0.1.1" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

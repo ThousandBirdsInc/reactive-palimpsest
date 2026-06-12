@@ -20,7 +20,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support"] }
-palimpsest-test-harness = { path = "../palimpsest-test-harness", version = "0.1.0" }
+palimpsest-test-harness = { path = "../palimpsest-test-harness", version = "0.1.1" }
 proptest.workspace = true
 
 [[bench]]

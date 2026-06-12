@@ -29,11 +29,11 @@ jsonwebtoken.workspace = true
 opentelemetry = { version = "0.27", optional = true }
 opentelemetry-otlp = { version = "0.27", optional = true, features = ["grpc-tonic"] }
 opentelemetry_sdk = { version = "0.27", optional = true, features = ["rt-tokio"] }
-palimpsest-dataflow = { path = "../palimpsest-dataflow", version = "0.1.0" }
-palimpsest-permissions = { path = "../palimpsest-permissions", version = "0.1.0" }
-palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.0" }
-palimpsest-sql = { path = "../palimpsest-sql", version = "0.1.0" }
-palimpsest-wal = { path = "../palimpsest-wal", version = "0.1.0" }
+palimpsest-dataflow = { path = "../palimpsest-dataflow", version = "0.1.1" }
+palimpsest-permissions = { path = "../palimpsest-permissions", version = "0.1.1" }
+palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.1" }
+palimpsest-sql = { path = "../palimpsest-sql", version = "0.1.1" }
+palimpsest-wal = { path = "../palimpsest-wal", version = "0.1.1" }
 prost.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -51,7 +51,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support"] }
 jsonwebtoken.workspace = true
-palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.0" }
+palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.1" }
 proptest.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
