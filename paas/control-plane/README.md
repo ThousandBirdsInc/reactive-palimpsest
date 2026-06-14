@@ -247,21 +247,30 @@ Branches are named, addressable database states with parent lineage, in the
 style of Neon branches, layered on the copy-on-write clone primitive. See
 `paas/BRANCHING-API-DESIGN.md` for the full design.
 
-`POST /v1/managed-postgres/clusters/{cluster_id}/branches` creates a branch.
-The current implementation supports HEAD copy-on-write branches
-(`mode = "head_cow"`, the default): the source database — the parent branch's
-database, or a root branch's `source_database` (defaulting to `postgres`) — is
-cloned into a derived database (`branch_<name>`) on the same cluster instance
-via the `CreateCopyOnWriteDatabaseClone` agent command. The branch row tracks
-`creating → ready`/`failed` from the command result. Point-in-time branches
-(`mode = "point_in_time"`, backed by a PITR restore into a new cluster) are
-specified in the design and reserved for the next increment.
+`POST /v1/managed-postgres/clusters/{cluster_id}/branches` creates a branch in
+one of two modes.
+
+- **`mode = "head_cow"` (default):** the source database — the parent branch's
+  database, or a root branch's `source_database` (defaulting to `postgres`) — is
+  cloned into a derived database (`branch_<name>`) on the same cluster instance
+  via the `CreateCopyOnWriteDatabaseClone` agent command.
+- **`mode = "point_in_time"`:** requires `recovery_target_lsn`. Provisions a
+  dedicated branch cluster and restores the source cluster's latest succeeded
+  backup to that LSN via `PrepareRestore` (`branch_cluster_id` is set,
+  `branch_database` is null). Honors `redaction_policy_id`. With
+  `provision_sync_deployment = true` it also creates and starts a SyncDeployment
+  bound to the branch cluster (which starts once that cluster reaches Ready).
+
+The branch row tracks `creating → ready`/`failed` from the backing command
+result. `provision_sync_deployment` is rejected for HEAD branches because the
+SyncDeployment record targets a cluster, not a specific database.
 
 `GET .../branches` lists a cluster's live branches (with parent pointers for the
 tree); `GET .../branches/{branch_id}` fetches one. `DELETE
-.../branches/{branch_id}` queues a guarded `DropDatabase` agent command and
-tombstones the branch on success; it rejects deletion of a branch that still has
-child branches.
+.../branches/{branch_id}` tombstones the branch on success and rejects deletion
+of a branch that still has child branches. HEAD branches are torn down with a
+guarded `DropDatabase`; point-in-time branches tear down their dedicated cluster
+via `DeletePostgresData`.
 
 `POST /v1/onboarding/workspaces` is the first self-serve signup workflow
 backend. It creates an organization, first project, first environment, and

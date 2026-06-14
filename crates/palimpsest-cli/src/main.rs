@@ -880,7 +880,8 @@ Use the `palimpsest` binary for local operation and diagnostics. Start with `pal
 - `palimpsest dev down`: stop the local stack when the user asks to stop services.
 - `palimpsest db psql --local [--role app|admin|replication]`: open `psql` against the local dev stack.
 - `palimpsest db create ...`: create a managed PostgreSQL 18+ cluster intent through the control plane.
-- `palimpsest db branch create --cluster-id <id> --name <name> [--parent-branch-id <id>] [--source-database <db>] [--terminate-source-connections]`: create a copy-on-write database branch.
+- `palimpsest db branch create --cluster-id <id> --name <name> [--parent-branch-id <id>] [--source-database <db>] [--terminate-source-connections]`: create a HEAD copy-on-write database branch.
+- `palimpsest db branch create --cluster-id <id> --name <name> --mode point-in-time --recovery-target-lsn <lsn> [--provision-sync-deployment]`: create a point-in-time branch (restores into a dedicated cluster; optionally provisions a SyncDeployment).
 - `palimpsest db branch list --cluster-id <id>`: list a cluster's branches (JSON, includes parent lineage).
 - `palimpsest db branch get --cluster-id <id> --branch-id <id>`: fetch one branch.
 - `palimpsest db branch delete --cluster-id <id> --branch-id <id>`: delete a branch (rejected if it has child branches).
@@ -1461,6 +1462,8 @@ struct BranchCreateBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     redaction_policy_id: Option<String>,
     terminate_source_connections: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    provision_sync_deployment: bool,
 }
 
 fn parse_branch_mode_flag(value: &str) -> Result<String, CliError> {
@@ -1557,6 +1560,7 @@ fn cmd_db_branch_create(rest: &[String]) -> Result<(), CliError> {
     let mut recovery_target_lsn = None;
     let mut redaction_policy_id = None;
     let mut terminate_source_connections = false;
+    let mut provision_sync_deployment = false;
     let mut control_plane_url = default_control_plane_url();
     let mut actor_id = default_actor_id();
 
@@ -1571,6 +1575,7 @@ fn cmd_db_branch_create(rest: &[String]) -> Result<(), CliError> {
             "--recovery-target-lsn" => recovery_target_lsn = Some(next_db_arg(flag, iter.next())?),
             "--redaction-policy-id" => redaction_policy_id = Some(next_db_arg(flag, iter.next())?),
             "--terminate-source-connections" => terminate_source_connections = true,
+            "--provision-sync-deployment" => provision_sync_deployment = true,
             "--control-plane-url" => control_plane_url = next_db_arg(flag, iter.next())?,
             "--actor-id" => actor_id = next_db_arg(flag, iter.next())?,
             "--help" | "-h" => {
@@ -1596,6 +1601,7 @@ fn cmd_db_branch_create(rest: &[String]) -> Result<(), CliError> {
         recovery_target_lsn,
         redaction_policy_id,
         terminate_source_connections,
+        provision_sync_deployment,
     };
     let body = serde_json::to_string(&body)
         .map_err(|err| CliError::Db(format!("serialize branch request: {err}")))?;
@@ -1663,10 +1669,11 @@ Create options:
   --name <name>                    Branch name (required). 1-63 chars: letters, digits, '_' or '-'.
   --parent-branch-id <id>          Branch from another branch instead of the cluster's primary database.
   --source-database <db>           Source database for a root branch (default: postgres).
-  --mode <head-cow|point-in-time>  Branch mode (default: head-cow). point-in-time is not yet implemented.
-  --recovery-target-lsn <lsn>      Recovery target LSN for point-in-time branches.
+  --mode <head-cow|point-in-time>  Branch mode (default: head-cow). point-in-time restores into a dedicated cluster.
+  --recovery-target-lsn <lsn>      Recovery target LSN (required for point-in-time branches).
   --redaction-policy-id <id>       Apply a clone redaction policy.
   --terminate-source-connections   Terminate source-database sessions so the copy-on-write clone can proceed.
+  --provision-sync-deployment      Also provision and start a SyncDeployment (point-in-time branches only).
 
 Shared options:
   --control-plane-url <url>        Control-plane base URL (default: PALIMPSEST_PAAS_CONTROL_PLANE_URL or http://127.0.0.1:8088).
@@ -2131,6 +2138,7 @@ mod tests {
             recovery_target_lsn: None,
             redaction_policy_id: None,
             terminate_source_connections: false,
+            provision_sync_deployment: false,
         };
         let json = serde_json::to_value(&body).expect("serializes");
         assert_eq!(json["name"], "feature-x");

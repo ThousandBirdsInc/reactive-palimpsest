@@ -195,6 +195,44 @@ export interface DatabaseCloneResponse {
   operation: ClusterOperation;
 }
 
+export type ManagedPostgresBranchMode = "head_cow" | "point_in_time";
+
+export type ManagedPostgresBranchLifecycleState =
+  | "creating"
+  | "ready"
+  | "failed"
+  | "deleting"
+  | "deleted";
+
+export interface ManagedPostgresBranch {
+  branch_id: string;
+  cluster_id: string;
+  name: string;
+  parent_branch_id?: string | null;
+  mode: ManagedPostgresBranchMode;
+  source_database: string;
+  branch_database?: string | null;
+  branch_cluster_id?: string | null;
+  created_from_lsn?: string | null;
+  redaction_policy_id?: string | null;
+  lifecycle_state: ManagedPostgresBranchLifecycleState;
+  error_message?: string | null;
+}
+
+export interface CreateBranchRequest {
+  name: string;
+  parent_branch_id?: string;
+  mode: ManagedPostgresBranchMode;
+  source_database?: string;
+  recovery_target_lsn?: string;
+  redaction_policy_id?: string;
+  terminate_source_connections?: boolean;
+}
+
+export interface DeleteBranchResponse {
+  branch: ManagedPostgresBranch;
+}
+
 export interface ClusterSchemaColumn {
   name: string;
   data_type: string;

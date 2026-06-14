@@ -1,9 +1,11 @@
 # Managed Postgres Branching API Design
 
-**Status:** In progress. Phase 1 (data model, core types, `DropDatabase`
-node-agent primitive, sql_store CRUD) and the Phase 2 HEAD copy-on-write branch
-endpoints (create/list/get/delete) are implemented. Point-in-time branches
-(Phase 3) and UI (Phase 4) are pending.
+**Status:** Implemented. Phases 1-5 are in place: data model + core types +
+`DropDatabase` primitive, HEAD copy-on-write branch endpoints
+(create/list/get/delete), point-in-time branches (restore into a dedicated
+cluster), the operator-console Branches tab, the `palimpsest db branch` CLI, and
+optional per-branch SyncDeployment provisioning for point-in-time branches. See
+the per-phase notes in §9.
 **Scope:** A Neon-style database branching API for the Palimpsest managed
 Postgres PaaS, layered on the existing copy-on-write (CoW) clone and
 point-in-time-recovery (PITR) restore primitives. Standard PostgreSQL only —
@@ -251,16 +253,24 @@ that chains a `StartSyncDeployment` operation after the branch is `ready`.
    `creating → ready/failed` and `deleting → deleted/failed` transitions driven
    from agent command results; audit events; node-agent `DropDatabase` step +
    protected-database guard.
-3. **Point-in-time branch path.** (Pending.) Create with `recovery_target_lsn` via
-   `PrepareRestore`; reuse redaction-policy enforcement and PITR continuity
-   checks; branch cluster teardown on delete.
-4. **UI.** Extend the Cluster detail Clones/Branches tab with the branch tree,
-   create dialog (mode + branch point), and delete (with cascade confirmation).
-5. **Sync integration (optional follow-up).** `provision_sync_deployment` flag.
+3. **Point-in-time branch path.** ✅ Done. `mode = "point_in_time"` provisions a
+   dedicated branch cluster via `PrepareRestore` with `recovery_target_lsn`
+   (`branch_cluster_id` set, `branch_database` null), reuses redaction-policy
+   enforcement, advances `creating → ready/failed` from the restore command, and
+   tears the branch cluster down (`DeletePostgresData`) on delete.
+4. **UI.** ✅ Done. Cluster detail **Branches** tab: lineage tree, create form
+   (mode, parent, source database, recovery-target-LSN for point-in-time,
+   terminate-source-connections), and per-branch delete.
+5. **Sync integration.** ✅ Done (point-in-time). `provision_sync_deployment`
+   creates and starts a SyncDeployment bound to the branch's dedicated cluster;
+   it starts once that cluster reaches Ready. HEAD branches share their parent's
+   instance and are rejected for now, since the SyncDeployment record targets a
+   cluster rather than a specific database — DB-scoped deployments for HEAD
+   branches remain a follow-up.
 
-Each phase ships with control-plane unit tests, a node-agent step test for
-`DropDatabase` (including the primary-database guard), and an integration
-scenario covering create → connect → delete and the children-block rule.
+Phases shipped with node-agent step tests for `DropDatabase` (including the
+protected-database guard) and CLI unit tests; control-plane handler tests
+require a live Postgres and run in the conformance/integration path.
 
 ## 10. Open questions
 

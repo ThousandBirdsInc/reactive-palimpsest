@@ -5,8 +5,11 @@ import type {
   ClusterQueryExplain,
   ClusterSchemaResponse,
   ClusterSqlResult,
+  CreateBranchRequest,
   DatabaseCloneRequest,
   DatabaseCloneResponse,
+  DeleteBranchResponse,
+  ManagedPostgresBranch,
   SampleDataSeedResponse,
   DatabaseProxyRoute,
   Domain,
@@ -128,6 +131,33 @@ export class PaasApi {
       `/v1/managed-postgres/clusters/${encodeURIComponent(clusterId)}/database-clones`,
       request,
     ) as Promise<DatabaseCloneResponse>;
+  }
+  listBranches(clusterId: string): Promise<ManagedPostgresBranch[]> {
+    return this.list(
+      `/v1/managed-postgres/clusters/${encodeURIComponent(clusterId)}/branches`,
+      "branches",
+    );
+  }
+  getBranch(clusterId: string, branchId: string): Promise<ManagedPostgresBranch | null> {
+    return this.getJson<ManagedPostgresBranch>(
+      `/v1/managed-postgres/clusters/${encodeURIComponent(clusterId)}/branches/${encodeURIComponent(branchId)}`,
+    ).catch(() => null);
+  }
+  async createBranch(
+    clusterId: string,
+    request: CreateBranchRequest,
+  ): Promise<ManagedPostgresBranch> {
+    // The control plane returns a { branch, command, operation } envelope.
+    const response = (await this.postJson(
+      `/v1/managed-postgres/clusters/${encodeURIComponent(clusterId)}/branches`,
+      request,
+    )) as DeleteBranchResponse;
+    return response.branch;
+  }
+  deleteBranch(clusterId: string, branchId: string): Promise<DeleteBranchResponse> {
+    return this.deleteJson(
+      `/v1/managed-postgres/clusters/${encodeURIComponent(clusterId)}/branches/${encodeURIComponent(branchId)}`,
+    ) as Promise<DeleteBranchResponse>;
   }
   listNodeHosts(): Promise<NodeHost[]> {
     return this.list("/v1/node-hosts", "hosts");
@@ -306,6 +336,16 @@ export class PaasApi {
         "x-actor-id": this.scope.actorId,
       },
       body: JSON.stringify(body),
+    });
+    return this.readJson(response);
+  }
+  private async deleteJson(path: string): Promise<unknown> {
+    const response = await fetch(this.url(path), {
+      method: "DELETE",
+      headers: {
+        accept: "application/json",
+        "x-actor-id": this.scope.actorId,
+      },
     });
     return this.readJson(response);
   }

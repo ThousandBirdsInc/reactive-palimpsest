@@ -6225,6 +6225,58 @@ impl SqlControlPlaneStore {
                 }
                 _ => Ok(None),
             },
+            NodeAgentAction::PrepareRestore { .. } => {
+                let next = match status {
+                    AgentCommandStatus::Succeeded => BranchLifecycleState::Ready,
+                    AgentCommandStatus::Failed | AgentCommandStatus::Cancelled => {
+                        BranchLifecycleState::Failed
+                    }
+                    _ => return Ok(None),
+                };
+                let result = sqlx::query(
+                    "UPDATE managed_postgres_branches SET \
+                        lifecycle_state = $2, error_message = $3, updated_at = now() \
+                     WHERE branch_cluster_id = $1 \
+                       AND lifecycle_state = 'creating' AND deleted_at IS NULL",
+                )
+                .bind(&cluster_id)
+                .bind(branch_lifecycle_state_label(next))
+                .bind(match next {
+                    BranchLifecycleState::Failed => detail,
+                    _ => None,
+                })
+                .execute(&self.pool)
+                .await?;
+                Ok((result.rows_affected() > 0).then_some(next))
+            }
+            NodeAgentAction::DeletePostgresData { .. } => match status {
+                AgentCommandStatus::Succeeded => {
+                    let result = sqlx::query(
+                        "UPDATE managed_postgres_branches SET \
+                            lifecycle_state = 'deleted', deleted_at = now(), updated_at = now() \
+                         WHERE branch_cluster_id = $1 \
+                           AND lifecycle_state = 'deleting' AND deleted_at IS NULL",
+                    )
+                    .bind(&cluster_id)
+                    .execute(&self.pool)
+                    .await?;
+                    Ok((result.rows_affected() > 0).then_some(BranchLifecycleState::Deleted))
+                }
+                AgentCommandStatus::Failed | AgentCommandStatus::Cancelled => {
+                    let result = sqlx::query(
+                        "UPDATE managed_postgres_branches SET \
+                            lifecycle_state = 'failed', error_message = $2, updated_at = now() \
+                         WHERE branch_cluster_id = $1 \
+                           AND lifecycle_state = 'deleting' AND deleted_at IS NULL",
+                    )
+                    .bind(&cluster_id)
+                    .bind(detail)
+                    .execute(&self.pool)
+                    .await?;
+                    Ok((result.rows_affected() > 0).then_some(BranchLifecycleState::Failed))
+                }
+                _ => Ok(None),
+            },
             _ => Ok(None),
         }
     }
