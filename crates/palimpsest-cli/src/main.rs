@@ -22,7 +22,8 @@
 //!   and print one line per replication slot. Requires the optional
 //!   `slot-info` Cargo feature.
 //! - `dev ...` and `db ...` — additive PaaS helpers for local PostgreSQL 18+
-//!   development and managed cluster intent creation.
+//!   development, managed cluster intent creation, and database branch
+//!   operations (`db branch create|list|get|delete`) against the control plane.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -146,6 +147,8 @@ enum CliError {
     DevStack(String),
     #[error("db: {0}")]
     Db(String),
+    #[error("control plane returned HTTP {status}: {body}")]
+    ControlPlane { status: u16, body: String },
     #[cfg(feature = "slot-info")]
     #[error("slot-info: upstream config is missing — add an [upstream] section to {0}")]
     MissingUpstream(PathBuf),
@@ -167,9 +170,28 @@ async fn main() -> ExitCode {
         Err(err) => {
             error!(?err, "palimpsest-cli failed");
             eprintln!("error: {err}");
-            ExitCode::FAILURE
+            exit_code_for(&err)
         }
     }
+}
+
+/// Maps an error to a stable process exit code so agents can branch on the
+/// failure class without parsing stderr. `0` success, `2` usage, `3` generic
+/// control-plane/client error, `4` not found, `5` conflict, `6` unauthorized,
+/// `7` control-plane server error, `1` everything else.
+fn exit_code_for(err: &CliError) -> ExitCode {
+    let code: u8 = match err {
+        CliError::Usage(_) => 2,
+        CliError::ControlPlane { status, .. } => match *status {
+            401 | 403 => 6,
+            404 => 4,
+            409 => 5,
+            s if (500..600).contains(&s) => 7,
+            _ => 3,
+        },
+        _ => 1,
+    };
+    ExitCode::from(code)
 }
 
 async fn run() -> Result<(), CliError> {
@@ -858,7 +880,15 @@ Use the `palimpsest` binary for local operation and diagnostics. Start with `pal
 - `palimpsest dev down`: stop the local stack when the user asks to stop services.
 - `palimpsest db psql --local [--role app|admin|replication]`: open `psql` against the local dev stack.
 - `palimpsest db create ...`: create a managed PostgreSQL 18+ cluster intent through the control plane.
+- `palimpsest db branch create --cluster-id <id> --name <name> [--parent-branch-id <id>] [--source-database <db>] [--terminate-source-connections]`: create a copy-on-write database branch.
+- `palimpsest db branch list --cluster-id <id>`: list a cluster's branches (JSON, includes parent lineage).
+- `palimpsest db branch get --cluster-id <id> --branch-id <id>`: fetch one branch.
+- `palimpsest db branch delete --cluster-id <id> --branch-id <id>`: delete a branch (rejected if it has child branches).
 - `palimpsest slot-info <config>`: inspect upstream replication slot status when the binary was built with `--features slot-info`.
+
+## Output And Exit Codes (for agents)
+
+`db` commands print the control-plane JSON response to stdout; parse stdout for results. Exit codes encode the failure class: `0` success, `2` usage error, `3` client error, `4` not found, `5` conflict, `6` unauthorized, `7` control-plane server error. Set `PALIMPSEST_PAAS_CONTROL_PLANE_URL` and `PALIMPSEST_ACTOR_ID` to avoid repeating `--control-plane-url`/`--actor-id`.
 
 ## Preferred Workflow
 
@@ -1232,12 +1262,13 @@ fn cmd_db(rest: &[String]) -> Result<(), CliError> {
     match action {
         "create" => cmd_db_create(args),
         "psql" => cmd_db_psql(args),
+        "branch" => cmd_db_branch(args),
         "help" | "--help" | "-h" => {
             print_db_help();
             Ok(())
         }
         other => Err(CliError::Usage(format!(
-            "db: unknown action '{other}' (expected create or psql)"
+            "db: unknown action '{other}' (expected create, psql, or branch)"
         ))),
     }
 }
@@ -1249,6 +1280,7 @@ fn print_db_help() {
 Usage:
   palimpsest db create --cluster-id <id> --organization-id <id> --project-id <id> --environment-id <id> --region <region> [options]
   palimpsest db psql [--local] [--role app|admin|replication] [--url <postgres-url>] [-- <psql args>]
+  palimpsest db branch <create|list|get|delete> ...   (see `palimpsest db branch help`)
 
 Create options:
   --postgres-version <version>     PostgreSQL version, must be 18 or newer (default: 18).
@@ -1399,6 +1431,252 @@ fn next_db_arg(flag: &str, value: Option<&String>) -> Result<String, CliError> {
         .ok_or_else(|| CliError::Usage(format!("{flag}: expected a value")))
 }
 
+fn default_control_plane_url() -> String {
+    std::env::var("PALIMPSEST_PAAS_CONTROL_PLANE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8088".to_owned())
+}
+
+fn default_actor_id() -> String {
+    std::env::var("PALIMPSEST_ACTOR_ID").unwrap_or_else(|_| "local-cli".to_owned())
+}
+
+fn wants_help(rest: &[String]) -> bool {
+    rest.first()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+}
+
+/// Request body for `POST .../branches`, mirroring the control plane's
+/// `CreateBranchRequest`. Optional fields are omitted so the server defaults
+/// apply.
+#[derive(Debug, Serialize)]
+struct BranchCreateBody {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_branch_id: Option<String>,
+    mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_database: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_target_lsn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    redaction_policy_id: Option<String>,
+    terminate_source_connections: bool,
+}
+
+fn parse_branch_mode_flag(value: &str) -> Result<String, CliError> {
+    match value {
+        "head-cow" | "head_cow" => Ok("head_cow".to_owned()),
+        "point-in-time" | "point_in_time" => Ok("point_in_time".to_owned()),
+        other => Err(CliError::Usage(format!(
+            "db branch: invalid --mode '{other}' (expected head-cow or point-in-time)"
+        ))),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BranchTarget {
+    cluster_id: String,
+    branch_id: Option<String>,
+    control_plane_url: String,
+    actor_id: String,
+}
+
+/// Parses the flags shared by the read/delete branch commands
+/// (`--cluster-id`, `--branch-id`, `--control-plane-url`, `--actor-id`).
+fn parse_branch_target(rest: &[String], context: &str) -> Result<BranchTarget, CliError> {
+    let mut cluster_id = None;
+    let mut branch_id = None;
+    let mut control_plane_url = default_control_plane_url();
+    let mut actor_id = default_actor_id();
+    let mut iter = rest.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--cluster-id" => cluster_id = Some(next_db_arg(flag, iter.next())?),
+            "--branch-id" => branch_id = Some(next_db_arg(flag, iter.next())?),
+            "--control-plane-url" => control_plane_url = next_db_arg(flag, iter.next())?,
+            "--actor-id" => actor_id = next_db_arg(flag, iter.next())?,
+            "--help" | "-h" => {
+                print_db_branch_help();
+                return Err(CliError::Usage(format!(
+                    "db branch {context} help requested"
+                )));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "db branch {context}: unknown option '{other}'"
+                )));
+            }
+        }
+    }
+    Ok(BranchTarget {
+        cluster_id: required_db_arg("--cluster-id", cluster_id)?,
+        branch_id,
+        control_plane_url,
+        actor_id,
+    })
+}
+
+fn branches_endpoint(control_plane_url: &str, cluster_id: &str) -> String {
+    format!(
+        "{}/v1/managed-postgres/clusters/{cluster_id}/branches",
+        control_plane_url.trim_end_matches('/')
+    )
+}
+
+fn cmd_db_branch(rest: &[String]) -> Result<(), CliError> {
+    let Some(action) = rest.first().map(String::as_str) else {
+        print_db_branch_help();
+        return Ok(());
+    };
+    let args = &rest[1..];
+    match action {
+        "create" => cmd_db_branch_create(args),
+        "list" => cmd_db_branch_list(args),
+        "get" => cmd_db_branch_get(args),
+        "delete" => cmd_db_branch_delete(args),
+        "help" | "--help" | "-h" => {
+            print_db_branch_help();
+            Ok(())
+        }
+        other => Err(CliError::Usage(format!(
+            "db branch: unknown action '{other}' (expected create, list, get, or delete)"
+        ))),
+    }
+}
+
+fn cmd_db_branch_create(rest: &[String]) -> Result<(), CliError> {
+    if wants_help(rest) {
+        print_db_branch_help();
+        return Ok(());
+    }
+    let mut cluster_id = None;
+    let mut name = None;
+    let mut parent_branch_id = None;
+    let mut source_database = None;
+    let mut mode = "head-cow".to_owned();
+    let mut recovery_target_lsn = None;
+    let mut redaction_policy_id = None;
+    let mut terminate_source_connections = false;
+    let mut control_plane_url = default_control_plane_url();
+    let mut actor_id = default_actor_id();
+
+    let mut iter = rest.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--cluster-id" => cluster_id = Some(next_db_arg(flag, iter.next())?),
+            "--name" => name = Some(next_db_arg(flag, iter.next())?),
+            "--parent-branch-id" => parent_branch_id = Some(next_db_arg(flag, iter.next())?),
+            "--source-database" => source_database = Some(next_db_arg(flag, iter.next())?),
+            "--mode" => mode = next_db_arg(flag, iter.next())?,
+            "--recovery-target-lsn" => recovery_target_lsn = Some(next_db_arg(flag, iter.next())?),
+            "--redaction-policy-id" => redaction_policy_id = Some(next_db_arg(flag, iter.next())?),
+            "--terminate-source-connections" => terminate_source_connections = true,
+            "--control-plane-url" => control_plane_url = next_db_arg(flag, iter.next())?,
+            "--actor-id" => actor_id = next_db_arg(flag, iter.next())?,
+            "--help" | "-h" => {
+                print_db_branch_help();
+                return Err(CliError::Usage(
+                    "db branch create help requested".to_owned(),
+                ));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "db branch create: unknown option '{other}'"
+                )));
+            }
+        }
+    }
+
+    let cluster_id = required_db_arg("--cluster-id", cluster_id)?;
+    let body = BranchCreateBody {
+        name: required_db_arg("--name", name)?,
+        parent_branch_id,
+        mode: parse_branch_mode_flag(&mode)?,
+        source_database,
+        recovery_target_lsn,
+        redaction_policy_id,
+        terminate_source_connections,
+    };
+    let body = serde_json::to_string(&body)
+        .map_err(|err| CliError::Db(format!("serialize branch request: {err}")))?;
+    let endpoint = branches_endpoint(&control_plane_url, &cluster_id);
+    let response = http_post_json(&endpoint, &body, &actor_id)?;
+    println!("{response}");
+    Ok(())
+}
+
+fn cmd_db_branch_list(rest: &[String]) -> Result<(), CliError> {
+    if wants_help(rest) {
+        print_db_branch_help();
+        return Ok(());
+    }
+    let target = parse_branch_target(rest, "list")?;
+    let endpoint = branches_endpoint(&target.control_plane_url, &target.cluster_id);
+    let response = http_get(&endpoint, &target.actor_id)?;
+    println!("{response}");
+    Ok(())
+}
+
+fn cmd_db_branch_get(rest: &[String]) -> Result<(), CliError> {
+    if wants_help(rest) {
+        print_db_branch_help();
+        return Ok(());
+    }
+    let target = parse_branch_target(rest, "get")?;
+    let branch_id = required_db_arg("--branch-id", target.branch_id)?;
+    let endpoint = format!(
+        "{}/{branch_id}",
+        branches_endpoint(&target.control_plane_url, &target.cluster_id)
+    );
+    let response = http_get(&endpoint, &target.actor_id)?;
+    println!("{response}");
+    Ok(())
+}
+
+fn cmd_db_branch_delete(rest: &[String]) -> Result<(), CliError> {
+    if wants_help(rest) {
+        print_db_branch_help();
+        return Ok(());
+    }
+    let target = parse_branch_target(rest, "delete")?;
+    let branch_id = required_db_arg("--branch-id", target.branch_id)?;
+    let endpoint = format!(
+        "{}/{branch_id}",
+        branches_endpoint(&target.control_plane_url, &target.cluster_id)
+    );
+    let response = http_delete(&endpoint, &target.actor_id)?;
+    println!("{response}");
+    Ok(())
+}
+
+fn print_db_branch_help() {
+    println!(
+        "palimpsest db branch — operate managed Postgres database branches
+
+Usage:
+  palimpsest db branch create --cluster-id <id> --name <name> [options]
+  palimpsest db branch list   --cluster-id <id> [--control-plane-url <url>] [--actor-id <id>]
+  palimpsest db branch get    --cluster-id <id> --branch-id <id> [--control-plane-url <url>] [--actor-id <id>]
+  palimpsest db branch delete --cluster-id <id> --branch-id <id> [--control-plane-url <url>] [--actor-id <id>]
+
+Create options:
+  --name <name>                    Branch name (required). 1-63 chars: letters, digits, '_' or '-'.
+  --parent-branch-id <id>          Branch from another branch instead of the cluster's primary database.
+  --source-database <db>           Source database for a root branch (default: postgres).
+  --mode <head-cow|point-in-time>  Branch mode (default: head-cow). point-in-time is not yet implemented.
+  --recovery-target-lsn <lsn>      Recovery target LSN for point-in-time branches.
+  --redaction-policy-id <id>       Apply a clone redaction policy.
+  --terminate-source-connections   Terminate source-database sessions so the copy-on-write clone can proceed.
+
+Shared options:
+  --control-plane-url <url>        Control-plane base URL (default: PALIMPSEST_PAAS_CONTROL_PLANE_URL or http://127.0.0.1:8088).
+  --actor-id <id>                  Audit actor id (default: PALIMPSEST_ACTOR_ID or local-cli).
+
+Output: the control-plane JSON response is printed to stdout. Exit codes:
+  0 success, 2 usage, 3 client error, 4 not found, 5 conflict, 6 unauthorized, 7 server error."
+    );
+}
+
 fn cmd_db_psql(rest: &[String]) -> Result<(), CliError> {
     if rest
         .first()
@@ -1500,11 +1778,29 @@ fn local_db_url(role: &str) -> Result<String, CliError> {
 }
 
 fn http_post_json(url: &str, body: &str, actor_id: &str) -> Result<String, CliError> {
+    http_request("POST", url, Some(body), actor_id)
+}
+
+fn http_get(url: &str, actor_id: &str) -> Result<String, CliError> {
+    http_request("GET", url, None, actor_id)
+}
+
+fn http_delete(url: &str, actor_id: &str) -> Result<String, CliError> {
+    http_request("DELETE", url, None, actor_id)
+}
+
+fn http_request(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    actor_id: &str,
+) -> Result<String, CliError> {
     let parsed = ParsedHttpUrl::parse(url)?;
     let mut stream = std::net::TcpStream::connect((parsed.host.as_str(), parsed.port))
         .map_err(|err| CliError::Db(format!("connect to {}: {err}", parsed.authority)))?;
+    let body = body.unwrap_or("");
     let request = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Actor-Id: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Actor-Id: {}\r\nConnection: close\r\n\r\n{}",
         parsed.path,
         parsed.authority,
         body.len(),
@@ -1598,10 +1894,10 @@ fn parse_http_response(response: &str) -> Result<String, CliError> {
     if (200..300).contains(&status) {
         return Ok(body.trim().to_owned());
     }
-    Err(CliError::Db(format!(
-        "control plane returned HTTP {status}: {}",
-        body.trim()
-    )))
+    Err(CliError::ControlPlane {
+        status,
+        body: body.trim().to_owned(),
+    })
 }
 
 #[cfg(feature = "slot-info")]
@@ -1788,7 +2084,82 @@ mod tests {
             "HTTP/1.1 409 Conflict\r\ncontent-length: 27\r\n\r\n{\"error\":\"already exists\"}",
         );
 
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(CliError::ControlPlane { status: 409, .. })
+        ));
+    }
+
+    #[test]
+    fn exit_codes_map_control_plane_status_to_failure_class() {
+        let code = |status| {
+            exit_code_for(&CliError::ControlPlane {
+                status,
+                body: String::new(),
+            })
+        };
+        assert_eq!(code(404), ExitCode::from(4));
+        assert_eq!(code(409), ExitCode::from(5));
+        assert_eq!(code(401), ExitCode::from(6));
+        assert_eq!(code(403), ExitCode::from(6));
+        assert_eq!(code(503), ExitCode::from(7));
+        assert_eq!(code(400), ExitCode::from(3));
+        assert_eq!(
+            exit_code_for(&CliError::Usage("x".to_owned())),
+            ExitCode::from(2)
+        );
+    }
+
+    #[test]
+    fn branch_mode_flag_accepts_dashed_and_underscored() {
+        assert_eq!(parse_branch_mode_flag("head-cow").unwrap(), "head_cow");
+        assert_eq!(parse_branch_mode_flag("head_cow").unwrap(), "head_cow");
+        assert_eq!(
+            parse_branch_mode_flag("point-in-time").unwrap(),
+            "point_in_time"
+        );
+        assert!(parse_branch_mode_flag("nope").is_err());
+    }
+
+    #[test]
+    fn branch_create_body_omits_unset_optionals() {
+        let body = BranchCreateBody {
+            name: "feature-x".to_owned(),
+            parent_branch_id: None,
+            mode: "head_cow".to_owned(),
+            source_database: None,
+            recovery_target_lsn: None,
+            redaction_policy_id: None,
+            terminate_source_connections: false,
+        };
+        let json = serde_json::to_value(&body).expect("serializes");
+        assert_eq!(json["name"], "feature-x");
+        assert_eq!(json["mode"], "head_cow");
+        assert_eq!(json["terminate_source_connections"], false);
+        assert!(json.get("parent_branch_id").is_none());
+        assert!(json.get("source_database").is_none());
+    }
+
+    #[test]
+    fn branch_target_requires_cluster_id() {
+        let err = parse_branch_target(&[], "list").expect_err("cluster id required");
+        assert!(matches!(err, CliError::Usage(_)));
+
+        let target = parse_branch_target(
+            &[
+                "--cluster-id".to_owned(),
+                "cluster_1".to_owned(),
+                "--branch-id".to_owned(),
+                "cluster_1:branch:feature_x".to_owned(),
+            ],
+            "get",
+        )
+        .expect("parses");
+        assert_eq!(target.cluster_id, "cluster_1");
+        assert_eq!(
+            target.branch_id.as_deref(),
+            Some("cluster_1:branch:feature_x")
+        );
     }
 
     #[test]
