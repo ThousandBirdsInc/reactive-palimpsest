@@ -1,0 +1,113 @@
+// Copyright 2026 Thousand Birds Inc.
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! Control-plane adapter over the Kubernetes/CloudNativePG runtime.
+//!
+//! Wraps [`palimpsest_paas_runtime`] so the reconciler can apply managed
+//! Postgres desired state to a cluster (or render it in dry-run mode for local
+//! development without Kubernetes).
+
+#![allow(clippy::doc_markdown)]
+
+use palimpsest_paas_core::{DatabaseRoleCredential, ManagedPostgresCluster, ManagedPostgresSpec};
+use palimpsest_paas_runtime::{KubectlApplier, RenderedManifests, RuntimeConfig};
+
+/// Applies managed-Postgres manifests, or no-ops in dry-run mode.
+#[derive(Debug, Clone)]
+pub struct ClusterRuntime {
+    config: RuntimeConfig,
+    applier: KubectlApplier,
+    dry_run: bool,
+}
+
+impl Default for ClusterRuntime {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl ClusterRuntime {
+    /// Build from `PALIMPSEST_PAAS_RUNTIME_*` / `PALIMPSEST_PAAS_KUBECTL` env.
+    ///
+    /// Set `PALIMPSEST_PAAS_RUNTIME_DRY_RUN=true` to skip `kubectl` entirely:
+    /// manifests are rendered (and validated) but not applied, and clusters are
+    /// reported ready immediately. Useful for local development and tests that
+    /// have no Kubernetes cluster.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let dry_run = std::env::var("PALIMPSEST_PAAS_RUNTIME_DRY_RUN")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"));
+        Self {
+            config: RuntimeConfig::from_env(),
+            applier: KubectlApplier::default(),
+            dry_run,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// Render the CloudNativePG manifests for a cluster's desired state.
+    pub fn render(
+        &self,
+        cluster: &ManagedPostgresCluster,
+        spec: Option<&ManagedPostgresSpec>,
+        roles: &[DatabaseRoleCredential],
+    ) -> Result<RenderedManifests, RuntimeAdapterError> {
+        RenderedManifests::render(cluster, spec, roles, &self.config)
+            .map_err(|err| RuntimeAdapterError(err.to_string()))
+    }
+
+    /// Render and apply the manifests (server-side apply), unless in dry-run.
+    pub fn apply(&self, manifests: &RenderedManifests) -> Result<(), RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let yaml = manifests
+            .to_yaml()
+            .map_err(|err| RuntimeAdapterError(err.to_string()))?;
+        self.applier
+            .apply(&yaml)
+            .map_err(|err| RuntimeAdapterError(err.to_string()))
+    }
+
+    /// Delete the manifests for a cluster.
+    pub fn delete(&self, manifests: &RenderedManifests) -> Result<(), RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let yaml = manifests
+            .to_yaml()
+            .map_err(|err| RuntimeAdapterError(err.to_string()))?;
+        self.applier
+            .delete(&yaml)
+            .map_err(|err| RuntimeAdapterError(err.to_string()))
+    }
+
+    /// Whether CloudNativePG reports the cluster's instances ready.
+    ///
+    /// In dry-run mode this is always `true` so local provisioning converges.
+    pub fn cluster_ready(
+        &self,
+        cluster: &ManagedPostgresCluster,
+    ) -> Result<bool, RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(true);
+        }
+        let namespace = self.config.namespace_for(cluster);
+        let name = palimpsest_paas_runtime::resource_name(cluster);
+        let ready = self
+            .applier
+            .ready_instances(&namespace, &name)
+            .map_err(|err| RuntimeAdapterError(err.to_string()))?;
+        Ok(ready >= 1)
+    }
+}
+
+/// Opaque runtime failure surfaced to the control-plane error type.
+#[derive(Debug, thiserror::Error)]
+#[error("kubernetes runtime: {0}")]
+pub struct RuntimeAdapterError(pub String);

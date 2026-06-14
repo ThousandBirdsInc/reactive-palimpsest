@@ -455,6 +455,7 @@ impl KubectlApplier {
     /// Server-side apply a multi-document manifest stream.
     pub fn apply(&self, manifests: &str) -> Result<(), RuntimeError> {
         self.run(&["apply", "--server-side", "-f", "-"], Some(manifests))
+            .map(|_| ())
     }
 
     /// Delete the resources described by a manifest stream.
@@ -463,9 +464,31 @@ impl KubectlApplier {
             &["delete", "--ignore-not-found", "-f", "-"],
             Some(manifests),
         )
+        .map(|_| ())
     }
 
-    fn run(&self, args: &[&str], stdin: Option<&str>) -> Result<(), RuntimeError> {
+    /// Read the number of ready instances CloudNativePG reports for a cluster.
+    ///
+    /// Returns 0 when the cluster exists but has no ready instances yet, or is
+    /// not found.
+    pub fn ready_instances(&self, namespace: &str, name: &str) -> Result<u32, RuntimeError> {
+        let stdout = self.run(
+            &[
+                "get",
+                "clusters.postgresql.cnpg.io",
+                name,
+                "-n",
+                namespace,
+                "--ignore-not-found",
+                "-o",
+                "jsonpath={.status.readyInstances}",
+            ],
+            None,
+        )?;
+        Ok(stdout.trim().parse().unwrap_or(0))
+    }
+
+    fn run(&self, args: &[&str], stdin: Option<&str>) -> Result<String, RuntimeError> {
         let mut command = Command::new(&self.binary);
         if let Some(context) = &self.context {
             command.arg("--context").arg(context);
@@ -489,7 +512,7 @@ impl KubectlApplier {
                 String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             ));
         }
-        Ok(())
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }
 

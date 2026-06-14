@@ -3,6 +3,11 @@
 
 //! Additive control-plane primitives for managed Postgres.
 
+// Docs name products (CloudNativePG, PostgreSQL, Kubernetes, kubectl) that
+// `doc_markdown` would otherwise want backticked throughout prose.
+#![allow(clippy::doc_markdown)]
+
+pub mod runtime;
 pub mod sql_store;
 
 use std::{
@@ -26,10 +31,10 @@ use palimpsest_paas_core::{
     CertificateAuthorityProviderKind, CertificateAuthorityProviderStatus,
     CertificateLifecycleState, CloneRedactionPolicyStatus, ClusterLifecycleState, ConfigVersion,
     ConfigVersionStatus, CustomerEnvironmentHealth, DatabaseProxyRoute, DatabaseRoleCredential,
-    DatabaseRoleKind, Domain, DomainTlsStatus, DomainVerificationStatus, Environment,
-    FailoverLifecycleState, GatewayRoute, GatewayRouteMtlsBundle, HostAssignment, Incident,
-    IncidentSeverity, IncidentStatus, IpAllowlistPurpose, IpAllowlistRule, IpAllowlistStatus,
-    JwtIssuer, JwtIssuerStatus, MaintenanceDayOfWeek, MaintenanceWindow, MaintenanceWindowStatus,
+    Domain, DomainTlsStatus, DomainVerificationStatus, Environment, FailoverLifecycleState,
+    GatewayRoute, GatewayRouteMtlsBundle, HostAssignment, Incident, IncidentSeverity,
+    IncidentStatus, IpAllowlistPurpose, IpAllowlistRule, IpAllowlistStatus, JwtIssuer,
+    JwtIssuerStatus, MaintenanceDayOfWeek, MaintenanceWindow, MaintenanceWindowStatus,
     ManagedPostgresAcmeOrder, ManagedPostgresBackup, ManagedPostgresBackupArtifact,
     ManagedPostgresBackupRetentionPolicy, ManagedPostgresBranch,
     ManagedPostgresCertificateAuthorityProvider, ManagedPostgresCloneRedactionPolicy,
@@ -37,8 +42,8 @@ use palimpsest_paas_core::{
     ManagedPostgresEndpointCertificate, ManagedPostgresEndpointCertificateBundle,
     ManagedPostgresFailover, ManagedPostgresMajorUpgrade, ManagedPostgresMajorUpgradeStatus,
     ManagedPostgresMajorUpgradeStrategy, ManagedPostgresPitrCheck, ManagedPostgresRestore,
-    ManagedPostgresRestoreDrill, ManagedPostgresRuntimeCheck, ManagedPostgresStandby,
-    ManagedPostgresStandbyCheck, ManagedPostgresSupportAccessSession,
+    ManagedPostgresRestoreDrill, ManagedPostgresRuntimeCheck, ManagedPostgresSpec,
+    ManagedPostgresStandby, ManagedPostgresStandbyCheck, ManagedPostgresSupportAccessSession,
     ManagedPostgresWalArchiveSegment, NodeAgentAction, NodeAgentCommand, NodeAgentCommandResult,
     NodeHost, NodeHostAgentCredential, NodeHostAgentCredentialState, NodeHostHardeningCheck,
     NodeHostHardeningStatus, NodeHostHeartbeat, NodeHostState, OperationKind, OperationRecord,
@@ -52,6 +57,7 @@ use palimpsest_paas_core::{
     UsageEvent, WalArchiveSegmentStatus, WebhookEndpoint, WebhookEndpointStatus,
     MIN_SUPPORTED_POSTGRES_MAJOR,
 };
+use palimpsest_paas_runtime::{RenderedManifests, RuntimeConfig};
 use ring::{
     digest, hmac,
     rand::{SecureRandom, SystemRandom},
@@ -133,116 +139,86 @@ impl PlacementEngine {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Reconciler {
-    placement: PlacementEngine,
+/// What the runtime should do for a cluster after a reconcile pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeAction {
+    /// Server-side apply the rendered CloudNativePG manifests.
+    Apply,
+    /// Delete the cluster's CloudNativePG resources.
+    Delete,
+    /// Nothing to do (terminal or externally-driven state).
+    None,
 }
+
+/// Turns managed-Postgres desired state into a CloudNativePG reconcile plan.
+#[derive(Debug, Default)]
+pub struct Reconciler;
 
 impl Reconciler {
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self
     }
 
+    /// Compute the next lifecycle state and the runtime action for `cluster`.
+    ///
+    /// CloudNativePG owns the granular provisioning steps the host runtime used
+    /// to drive command-by-command, so the provisioning states collapse to a
+    /// single declarative apply. Readiness is then gated on the operator
+    /// reporting ready instances (see `reconcile_managed_postgres_cluster_once`).
     pub fn reconcile(
         &self,
         cluster: &ManagedPostgresCluster,
-        hosts: &[HostCapacity],
+        spec: Option<&ManagedPostgresSpec>,
+        roles: &[DatabaseRoleCredential],
+        config: &RuntimeConfig,
     ) -> Result<ReconcilePlan, ControlPlaneError> {
-        let mut commands = Vec::new();
         let mut next_cluster = cluster.clone();
+        // CloudNativePG schedules onto Kubernetes nodes; there is no owned host
+        // assignment.
+        next_cluster.host_assignment = None;
 
-        match cluster.lifecycle_state {
-            ClusterLifecycleState::Requested | ClusterLifecycleState::Placing => {
-                let assignment = self.placement.place(cluster, hosts)?;
-                next_cluster.host_assignment = Some(assignment);
-                next_cluster.lifecycle_state = ClusterLifecycleState::AllocatingStorage;
-            }
-            ClusterLifecycleState::AllocatingStorage => {
-                let assignment = cluster
-                    .host_assignment
-                    .as_ref()
-                    .ok_or(ControlPlaneError::MissingHostAssignment)?;
-                commands.push(NodeAgentCommand {
-                    command_id: format!("{}:prepare-postgres", cluster.cluster_id),
-                    cluster_id: cluster.cluster_id.clone(),
-                    action: NodeAgentAction::PreparePostgres {
-                        postgres_version: cluster.postgres_version.clone(),
-                        data_dir: assignment.data_dir.clone(),
-                        port: assignment.port,
-                    },
-                });
-                next_cluster.lifecycle_state = ClusterLifecycleState::InitializingPostgres;
-            }
-            ClusterLifecycleState::Starting => {
-                commands.push(NodeAgentCommand {
-                    command_id: format!("{}:start-postgres", cluster.cluster_id),
-                    cluster_id: cluster.cluster_id.clone(),
-                    action: NodeAgentAction::StartPostgres,
-                });
-                next_cluster.lifecycle_state = ClusterLifecycleState::Verifying;
-            }
-            ClusterLifecycleState::ConfiguringRoles => {
-                let assignment = cluster
-                    .host_assignment
-                    .as_ref()
-                    .ok_or(ControlPlaneError::MissingHostAssignment)?;
-                commands.push(NodeAgentCommand {
-                    command_id: format!("{}:configure-postgres-access", cluster.cluster_id),
-                    cluster_id: cluster.cluster_id.clone(),
-                    action: NodeAgentAction::ConfigurePostgresAccess {
-                        data_dir: assignment.data_dir.clone(),
-                        port: assignment.port,
-                        database: "postgres".to_owned(),
-                        roles: default_database_role_credentials(cluster),
-                        publication: "palimpsest_publication".to_owned(),
-                        replication_slot: format!(
-                            "{}_palimpsest_slot",
-                            sanitize_identifier_component(&cluster.cluster_id)
-                        ),
-                    },
-                });
-                next_cluster.lifecycle_state = ClusterLifecycleState::ConfiguringReplication;
-            }
-            ClusterLifecycleState::Ready
+        let action = match cluster.lifecycle_state {
+            ClusterLifecycleState::Requested
+            | ClusterLifecycleState::Placing
+            | ClusterLifecycleState::AllocatingStorage
             | ClusterLifecycleState::InitializingPostgres
+            | ClusterLifecycleState::ConfiguringRoles
             | ClusterLifecycleState::ConfiguringReplication
             | ClusterLifecycleState::Restoring
             | ClusterLifecycleState::Resizing
             | ClusterLifecycleState::UpdatingPostgres
-            | ClusterLifecycleState::Verifying
-            | ClusterLifecycleState::Stopping
+            | ClusterLifecycleState::Starting => {
+                next_cluster.lifecycle_state = ClusterLifecycleState::Verifying;
+                RuntimeAction::Apply
+            }
+            // Re-apply when Verifying/Ready to converge any drift; the caller
+            // promotes Verifying -> Ready once the operator reports readiness.
+            ClusterLifecycleState::Verifying | ClusterLifecycleState::Ready => RuntimeAction::Apply,
+            ClusterLifecycleState::Deleting => {
+                next_cluster.lifecycle_state = ClusterLifecycleState::Deleted;
+                RuntimeAction::Delete
+            }
+            ClusterLifecycleState::Stopping
             | ClusterLifecycleState::Stopped
-            | ClusterLifecycleState::Deleting
             | ClusterLifecycleState::Deleted
-            | ClusterLifecycleState::Failed => {}
-        }
+            | ClusterLifecycleState::Failed => RuntimeAction::None,
+        };
+
+        let manifests = match action {
+            RuntimeAction::Apply | RuntimeAction::Delete => Some(
+                RenderedManifests::render(cluster, spec, roles, config)
+                    .map_err(|err| ControlPlaneError::Runtime(err.to_string()))?,
+            ),
+            RuntimeAction::None => None,
+        };
 
         Ok(ReconcilePlan {
             next_cluster,
-            commands,
+            action,
+            manifests,
         })
     }
-}
-
-fn default_database_role_credentials(
-    cluster: &ManagedPostgresCluster,
-) -> Vec<DatabaseRoleCredential> {
-    let prefix = sanitize_identifier_component(&cluster.cluster_id);
-    [
-        (DatabaseRoleKind::App, "app"),
-        (DatabaseRoleKind::Migration, "migration"),
-        (DatabaseRoleKind::Replication, "replication"),
-        (DatabaseRoleKind::Support, "support"),
-    ]
-    .into_iter()
-    .map(|(kind, suffix)| DatabaseRoleCredential {
-        name: format!("{prefix}_{suffix}"),
-        kind,
-        password: format!("{prefix}_{suffix}_local_dev_password"),
-        privileges: Vec::new(),
-    })
-    .collect()
 }
 
 fn sanitize_identifier_component(value: &str) -> String {
@@ -311,10 +287,11 @@ fn standby_physical_slot_name(target_cluster_id: &str) -> String {
     bounded_identifier_with_suffix(&sanitized, suffix, 63)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ReconcilePlan {
     pub next_cluster: ManagedPostgresCluster,
-    pub commands: Vec<NodeAgentCommand>,
+    pub action: RuntimeAction,
+    pub manifests: Option<RenderedManifests>,
 }
 
 #[derive(Debug, Default)]
@@ -488,6 +465,8 @@ impl InMemoryControlPlaneStore {
 pub enum ControlPlaneError {
     #[error("no host has capacity for the requested managed postgres cluster")]
     NoHostCapacity,
+    #[error("kubernetes runtime error: {0}")]
+    Runtime(String),
     #[error("cluster is missing a host assignment")]
     MissingHostAssignment,
     #[error("port range exhausted for host assignment")]
@@ -2031,8 +2010,7 @@ async fn sql_api_complete_agent_command(
         .await?;
     if payload.status == AgentCommandStatus::Succeeded {
         if let Some((cluster_id, _state)) = advanced_cluster {
-            reconcile_managed_postgres_cluster_passes(&store, "node-agent", &cluster_id, 2, false)
-                .await?;
+            reconcile_managed_postgres_cluster_passes(&store, "reconciler", &cluster_id, 2).await?;
         }
     }
     Ok(Json(ApiOk::new("agent_command.completed")))
@@ -2474,8 +2452,7 @@ async fn sql_api_create_managed_postgres_cluster(
             &resource_id,
         ))
         .await?;
-    reconcile_managed_postgres_cluster_passes(&store, auth.actor_id(), &resource_id, 2, true)
-        .await?;
+    reconcile_managed_postgres_cluster_passes(&store, auth.actor_id(), &resource_id, 2).await?;
     Ok(Json(ApiOk::new("managed_postgres_cluster.created")))
 }
 
@@ -4372,11 +4349,7 @@ async fn sql_api_reconcile_managed_postgres_cluster(
         .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
     auth.require_scope(ResourceScope::from_cluster(&cluster))?;
     let response =
-        reconcile_managed_postgres_cluster_once(&store, auth.actor_id(), &cluster_id, false)
-            .await?
-            .ok_or_else(|| {
-                SqlApiError::BadRequest(ControlPlaneError::NoHostCapacity.to_string())
-            })?;
+        reconcile_managed_postgres_cluster_once(&store, auth.actor_id(), &cluster_id).await?;
     Ok(Json(response))
 }
 
@@ -4385,73 +4358,68 @@ async fn reconcile_managed_postgres_cluster_passes(
     actor_id: &str,
     cluster_id: &str,
     max_passes: usize,
-    no_capacity_is_ok: bool,
 ) -> Result<Option<ReconcileApiResponse>, SqlApiError> {
     let mut last_response = None;
     for _ in 0..max_passes {
-        let Some(response) =
-            reconcile_managed_postgres_cluster_once(store, actor_id, cluster_id, no_capacity_is_ok)
-                .await?
-        else {
-            break;
-        };
-        let should_continue = response.commands.is_empty()
-            && matches!(
-                response.cluster.lifecycle_state,
-                ClusterLifecycleState::AllocatingStorage
-            );
-        let has_commands = !response.commands.is_empty();
+        let response = reconcile_managed_postgres_cluster_once(store, actor_id, cluster_id).await?;
+        // Keep iterating while the cluster is still converging toward Ready; a
+        // pass that applied manifests advances Verifying, and the next pass can
+        // promote it to Ready once the operator reports ready instances.
+        let should_continue = matches!(
+            response.cluster.lifecycle_state,
+            ClusterLifecycleState::Verifying
+        );
         last_response = Some(response);
-        if has_commands || !should_continue {
+        if !should_continue {
             break;
         }
     }
     Ok(last_response)
 }
 
+/// Render the cluster's CloudNativePG manifests, apply (or delete) them, and
+/// advance its lifecycle state. This replaces the former host placement +
+/// node-agent command enqueue path.
 async fn reconcile_managed_postgres_cluster_once(
     store: &SharedSqlControlPlaneStore,
     actor_id: &str,
     cluster_id: &str,
-    no_capacity_is_ok: bool,
-) -> Result<Option<ReconcileApiResponse>, SqlApiError> {
+) -> Result<ReconcileApiResponse, SqlApiError> {
     let cluster = store
         .managed_postgres_cluster(cluster_id)
         .await?
         .ok_or_else(|| SqlApiError::MissingResource(cluster_id.to_owned()))?;
-    let hosts = store.active_host_capacities().await?;
-    let mut plan = match Reconciler::new().reconcile(&cluster, &hosts) {
-        Ok(plan) => plan,
-        Err(ControlPlaneError::NoHostCapacity) if no_capacity_is_ok => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
-    for command in &mut plan.commands {
-        if let NodeAgentAction::ConfigurePostgresAccess { roles, .. } = &mut command.action {
-            *roles = store.issue_database_role_credentials(cluster_id).await?;
-        }
-    }
-    store
-        .update_managed_postgres_cluster(&plan.next_cluster)
-        .await?;
 
-    let host_id = plan
-        .next_cluster
-        .host_assignment
-        .as_ref()
-        .map(|assignment| assignment.host_id.as_str());
-    let mut operations = Vec::with_capacity(plan.commands.len());
-    if let Some(host_id) = host_id {
-        for command in &plan.commands {
-            let operation =
-                operation_for_agent_command(OperationKind::CreateCluster, cluster_id, command);
-            store.insert_operation(&operation).await?;
-            store
-                .enqueue_agent_command(host_id, Some(&operation.operation_id), command)
-                .await?;
-            operations.push(operation);
-        }
+    let runtime = runtime::ClusterRuntime::from_env();
+    let roles = store.issue_database_role_credentials(cluster_id).await?;
+    let plan = Reconciler::new()
+        .reconcile(&cluster, None, &roles, &RuntimeConfig::from_env())
+        .map_err(SqlApiError::from)?;
+
+    let manifests =
+        match (plan.action, &plan.manifests) {
+            (RuntimeAction::Apply, Some(manifests)) => {
+                runtime.apply(manifests).map_err(runtime_error)?;
+                Some(manifests.to_yaml().map_err(|err| {
+                    SqlApiError::from(ControlPlaneError::Runtime(err.to_string()))
+                })?)
+            }
+            (RuntimeAction::Delete, Some(manifests)) => {
+                runtime.delete(manifests).map_err(runtime_error)?;
+                None
+            }
+            _ => None,
+        };
+
+    let mut next_cluster = plan.next_cluster;
+    // Promote Verifying -> Ready once CloudNativePG reports a ready instance.
+    if next_cluster.lifecycle_state == ClusterLifecycleState::Verifying
+        && runtime.cluster_ready(&cluster).map_err(runtime_error)?
+    {
+        next_cluster.lifecycle_state = ClusterLifecycleState::Ready;
     }
 
+    store.update_managed_postgres_cluster(&next_cluster).await?;
     store
         .append_audit_event(&audit_event(
             actor_id,
@@ -4460,11 +4428,14 @@ async fn reconcile_managed_postgres_cluster_once(
         ))
         .await?;
 
-    Ok(Some(ReconcileApiResponse {
-        cluster: plan.next_cluster,
-        commands: plan.commands,
-        operations,
-    }))
+    Ok(ReconcileApiResponse {
+        cluster: next_cluster,
+        manifests,
+    })
+}
+
+fn runtime_error(err: runtime::RuntimeAdapterError) -> SqlApiError {
+    SqlApiError::from(ControlPlaneError::Runtime(err.0))
 }
 
 async fn sql_api_stop_managed_postgres_cluster(
@@ -9948,8 +9919,9 @@ struct IncidentsResponse {
 #[derive(Debug, Serialize)]
 pub struct ReconcileApiResponse {
     cluster: ManagedPostgresCluster,
-    commands: Vec<NodeAgentCommand>,
-    operations: Vec<OperationRecord>,
+    /// The CloudNativePG manifests applied this pass (YAML), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifests: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -12474,152 +12446,79 @@ predicate = \"owner_id = $user.id\"
     }
 
     #[test]
-    fn requested_cluster_is_placed_without_agent_command() {
-        let hosts = [HostCapacity {
-            host_id: "host-a".to_owned(),
-            data_root: "/var/lib/palimpsest/postgres".to_owned(),
-            first_port: 55_000,
-            max_clusters: 2,
-            assigned_clusters: 0,
-            used_ports: BTreeSet::new(),
-            storage_gib: 100,
-            used_storage_gib: 0,
-        }];
-
+    fn requested_cluster_applies_cnpg_and_advances_to_verifying() {
         let plan = Reconciler::new()
-            .reconcile(&cluster(ClusterLifecycleState::Requested), &hosts)
+            .reconcile(
+                &cluster(ClusterLifecycleState::Requested),
+                None,
+                &[],
+                &RuntimeConfig::default(),
+            )
             .expect("reconcile succeeds");
 
+        assert_eq!(plan.action, RuntimeAction::Apply);
         assert_eq!(
             plan.next_cluster.lifecycle_state,
-            ClusterLifecycleState::AllocatingStorage
+            ClusterLifecycleState::Verifying
         );
-        assert!(plan.next_cluster.host_assignment.is_some());
-        assert!(plan.commands.is_empty());
+        // CloudNativePG owns placement; no host assignment is recorded.
+        assert!(plan.next_cluster.host_assignment.is_none());
+        let manifests = plan.manifests.expect("manifests rendered");
+        let yaml = manifests.to_yaml().expect("yaml renders");
+        assert!(yaml.contains("kind: Cluster"));
+        assert!(yaml.contains("postgresql.cnpg.io/v1"));
     }
 
     #[test]
-    fn placement_uses_first_free_host_port() {
-        let hosts = [HostCapacity {
-            host_id: "host-a".to_owned(),
-            data_root: "/var/lib/palimpsest/postgres".to_owned(),
-            first_port: 55_000,
-            max_clusters: 4,
-            assigned_clusters: 2,
-            used_ports: BTreeSet::from([55_000, 55_002]),
-            storage_gib: 100,
-            used_storage_gib: 20,
-        }];
-
+    fn ready_cluster_reapplies_for_drift_convergence() {
         let plan = Reconciler::new()
-            .reconcile(&cluster(ClusterLifecycleState::Requested), &hosts)
+            .reconcile(
+                &cluster(ClusterLifecycleState::Ready),
+                None,
+                &[],
+                &RuntimeConfig::default(),
+            )
             .expect("reconcile succeeds");
 
-        assert_eq!(plan.next_cluster.host_assignment.unwrap().port, 55_001);
-    }
-
-    #[test]
-    fn placement_rejects_hosts_without_storage_capacity() {
-        let hosts = [HostCapacity {
-            host_id: "host-a".to_owned(),
-            data_root: "/var/lib/palimpsest/postgres".to_owned(),
-            first_port: 55_000,
-            max_clusters: 2,
-            assigned_clusters: 0,
-            used_ports: BTreeSet::new(),
-            storage_gib: 20,
-            used_storage_gib: 10,
-        }];
-        let mut cluster = cluster(ClusterLifecycleState::Requested);
-        cluster.storage_gib = 20;
-
-        let err = Reconciler::new()
-            .reconcile(&cluster, &hosts)
-            .expect_err("host is out of storage");
-
-        assert!(matches!(err, ControlPlaneError::NoHostCapacity));
-    }
-
-    #[test]
-    fn placement_rejects_hosts_without_cluster_slots() {
-        let hosts = [HostCapacity {
-            host_id: "host-a".to_owned(),
-            data_root: "/var/lib/palimpsest/postgres".to_owned(),
-            first_port: 55_000,
-            max_clusters: 1,
-            assigned_clusters: 1,
-            used_ports: BTreeSet::from([55_000]),
-            storage_gib: 100,
-            used_storage_gib: 10,
-        }];
-
-        let err = Reconciler::new()
-            .reconcile(&cluster(ClusterLifecycleState::Requested), &hosts)
-            .expect_err("host has no cluster slots");
-
-        assert!(matches!(err, ControlPlaneError::NoHostCapacity));
-    }
-
-    #[test]
-    fn allocating_cluster_prepares_postgres_through_node_agent() {
-        let mut cluster = cluster(ClusterLifecycleState::AllocatingStorage);
-        cluster.host_assignment = Some(HostAssignment {
-            host_id: "host-a".to_owned(),
-            data_dir: "/var/lib/palimpsest/postgres/cluster_123".to_owned(),
-            port: 55_000,
-        });
-
-        let plan = Reconciler::new()
-            .reconcile(&cluster, &[])
-            .expect("reconcile succeeds");
-
+        assert_eq!(plan.action, RuntimeAction::Apply);
         assert_eq!(
             plan.next_cluster.lifecycle_state,
-            ClusterLifecycleState::InitializingPostgres
+            ClusterLifecycleState::Ready
         );
-        assert_eq!(plan.commands.len(), 1);
-        assert!(matches!(
-            plan.commands[0].action,
-            NodeAgentAction::PreparePostgres { .. }
-        ));
     }
 
     #[test]
-    fn configuring_roles_queues_access_setup_command() {
-        let mut cluster = cluster(ClusterLifecycleState::ConfiguringRoles);
-        cluster.host_assignment = Some(HostAssignment {
-            host_id: "host-a".to_owned(),
-            data_dir: "/var/lib/palimpsest/postgres/cluster_123".to_owned(),
-            port: 55_000,
-        });
-
+    fn deleting_cluster_plans_a_delete() {
         let plan = Reconciler::new()
-            .reconcile(&cluster, &[])
+            .reconcile(
+                &cluster(ClusterLifecycleState::Deleting),
+                None,
+                &[],
+                &RuntimeConfig::default(),
+            )
             .expect("reconcile succeeds");
 
+        assert_eq!(plan.action, RuntimeAction::Delete);
         assert_eq!(
             plan.next_cluster.lifecycle_state,
-            ClusterLifecycleState::ConfiguringReplication
+            ClusterLifecycleState::Deleted
         );
-        assert_eq!(plan.commands.len(), 1);
-        match &plan.commands[0].action {
-            NodeAgentAction::ConfigurePostgresAccess {
-                data_dir,
-                port,
-                database,
-                roles,
-                publication,
-                replication_slot,
-            } => {
-                assert_eq!(data_dir, "/var/lib/palimpsest/postgres/cluster_123");
-                assert_eq!(*port, 55_000);
-                assert_eq!(database, "postgres");
-                assert_eq!(roles.len(), 4);
-                assert_eq!(publication, "palimpsest_publication");
-                assert_eq!(replication_slot, "cluster_123_palimpsest_slot");
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
+        assert!(plan.manifests.is_some());
+    }
+
+    #[test]
+    fn stopped_cluster_is_a_runtime_noop() {
+        let plan = Reconciler::new()
+            .reconcile(
+                &cluster(ClusterLifecycleState::Stopped),
+                None,
+                &[],
+                &RuntimeConfig::default(),
+            )
+            .expect("reconcile succeeds");
+
+        assert_eq!(plan.action, RuntimeAction::None);
+        assert!(plan.manifests.is_none());
     }
 
     #[test]
