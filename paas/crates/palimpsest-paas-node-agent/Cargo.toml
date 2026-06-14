@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 base64 = "0.22"
-palimpsest-paas-core = { path = "../palimpsest-paas-core" }
+palimpsest-paas-core = { path = "../palimpsest-paas-core", version = "0.1.1" }
 ring = "0.17"
 rustls = "0.23"
 rustls-pemfile = "2"

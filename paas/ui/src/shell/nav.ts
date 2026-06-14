@@ -40,6 +40,7 @@ export const CLUSTER_TABS: Array<{ label: string; slug: string; icon?: Component
   { label: "Overview", slug: "" },
   { label: "SQL", slug: "sql" },
   { label: "Clones", slug: "clones" },
+  { label: "Branches", slug: "branches" },
   { label: "Backups", slug: "backups" },
   { label: "PITR", slug: "pitr" },
   { label: "Roles", slug: "roles" },

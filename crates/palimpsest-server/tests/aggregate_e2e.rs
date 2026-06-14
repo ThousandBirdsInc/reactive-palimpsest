@@ -418,7 +418,7 @@ async fn initial_event_carries_server_side_aggregate_rows() {
         "two distinct categories in seed (7, 9); got {rows:?}",
     );
     for row in &rows {
-        let category = match row.get(0) {
+        let category = match row.first() {
             Some(Datum::I64(v)) => *v,
             _ => panic!("category_id missing"),
         };
@@ -514,7 +514,7 @@ async fn permission_filter_threads_through_to_aggregate() {
     let rows = decode_diff_rows(&initial, &schema);
     assert_eq!(rows.len(), 2, "two categories visible after filter");
     for row in &rows {
-        let cat = match row.get(0) {
+        let cat = match row.first() {
             Some(Datum::I64(v)) => *v,
             _ => panic!("category_id missing"),
         };
@@ -551,21 +551,19 @@ async fn permission_filter_threads_through_to_aggregate() {
 
     // Push an event ABOVE the threshold — should change the aggregate.
     harness.wal.push_event(event_row(6, 9, 200));
-    let update_msg = loop {
-        let msg = tokio::time::timeout(Duration::from_secs(3), response.next())
-            .await
-            .expect("diff timeout")
-            .expect("stream closed")
-            .expect("status");
-        match msg.kind.expect("diff kind") {
-            proto::server_message::Kind::TransactionUpdate(update) => break update,
-            other => panic!("unexpected message: {other:?}"),
-        }
+    let msg = tokio::time::timeout(Duration::from_secs(3), response.next())
+        .await
+        .expect("diff timeout")
+        .expect("stream closed")
+        .expect("status");
+    let update_msg = match msg.kind.expect("diff kind") {
+        proto::server_message::Kind::TransactionUpdate(update) => update,
+        other => panic!("unexpected message: {other:?}"),
     };
     let updated = decode_transaction_rows(&update_msg, &schema);
     let new_cat_9 = updated
         .iter()
-        .find(|r| matches!(r.get(0), Some(Datum::I64(9))))
+        .find(|r| matches!(r.first(), Some(Datum::I64(9))))
         .expect("cat 9 in update");
     assert_eq!(new_cat_9.get(1), Some(&Datum::I64(2)));
     assert_eq!(new_cat_9.get(2), Some(&Datum::I64(280))); // 80 + 200
@@ -794,16 +792,14 @@ async fn wal_diff_produces_aggregate_update() {
     harness.wal.push_event(event_row(3, 9, 100));
 
     // Wait for the next Diff event (cursor polls every 50ms).
-    let update_msg = loop {
-        let msg = tokio::time::timeout(Duration::from_secs(3), response.next())
-            .await
-            .expect("diff timeout")
-            .expect("stream closed")
-            .expect("status");
-        match msg.kind.expect("diff kind") {
-            proto::server_message::Kind::TransactionUpdate(update) => break update,
-            other => panic!("unexpected message between Initial and TransactionUpdate: {other:?}"),
-        }
+    let msg = tokio::time::timeout(Duration::from_secs(3), response.next())
+        .await
+        .expect("diff timeout")
+        .expect("stream closed")
+        .expect("status");
+    let update_msg = match msg.kind.expect("diff kind") {
+        proto::server_message::Kind::TransactionUpdate(update) => update,
+        other => panic!("unexpected message between Initial and TransactionUpdate: {other:?}"),
     };
 
     assert!(
@@ -816,7 +812,7 @@ async fn wal_diff_produces_aggregate_update() {
     let rows = decode_transaction_rows(&update_msg, &schema);
     let new_cat_9 = rows
         .iter()
-        .find(|r| matches!(r.get(0), Some(Datum::I64(9))))
+        .find(|r| matches!(r.first(), Some(Datum::I64(9))))
         .expect("cat 9 in update payload");
     assert_eq!(new_cat_9.get(1), Some(&Datum::I64(2)), "n = 2");
     assert_eq!(new_cat_9.get(2), Some(&Datum::I64(120)), "total = 120");

@@ -14,6 +14,7 @@ import { formatGiB, formatRelative, formatTimestamp } from "../lib/format";
 import { CLUSTER_TABS } from "../shell/nav";
 import { ClusterConsoleTab } from "./ClusterConsole";
 import { ClusterClonesTab } from "./ClusterClones";
+import { ClusterBranchesTab } from "./ClusterBranches";
 import { ConnectionInfo } from "../components/ConnectionInfo";
 import { useClusterConnection } from "../lib/connection";
 import type {
@@ -130,6 +131,7 @@ export function ClusterDetail() {
         <Route index element={<ClusterOverviewTab cluster={c} onAction={run} />} />
         <Route path="sql" element={<ClusterConsoleTab clusterId={clusterId} />} />
         <Route path="clones" element={<ClusterClonesTab clusterId={clusterId} />} />
+        <Route path="branches" element={<ClusterBranchesTab clusterId={clusterId} />} />
         <Route path="backups" element={<ClusterBackupsTab clusterId={clusterId} />} />
         <Route path="pitr" element={<ClusterPitrTab clusterId={clusterId} />} />
         <Route path="roles" element={<ClusterRolesTab onRotate={() => run("rotate", () => api.rotateRoles(clusterId))} />} />

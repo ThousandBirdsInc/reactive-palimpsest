@@ -1,7 +1,7 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Host-local node-agent primitives for the Palimpsest PaaS.
+//! Host-local node-agent primitives for the Palimpsest `PaaS`.
 
 use std::{
     fs,
@@ -36,6 +36,7 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
+    #[must_use]
     pub fn local_dev() -> Self {
         Self {
             host_id: "local-dev-host".to_owned(),
@@ -44,6 +45,7 @@ impl AgentConfig {
         }
     }
 
+    #[must_use]
     pub fn from_env() -> Self {
         let mut config = Self::local_dev();
         if let Ok(host_id) = std::env::var("PALIMPSEST_PAAS_AGENT_HOST_ID") {
@@ -114,6 +116,14 @@ pub enum AgentStep {
         source_database: String,
         target_database: String,
         terminate_source_connections: bool,
+    },
+    DropDatabase {
+        program: PathBuf,
+        data_dir: PathBuf,
+        port: u16,
+        admin_database: String,
+        database: String,
+        terminate_connections: bool,
     },
     CreatePhysicalReplicationSlot {
         program: PathBuf,
@@ -277,14 +287,17 @@ pub struct NodeAgent {
 }
 
 impl NodeAgent {
-    pub fn new(config: AgentConfig) -> Self {
+    #[must_use]
+    pub const fn new(config: AgentConfig) -> Self {
         Self { config }
     }
 
+    #[must_use]
     pub const fn config(&self) -> &AgentConfig {
         &self.config
     }
 
+    #[must_use]
     pub fn local_host_description(&self) -> NodeHost {
         NodeHost {
             host_id: self.config.host_id.clone(),
@@ -307,6 +320,7 @@ impl NodeAgent {
         }
     }
 
+    #[must_use]
     pub fn heartbeat(&self) -> NodeHostHeartbeat {
         let host = self.local_host_description();
         NodeHostHeartbeat {
@@ -496,6 +510,22 @@ impl NodeAgent {
                     terminate_source_connections: *terminate_source_connections,
                 }]
             }
+            NodeAgentAction::DropDatabase {
+                data_dir,
+                port,
+                database,
+                terminate_connections,
+            } => {
+                ensure_droppable_database(database)?;
+                vec![AgentStep::DropDatabase {
+                    program: self.program("psql"),
+                    data_dir: PathBuf::from(data_dir),
+                    port: *port,
+                    admin_database: "postgres".to_owned(),
+                    database: database.clone(),
+                    terminate_connections: *terminate_connections,
+                }]
+            }
             NodeAgentAction::ReportStatus => vec![AgentStep::ProbeStatus {
                 data_dir: self.cluster_data_dir(&command.cluster_id),
             }],
@@ -564,7 +594,7 @@ impl NodeAgent {
                     steps.push(AgentStep::UploadBackupArtifact {
                         cluster_id: command.cluster_id.clone(),
                         backup_id: backup_id.clone(),
-                        source_dir: backup_dir.clone(),
+                        source_dir: backup_dir,
                         object_store_dir: target.root_dir,
                         endpoint: target.endpoint,
                         auth: target.auth,
@@ -962,6 +992,24 @@ impl NodeAgent {
                         "created copy-on-write database clone {target_database} from {source_database}"
                     ),
                 ))
+            }
+            AgentStep::DropDatabase {
+                program,
+                data_dir,
+                port,
+                admin_database,
+                database,
+                terminate_connections,
+            } => {
+                ensure_under_root(data_dir, &self.config.runtime_root)?;
+                ensure_droppable_database(database)?;
+                if *terminate_connections {
+                    let terminate_sql = render_terminate_database_connections_sql(database)?;
+                    runner.run_sql(program, data_dir, *port, admin_database, &terminate_sql)?;
+                }
+                let drop_sql = render_drop_database_sql(database, *terminate_connections)?;
+                runner.run_sql(program, data_dir, *port, admin_database, &drop_sql)?;
+                Ok(succeeded(step, format!("dropped database {database}")))
             }
             AgentStep::CreatePhysicalReplicationSlot {
                 program,
@@ -1403,10 +1451,7 @@ impl NodeAgent {
                 })?;
                 Ok(succeeded(
                     step,
-                    format!(
-                        "ran PostgreSQL major upgrade preflight on {}:{}",
-                        database, port
-                    ),
+                    format!("ran PostgreSQL major upgrade preflight on {database}:{port}"),
                 ))
             }
             AgentStep::RecordPostgresMajorUpgrade {
@@ -1771,7 +1816,7 @@ enum HttpScheme {
 }
 
 impl HttpScheme {
-    fn default_port(self) -> u16 {
+    const fn default_port(self) -> u16 {
         match self {
             Self::Http => 80,
             Self::Https => 443,
@@ -2291,6 +2336,7 @@ fn hex_lower(bytes: &[u8]) -> String {
     output
 }
 
+#[must_use]
 pub fn result_from_execution_report(
     host_id: &str,
     report: &ExecutionReport,
@@ -2315,6 +2361,7 @@ pub fn result_from_execution_report(
     }
 }
 
+#[must_use]
 pub fn result_from_command_plan(host_id: &str, plan: &CommandPlan) -> NodeAgentCommandResult {
     NodeAgentCommandResult {
         command_id: plan.command_id.clone(),
@@ -2326,6 +2373,7 @@ pub fn result_from_command_plan(host_id: &str, plan: &CommandPlan) -> NodeAgentC
     }
 }
 
+#[must_use]
 pub fn failed_command_result(
     host_id: &str,
     command_id: &str,
@@ -3379,7 +3427,7 @@ log_disconnections = on
     )
 }
 
-fn render_pg_hba_config() -> &'static str {
+const fn render_pg_hba_config() -> &'static str {
     "\
 local all all trust
 host all all 127.0.0.1/32 trust
@@ -3441,6 +3489,29 @@ fn render_copy_on_write_database_clone_sql(
         "CREATE DATABASE {target_database} TEMPLATE {source_database} STRATEGY FILE_COPY;\n",
         target_database = quote_ident(target_database),
         source_database = quote_ident(source_database),
+    ))
+}
+
+/// Databases the node agent must never drop, regardless of caller input.
+///
+/// These are `PostgreSQL`'s built-in admin/template databases; a branch is always
+/// a distinct cloned database.
+const PROTECTED_DATABASES: [&str; 3] = ["postgres", "template0", "template1"];
+
+fn ensure_droppable_database(database: &str) -> Result<(), NodeAgentError> {
+    validate_identifier(database)?;
+    if PROTECTED_DATABASES.contains(&database) {
+        return Err(NodeAgentError::ProtectedDatabase(database.to_owned()));
+    }
+    Ok(())
+}
+
+fn render_drop_database_sql(database: &str, force: bool) -> Result<String, NodeAgentError> {
+    ensure_droppable_database(database)?;
+    let force_clause = if force { " WITH (FORCE)" } else { "" };
+    Ok(format!(
+        "DROP DATABASE IF EXISTS {database}{force_clause};\n",
+        database = quote_ident(database),
     ))
 }
 
@@ -3574,7 +3645,7 @@ fn major_upgrade_preflight_sql(
     )
 }
 
-fn major_upgrade_strategy_label(
+const fn major_upgrade_strategy_label(
     strategy: palimpsest_paas_core::ManagedPostgresMajorUpgradeStrategy,
 ) -> &'static str {
     match strategy {
@@ -3627,8 +3698,7 @@ fn detect_container_runtime() -> String {
 fn detect_disk_encryption() -> bool {
     if cfg!(target_os = "macos") {
         return command_stdout("fdesetup", &["status"])
-            .map(|output| output.to_ascii_lowercase().contains("filevault is on"))
-            .unwrap_or(false);
+            .is_some_and(|output| output.to_ascii_lowercase().contains("filevault is on"));
     }
     false
 }
@@ -3636,27 +3706,23 @@ fn detect_disk_encryption() -> bool {
 fn detect_firewall_enabled() -> bool {
     if cfg!(target_os = "linux") {
         return command_stdout("ufw", &["status"])
-            .map(|output| output.to_ascii_lowercase().contains("status: active"))
-            .unwrap_or(false);
+            .is_some_and(|output| output.to_ascii_lowercase().contains("status: active"));
     }
     if cfg!(target_os = "macos") {
         return command_stdout(
             "/usr/libexec/ApplicationFirewall/socketfilterfw",
             &["--getglobalstate"],
         )
-        .map(|output| output.to_ascii_lowercase().contains("enabled"))
-        .unwrap_or(false);
+        .is_some_and(|output| output.to_ascii_lowercase().contains("enabled"));
     }
     false
 }
 
 fn detect_unattended_upgrades() -> bool {
-    fs::read_to_string("/etc/apt/apt.conf.d/20auto-upgrades")
-        .map(|raw| {
-            raw.contains("APT::Periodic::Update-Package-Lists \"1\"")
-                && raw.contains("APT::Periodic::Unattended-Upgrade \"1\"")
-        })
-        .unwrap_or(false)
+    fs::read_to_string("/etc/apt/apt.conf.d/20auto-upgrades").is_ok_and(|raw| {
+        raw.contains("APT::Periodic::Update-Package-Lists \"1\"")
+            && raw.contains("APT::Periodic::Unattended-Upgrade \"1\"")
+    })
 }
 
 fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
@@ -3683,7 +3749,7 @@ fn rfc3339_from_unix_seconds(seconds: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u32, u32) {
+const fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u32, u32) {
     let z = days_since_unix_epoch + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -3851,6 +3917,8 @@ pub enum NodeAgentError {
     InvalidPath(String),
     #[error("invalid postgres identifier: {0}")]
     InvalidIdentifier(String),
+    #[error("refusing to drop protected database: {0}")]
+    ProtectedDatabase(String),
     #[error("invalid clone redaction policy: {0}")]
     InvalidRedactionPolicy(String),
     #[error("invalid postgres major upgrade: {0}")]
@@ -4025,6 +4093,66 @@ mod tests {
             .contains("CREATE DATABASE \"target_db\" TEMPLATE \"source_db\" STRATEGY FILE_COPY"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn execute_drop_database_terminates_then_drops_with_force() {
+        let root = unique_temp_root("drop-db");
+        let data_dir = root.join("postgres/cluster_123");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let agent = NodeAgent::new(AgentConfig {
+            host_id: "test-host".to_owned(),
+            postgres_bin_dir: PathBuf::from("/pg18/bin"),
+            runtime_root: root.clone(),
+        });
+        let command = NodeAgentCommand {
+            command_id: "cmd_drop".to_owned(),
+            cluster_id: "cluster_123".to_owned(),
+            action: NodeAgentAction::DropDatabase {
+                data_dir: data_dir.display().to_string(),
+                port: 55_000,
+                database: "branch_db".to_owned(),
+                terminate_connections: true,
+            },
+        };
+        let runner = RecordingRunner::default();
+
+        let report = agent
+            .execute_with_runner(&command, &runner)
+            .expect("execution succeeds");
+
+        assert_eq!(report.outcomes.len(), 1);
+        let sql_calls = runner.sql_calls.borrow();
+        assert_eq!(sql_calls.len(), 2);
+        assert_eq!(sql_calls[0].3, "postgres");
+        assert!(sql_calls[0].4.contains("SELECT pg_terminate_backend(pid)"));
+        assert!(sql_calls[1]
+            .4
+            .contains("DROP DATABASE IF EXISTS \"branch_db\" WITH (FORCE)"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plan_drop_database_refuses_protected_database() {
+        let agent = NodeAgent::new(AgentConfig {
+            host_id: "test-host".to_owned(),
+            postgres_bin_dir: PathBuf::from("/pg18/bin"),
+            runtime_root: unique_temp_root("drop-db-guard"),
+        });
+        let command = NodeAgentCommand {
+            command_id: "cmd_drop_guard".to_owned(),
+            cluster_id: "cluster_123".to_owned(),
+            action: NodeAgentAction::DropDatabase {
+                data_dir: "/var/lib/palimpsest/postgres/cluster_123".to_owned(),
+                port: 55_000,
+                database: "postgres".to_owned(),
+                terminate_connections: false,
+            },
+        };
+
+        let err = agent.plan(&command).expect_err("plan must reject");
+        assert!(matches!(err, NodeAgentError::ProtectedDatabase(db) if db == "postgres"));
     }
 
     #[test]
@@ -4939,7 +5067,7 @@ mod tests {
             steps: vec![AgentStep::UploadBackupArtifact {
                 cluster_id: "cluster_123".to_owned(),
                 backup_id: "backup_123".to_owned(),
-                source_dir: backup_dir.clone(),
+                source_dir: backup_dir,
                 object_store_dir: Some(object_store_dir.clone()),
                 endpoint: None,
                 auth: None,

@@ -48,7 +48,7 @@ pub enum DiffEvent {
         begin_lsn: Option<u64>,
         /// End marker LSN, when supplied by the server.
         end_lsn: Option<u64>,
-        /// PostgreSQL transaction id, when supplied by the server.
+        /// `PostgreSQL` transaction id, when supplied by the server.
         transaction_id: Option<u32>,
         /// Per-row changes in this transaction.
         changes: Vec<WireRowChange>,

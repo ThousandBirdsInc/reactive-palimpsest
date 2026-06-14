@@ -1,7 +1,7 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Hosted gateway primitives for the Palimpsest PaaS.
+//! Hosted gateway primitives for the Palimpsest `PaaS`.
 
 use std::{
     collections::BTreeMap,
@@ -399,10 +399,7 @@ fn validate_postgres_startup_parameters(
     }
     let mut parts = parameters.split(|byte| *byte == 0);
     let mut parsed = BTreeMap::new();
-    loop {
-        let Some(key) = parts.next() else {
-            break;
-        };
+    while let Some(key) = parts.next() {
         if key.is_empty() {
             if parts.any(|part| !part.is_empty()) {
                 return Err(DatabaseProxyError::InvalidPostgresStartup);
@@ -575,7 +572,7 @@ fn validate_postgres_client_message(
     Ok(())
 }
 
-fn is_known_postgres_frontend_message_type(message_type: u8) -> bool {
+const fn is_known_postgres_frontend_message_type(message_type: u8) -> bool {
     matches!(
         message_type,
         b'B' | b'C' | b'c' | b'd' | b'D' | b'E' | b'F' | b'H' | b'P' | b'p' | b'Q' | b'S' | b'X'
@@ -747,6 +744,7 @@ impl EgressAccountant {
             .or_default() += bytes;
     }
 
+    #[must_use]
     pub fn bytes_for_environment(&self, environment_id: &str) -> u64 {
         self.bytes_by_environment
             .get(environment_id)
@@ -1428,7 +1426,7 @@ fn gateway_error_response(err: GatewayError) -> Response<Body> {
     (status, err.to_string()).into_response()
 }
 
-fn status_for_error(err: &GatewayError) -> StatusCode {
+const fn status_for_error(err: &GatewayError) -> StatusCode {
     match err {
         GatewayError::RouteNotFound(_) | GatewayError::InvalidRoute(_) => StatusCode::NOT_FOUND,
         GatewayError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -1469,8 +1467,7 @@ fn render_gateway_metrics(snapshot: &GatewayMetricsSnapshot) -> String {
     );
     for (environment_id, bytes) in &snapshot.egress_bytes_by_environment {
         metrics.push_str(&format!(
-            "palimpsest_gateway_egress_bytes_total{{environment_id=\"{}\"}} {}\n",
-            environment_id, bytes
+            "palimpsest_gateway_egress_bytes_total{{environment_id=\"{environment_id}\"}} {bytes}\n"
         ));
     }
     metrics

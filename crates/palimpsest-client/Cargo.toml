@@ -15,7 +15,7 @@ categories.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 http.workspace = true
-palimpsest-proto = { path = "../palimpsest-proto" }
+palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.1" }
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -44,7 +44,7 @@ wasm-bindgen-futures = "0.4"
 # etc., none of which compile for `wasm32-unknown-unknown`.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 jsonwebtoken.workspace = true
-palimpsest-server = { path = "../palimpsest-server" }
+palimpsest-server = { path = "../palimpsest-server", version = "0.1.1" }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
 

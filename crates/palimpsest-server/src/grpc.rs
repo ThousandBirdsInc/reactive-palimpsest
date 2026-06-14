@@ -69,11 +69,10 @@ const SUBSCRIBE_BLOCKING_CONCURRENCY: usize = 2;
 
 /// Index of cursor pumps by canonical query key.
 ///
-/// One pump per `canonical_subgraph_key(query, user_ctx)` — same query
-/// + same user context = same dataflow plan in the `PersistentHost`,
-/// so we should have one cursor pulling diffs and fanning out to every
-/// attached subscriber, not N independent pumps double-applying the
-/// same WAL.
+/// One pump per `canonical_subgraph_key(query, user_ctx)`: the same query and
+/// user context map to the same dataflow plan in the `PersistentHost`, so we
+/// should have one cursor pulling diffs and fanning out to every attached
+/// subscriber, not N independent pumps double-applying the same WAL.
 ///
 /// The pump exits on its own when the host reports zero subscribers
 /// for its canonical key; the next subscribe to that key (which finds
@@ -102,7 +101,7 @@ pub struct SyncEngineService {
     reconnect_tracker: Arc<ReconnectTracker>,
     /// Long-lived host that drives compiled plans incrementally.
     /// Shared by every subscription so refcounted plan reuse works
-    /// across connections; each subscription register_or_seed's its
+    /// across connections; each subscription `register_or_seed`'s its
     /// canonical key and the cursor pump pushes WAL diffs through.
     dataflow_host: Arc<palimpsest_dataflow::palimpsest::PersistentHost>,
     /// Process-wide cap on concurrent heavy subscribe work — see
@@ -348,10 +347,10 @@ struct ConnectionState {
     /// Map client-supplied label → server-assigned id (so Update/Ack
     /// referenced by `client_subscription_id` resolve).
     by_client_id: HashMap<String, SubscriptionId>,
-    /// For each subscription that attached to a `PersistentHost`
-    /// plan, the canonical key it's attached to. Used by unsubscribe
-    /// + disconnect to call `host.release(canonical, sub_id)` and let
-    /// the shared cursor pump exit when the last subscriber leaves.
+    /// For each subscription that attached to a `PersistentHost` plan, the
+    /// canonical key it's attached to. Used by unsubscribe and disconnect to
+    /// call `host.release(canonical, sub_id)` and let the shared cursor pump
+    /// exit when the last subscriber leaves.
     host_canonicals: HashMap<SubscriptionId, String>,
 }
 
@@ -383,7 +382,7 @@ struct AdmitGuard {
 }
 
 impl AdmitGuard {
-    fn new(limiter: Arc<ConnectionLimiter>) -> Self {
+    const fn new(limiter: Arc<ConnectionLimiter>) -> Self {
         Self {
             limiter,
             committed: false,
@@ -510,7 +509,6 @@ async fn handle_subscribe(
         let user_ctx = user_ctx.clone();
         let query = query.clone();
         let client_id = client_id.clone();
-        let graph = graph;
         move || {
             blocking_subscribe(
                 connection,
@@ -954,14 +952,12 @@ fn spawn_canonical_pump(
                     .iter()
                     .map(|d| (table_id, d.row.clone(), d.diff as isize))
                     .collect();
-                let (deltas, subscribers) =
-                    match host.apply_and_fanout(&canonical, diffs, transaction.commit_lsn) {
-                        Some(out) => out,
-                        None => {
-                            debug!(canonical, "canonical pump: plan released mid-tick, exiting");
-                            return;
-                        }
-                    };
+                let Some((deltas, subscribers)) =
+                    host.apply_and_fanout(&canonical, diffs, transaction.commit_lsn)
+                else {
+                    debug!(canonical, "canonical pump: plan released mid-tick, exiting");
+                    return;
+                };
                 if deltas.is_empty() {
                     continue;
                 }
@@ -1072,7 +1068,7 @@ struct WalTableLookup<'a> {
     wal: &'a dyn WalRuntime,
 }
 
-impl<'a> palimpsest_dataflow::palimpsest::TableSchemaLookup for WalTableLookup<'a> {
+impl palimpsest_dataflow::palimpsest::TableSchemaLookup for WalTableLookup<'_> {
     fn lookup(&self, table: &str) -> Option<(palimpsest_wal::TableId, ScalarSchema)> {
         self.wal.table_schema(table)
     }
@@ -1102,7 +1098,7 @@ fn schema_definition_from_plan(
     }
 }
 
-fn column_type_to_datum_type(ty: ColumnType) -> DatumType {
+const fn column_type_to_datum_type(ty: ColumnType) -> DatumType {
     match ty {
         ColumnType::Bool => DatumType::Bool,
         ColumnType::Int => DatumType::I64,
