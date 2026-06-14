@@ -1,7 +1,7 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Host-local node-agent primitives for the Palimpsest PaaS.
+//! Host-local node-agent primitives for the Palimpsest `PaaS`.
 
 use std::{
     fs,
@@ -36,6 +36,7 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
+    #[must_use]
     pub fn local_dev() -> Self {
         Self {
             host_id: "local-dev-host".to_owned(),
@@ -44,6 +45,7 @@ impl AgentConfig {
         }
     }
 
+    #[must_use]
     pub fn from_env() -> Self {
         let mut config = Self::local_dev();
         if let Ok(host_id) = std::env::var("PALIMPSEST_PAAS_AGENT_HOST_ID") {
@@ -285,14 +287,17 @@ pub struct NodeAgent {
 }
 
 impl NodeAgent {
-    pub fn new(config: AgentConfig) -> Self {
+    #[must_use]
+    pub const fn new(config: AgentConfig) -> Self {
         Self { config }
     }
 
+    #[must_use]
     pub const fn config(&self) -> &AgentConfig {
         &self.config
     }
 
+    #[must_use]
     pub fn local_host_description(&self) -> NodeHost {
         NodeHost {
             host_id: self.config.host_id.clone(),
@@ -315,6 +320,7 @@ impl NodeAgent {
         }
     }
 
+    #[must_use]
     pub fn heartbeat(&self) -> NodeHostHeartbeat {
         let host = self.local_host_description();
         NodeHostHeartbeat {
@@ -588,7 +594,7 @@ impl NodeAgent {
                     steps.push(AgentStep::UploadBackupArtifact {
                         cluster_id: command.cluster_id.clone(),
                         backup_id: backup_id.clone(),
-                        source_dir: backup_dir.clone(),
+                        source_dir: backup_dir,
                         object_store_dir: target.root_dir,
                         endpoint: target.endpoint,
                         auth: target.auth,
@@ -1445,10 +1451,7 @@ impl NodeAgent {
                 })?;
                 Ok(succeeded(
                     step,
-                    format!(
-                        "ran PostgreSQL major upgrade preflight on {}:{}",
-                        database, port
-                    ),
+                    format!("ran PostgreSQL major upgrade preflight on {database}:{port}"),
                 ))
             }
             AgentStep::RecordPostgresMajorUpgrade {
@@ -1813,7 +1816,7 @@ enum HttpScheme {
 }
 
 impl HttpScheme {
-    fn default_port(self) -> u16 {
+    const fn default_port(self) -> u16 {
         match self {
             Self::Http => 80,
             Self::Https => 443,
@@ -2333,6 +2336,7 @@ fn hex_lower(bytes: &[u8]) -> String {
     output
 }
 
+#[must_use]
 pub fn result_from_execution_report(
     host_id: &str,
     report: &ExecutionReport,
@@ -2357,6 +2361,7 @@ pub fn result_from_execution_report(
     }
 }
 
+#[must_use]
 pub fn result_from_command_plan(host_id: &str, plan: &CommandPlan) -> NodeAgentCommandResult {
     NodeAgentCommandResult {
         command_id: plan.command_id.clone(),
@@ -2368,6 +2373,7 @@ pub fn result_from_command_plan(host_id: &str, plan: &CommandPlan) -> NodeAgentC
     }
 }
 
+#[must_use]
 pub fn failed_command_result(
     host_id: &str,
     command_id: &str,
@@ -3421,7 +3427,7 @@ log_disconnections = on
     )
 }
 
-fn render_pg_hba_config() -> &'static str {
+const fn render_pg_hba_config() -> &'static str {
     "\
 local all all trust
 host all all 127.0.0.1/32 trust
@@ -3488,7 +3494,7 @@ fn render_copy_on_write_database_clone_sql(
 
 /// Databases the node agent must never drop, regardless of caller input.
 ///
-/// These are PostgreSQL's built-in admin/template databases; a branch is always
+/// These are `PostgreSQL`'s built-in admin/template databases; a branch is always
 /// a distinct cloned database.
 const PROTECTED_DATABASES: [&str; 3] = ["postgres", "template0", "template1"];
 
@@ -3639,7 +3645,7 @@ fn major_upgrade_preflight_sql(
     )
 }
 
-fn major_upgrade_strategy_label(
+const fn major_upgrade_strategy_label(
     strategy: palimpsest_paas_core::ManagedPostgresMajorUpgradeStrategy,
 ) -> &'static str {
     match strategy {
@@ -3692,8 +3698,7 @@ fn detect_container_runtime() -> String {
 fn detect_disk_encryption() -> bool {
     if cfg!(target_os = "macos") {
         return command_stdout("fdesetup", &["status"])
-            .map(|output| output.to_ascii_lowercase().contains("filevault is on"))
-            .unwrap_or(false);
+            .is_some_and(|output| output.to_ascii_lowercase().contains("filevault is on"));
     }
     false
 }
@@ -3701,27 +3706,23 @@ fn detect_disk_encryption() -> bool {
 fn detect_firewall_enabled() -> bool {
     if cfg!(target_os = "linux") {
         return command_stdout("ufw", &["status"])
-            .map(|output| output.to_ascii_lowercase().contains("status: active"))
-            .unwrap_or(false);
+            .is_some_and(|output| output.to_ascii_lowercase().contains("status: active"));
     }
     if cfg!(target_os = "macos") {
         return command_stdout(
             "/usr/libexec/ApplicationFirewall/socketfilterfw",
             &["--getglobalstate"],
         )
-        .map(|output| output.to_ascii_lowercase().contains("enabled"))
-        .unwrap_or(false);
+        .is_some_and(|output| output.to_ascii_lowercase().contains("enabled"));
     }
     false
 }
 
 fn detect_unattended_upgrades() -> bool {
-    fs::read_to_string("/etc/apt/apt.conf.d/20auto-upgrades")
-        .map(|raw| {
-            raw.contains("APT::Periodic::Update-Package-Lists \"1\"")
-                && raw.contains("APT::Periodic::Unattended-Upgrade \"1\"")
-        })
-        .unwrap_or(false)
+    fs::read_to_string("/etc/apt/apt.conf.d/20auto-upgrades").is_ok_and(|raw| {
+        raw.contains("APT::Periodic::Update-Package-Lists \"1\"")
+            && raw.contains("APT::Periodic::Unattended-Upgrade \"1\"")
+    })
 }
 
 fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
@@ -3748,7 +3749,7 @@ fn rfc3339_from_unix_seconds(seconds: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u32, u32) {
+const fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u32, u32) {
     let z = days_since_unix_epoch + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -5066,7 +5067,7 @@ mod tests {
             steps: vec![AgentStep::UploadBackupArtifact {
                 cluster_id: "cluster_123".to_owned(),
                 backup_id: "backup_123".to_owned(),
-                source_dir: backup_dir.clone(),
+                source_dir: backup_dir,
                 object_store_dir: Some(object_store_dir.clone()),
                 endpoint: None,
                 auth: None,

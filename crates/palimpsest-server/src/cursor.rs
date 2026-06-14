@@ -85,7 +85,7 @@ pub struct LsnBatch {
 /// Complete dataflow output for one upstream transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryTransactionDelta {
-    /// PostgreSQL transaction id, when known.
+    /// `PostgreSQL` transaction id, when known.
     pub transaction_id: Option<u32>,
     /// Begin marker LSN, when known.
     pub begin_lsn: Option<Lsn>,
@@ -127,7 +127,7 @@ impl QueryTransactionDelta {
 
     /// Returns true when the transaction produced no visible output.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.diffs.is_empty()
     }
 }

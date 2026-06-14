@@ -391,7 +391,7 @@ mod tests {
             None
         );
         assert_eq!(
-            scheduler_interval_from_raw("TEST_INTERVAL", Some("".to_owned())).unwrap(),
+            scheduler_interval_from_raw("TEST_INTERVAL", Some(String::new())).unwrap(),
             None
         );
         assert_eq!(

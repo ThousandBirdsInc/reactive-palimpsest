@@ -97,7 +97,7 @@ pub struct SubscribeRequest<'a> {
     /// Pre-computed `Initial` payload. When `Some`, the router uses
     /// these rows + LSN for the snapshot event and **skips** the
     /// `snapshot_seed`/`snapshot_run` pipeline entirely. Used by the
-    /// gRPC adapter when a `PersistentHost` cached_view hits: the
+    /// gRPC adapter when a `PersistentHost` `cached_view` hits: the
     /// materialized view is already current and can be shipped
     /// verbatim without re-pulling the underlying table snapshot or
     /// re-running the dataflow. `seed_updates` in the response is
@@ -247,28 +247,27 @@ impl SubscriptionRouter {
         // Cached fast-path: caller (gRPC adapter) already has the
         // materialized view from a `PersistentHost::cached_view` hit.
         // Skip the snapshot pull + dataflow snapshot_run entirely.
-        let (snapshot_lsn, initial_rows, seed_updates) = match prerun_initial {
-            Some((rows, lsn)) => (lsn, rows, Vec::new()),
-            None => {
-                let (snapshot_batch, seed_updates) = snapshot_seed(provider, &query)?;
-                let snapshot_lsn = snapshot_batch.snapshot_lsn;
-                let rows: Vec<Row> = if let Some(plan) = &compiled_plan {
-                    let inputs: std::collections::HashMap<palimpsest_wal::TableId, Vec<Row>> =
-                        snapshot_batch
-                            .rows
-                            .into_iter()
-                            .map(|table| (table.table, table.rows))
-                            .collect();
-                    palimpsest_dataflow::palimpsest::snapshot_run(plan, inputs)
-                } else {
+        let (snapshot_lsn, initial_rows, seed_updates) = if let Some((rows, lsn)) = prerun_initial {
+            (lsn, rows, Vec::new())
+        } else {
+            let (snapshot_batch, seed_updates) = snapshot_seed(provider, &query)?;
+            let snapshot_lsn = snapshot_batch.snapshot_lsn;
+            let rows: Vec<Row> = if let Some(plan) = &compiled_plan {
+                let inputs: std::collections::HashMap<palimpsest_wal::TableId, Vec<Row>> =
                     snapshot_batch
                         .rows
                         .into_iter()
-                        .flat_map(|table| table.rows)
-                        .collect()
-                };
-                (snapshot_lsn, rows, seed_updates)
-            }
+                        .map(|table| (table.table, table.rows))
+                        .collect();
+                palimpsest_dataflow::palimpsest::snapshot_run(plan, inputs)
+            } else {
+                snapshot_batch
+                    .rows
+                    .into_iter()
+                    .flat_map(|table| table.rows)
+                    .collect()
+            };
+            (snapshot_lsn, rows, seed_updates)
         };
 
         let resume = resolve_resume(
@@ -506,7 +505,7 @@ impl SubscriptionRouter {
 /// This is what the [`SharedSubgraphRegistry`] uses to dedupe across
 /// subscriptions; identical keys reuse the same dataflow. Re-exported
 /// (via `pub`) so the gRPC adapter can use the same key as the
-/// `PersistentHost` host_key — sharing a plan across subscribers only
+/// `PersistentHost` `host_key` — sharing a plan across subscribers only
 /// works if both sides agree on what "the same query" means.
 #[must_use]
 pub fn canonical_subgraph_key(query: &QueryId, user_ctx: &UserContext) -> String {

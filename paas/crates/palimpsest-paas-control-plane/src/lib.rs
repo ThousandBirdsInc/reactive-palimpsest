@@ -78,6 +78,7 @@ pub struct HostCapacity {
 }
 
 impl HostCapacity {
+    #[must_use]
     pub fn can_accept_cluster(&self, requested_storage_gib: u32) -> bool {
         self.assigned_clusters < self.max_clusters
             && self
@@ -138,6 +139,7 @@ pub struct Reconciler {
 }
 
 impl Reconciler {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -345,6 +347,7 @@ impl InMemoryControlPlaneStore {
         Ok(())
     }
 
+    #[must_use]
     pub fn organization(&self, organization_id: &str) -> Option<&Organization> {
         self.organizations.get(organization_id)
     }
@@ -360,6 +363,7 @@ impl InMemoryControlPlaneStore {
         Ok(())
     }
 
+    #[must_use]
     pub fn project(&self, project_id: &str) -> Option<&Project> {
         self.projects.get(project_id)
     }
@@ -381,6 +385,7 @@ impl InMemoryControlPlaneStore {
         Ok(())
     }
 
+    #[must_use]
     pub fn environment(&self, environment_id: &str) -> Option<&Environment> {
         self.environments.get(environment_id)
     }
@@ -401,6 +406,7 @@ impl InMemoryControlPlaneStore {
         Ok(())
     }
 
+    #[must_use]
     pub fn config_version(&self, config_version: &str) -> Option<&ConfigVersion> {
         self.config_versions.get(config_version)
     }
@@ -409,6 +415,7 @@ impl InMemoryControlPlaneStore {
         self.clusters.insert(cluster.cluster_id.clone(), cluster);
     }
 
+    #[must_use]
     pub fn cluster(&self, cluster_id: &str) -> Option<&ManagedPostgresCluster> {
         self.clusters.get(cluster_id)
     }
@@ -443,6 +450,7 @@ impl InMemoryControlPlaneStore {
         Ok(())
     }
 
+    #[must_use]
     pub fn sync_deployment(&self, deployment_id: &str) -> Option<&SyncDeployment> {
         self.sync_deployments.get(deployment_id)
     }
@@ -453,7 +461,7 @@ impl InMemoryControlPlaneStore {
     ) -> Result<(), ControlPlaneError> {
         if self.operations.contains_key(&operation.operation_id) {
             return Err(ControlPlaneError::DuplicateOperation(
-                operation.operation_id.clone(),
+                operation.operation_id,
             ));
         }
         self.operations
@@ -461,6 +469,7 @@ impl InMemoryControlPlaneStore {
         Ok(())
     }
 
+    #[must_use]
     pub fn operation(&self, operation_id: &str) -> Option<&OperationRecord> {
         self.operations.get(operation_id)
     }
@@ -469,6 +478,7 @@ impl InMemoryControlPlaneStore {
         self.audit_events.push(event);
     }
 
+    #[must_use]
     pub fn audit_events(&self) -> &[AuditEvent] {
         &self.audit_events
     }
@@ -601,7 +611,8 @@ impl ControlPlaneService {
         })
     }
 
-    pub fn store(&self) -> &InMemoryControlPlaneStore {
+    #[must_use]
+    pub const fn store(&self) -> &InMemoryControlPlaneStore {
         &self.store
     }
 
@@ -2679,8 +2690,7 @@ async fn sql_api_issue_managed_postgres_endpoint_certificate(
         endpoint
             .database_proxy_listen_addr
             .as_deref()
-            .map(host_part)
-            .unwrap_or(environment_id.as_str())
+            .map_or(environment_id.as_str(), host_part)
             .to_owned()
     });
     if payload.certificate_pem.is_some() != payload.private_key_pem.is_some() {
@@ -6505,10 +6515,7 @@ async fn sql_api_request_managed_postgres_standby(
     );
     let primary_slot_name = standby_physical_slot_name(&target_cluster_id);
     let command = NodeAgentCommand {
-        command_id: format!(
-            "{}:prepare-postgres-standby:{}",
-            target_cluster_id, standby_id
-        ),
+        command_id: format!("{target_cluster_id}:prepare-postgres-standby:{standby_id}"),
         cluster_id: target_cluster_id.clone(),
         action: NodeAgentAction::PreparePostgresStandby {
             backup_id: backup.backup_id.clone(),
@@ -6836,7 +6843,7 @@ async fn sql_api_request_managed_postgres_restore(
         error_message: None,
     };
     let command = NodeAgentCommand {
-        command_id: format!("{}:prepare-restore:{}", target_cluster_id, restore_id),
+        command_id: format!("{target_cluster_id}:prepare-restore:{restore_id}"),
         cluster_id: target_cluster_id.clone(),
         action: NodeAgentAction::PrepareRestore {
             backup_id: backup.backup_id.clone(),
@@ -7051,7 +7058,7 @@ async fn create_head_cow_branch(
                     "parent branch is not ready".to_owned(),
                 ));
             }
-            parent.branch_database.clone().ok_or_else(|| {
+            parent.branch_database.ok_or_else(|| {
                 SqlApiError::BadRequest(
                     "parent branch has no copy-on-write database to branch from".to_owned(),
                 )
@@ -7258,7 +7265,7 @@ async fn create_point_in_time_branch(
     }))
 }
 
-/// Creates and starts a SyncDeployment for a branch's dedicated cluster. Only
+/// Creates and starts a `SyncDeployment` for a branch's dedicated cluster. Only
 /// point-in-time branches (which run as their own cluster) carry a
 /// `branch_cluster_id`; for any other branch this is a no-op.
 async fn provision_branch_sync_deployment(
@@ -8308,9 +8315,10 @@ async fn queue_managed_postgres_restore_drill(
 
     let drill_id = format!("restore_drill_{}", monotonic_nanos());
     let restore_id = format!("restore_{}", monotonic_nanos());
-    let target_cluster_id = target_cluster_id
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("{}_drill_{}", source.cluster_id, monotonic_nanos()));
+    let target_cluster_id = target_cluster_id.map_or_else(
+        || format!("{}_drill_{}", source.cluster_id, monotonic_nanos()),
+        str::to_owned,
+    );
     let target_data_dir =
         sibling_cluster_data_dir(&source_assignment.data_dir, &target_cluster_id)?;
     let target_port = store
@@ -8353,7 +8361,7 @@ async fn queue_managed_postgres_restore_drill(
         error_message: None,
     };
     let command = NodeAgentCommand {
-        command_id: format!("{}:prepare-restore-drill:{}", target_cluster_id, restore_id),
+        command_id: format!("{target_cluster_id}:prepare-restore-drill:{restore_id}"),
         cluster_id: target_cluster_id.clone(),
         action: NodeAgentAction::PrepareRestore {
             backup_id: backup.backup_id.clone(),
@@ -8527,7 +8535,7 @@ fn operation_for_agent_command(
     }
 }
 
-fn operation_kind_slug(kind: OperationKind) -> &'static str {
+const fn operation_kind_slug(kind: OperationKind) -> &'static str {
     match kind {
         OperationKind::CreateCluster => "create_cluster",
         OperationKind::StartCluster => "start_cluster",
@@ -8552,7 +8560,7 @@ fn operation_kind_slug(kind: OperationKind) -> &'static str {
     }
 }
 
-fn node_agent_action_step(action: &NodeAgentAction) -> &'static str {
+const fn node_agent_action_step(action: &NodeAgentAction) -> &'static str {
     match action {
         NodeAgentAction::PreparePostgres { .. } => "prepare_postgres",
         NodeAgentAction::StartPostgres => "start_postgres",
@@ -8671,9 +8679,7 @@ fn usage_event_signature_canonical(event: &UsageEvent) -> String {
 }
 
 fn host_part(addr: &str) -> &str {
-    addr.rsplit_once(':')
-        .map(|(host, _port)| host)
-        .unwrap_or(addr)
+    addr.rsplit_once(':').map_or(addr, |(host, _port)| host)
 }
 
 fn monotonic_nanos() -> u128 {
@@ -8744,7 +8750,7 @@ impl SqlAuthContext {
         Ok(())
     }
 
-    fn require_can_manage_role(&self, target_role: TeamRole) -> Result<(), SqlApiError> {
+    const fn require_can_manage_role(&self, target_role: TeamRole) -> Result<(), SqlApiError> {
         let Some(api_key) = self.api_key.as_ref() else {
             return Ok(());
         };
@@ -8786,15 +8792,19 @@ impl<'a> ResourceScope<'a> {
         }
     }
 
-    fn organization(organization_id: &'a str) -> Self {
+    const fn organization(organization_id: &'a str) -> Self {
         Self::new(Some(organization_id), None, None)
     }
 
-    fn project(organization_id: &'a str, project_id: &'a str) -> Self {
+    const fn project(organization_id: &'a str, project_id: &'a str) -> Self {
         Self::new(Some(organization_id), Some(project_id), None)
     }
 
-    fn environment(organization_id: &'a str, project_id: &'a str, environment_id: &'a str) -> Self {
+    const fn environment(
+        organization_id: &'a str,
+        project_id: &'a str,
+        environment_id: &'a str,
+    ) -> Self {
         Self::new(
             Some(organization_id),
             Some(project_id),
@@ -9130,7 +9140,7 @@ fn optional_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn timestamp_within_skew(timestamp: u64, now: u64, allowed_skew_seconds: u64) -> bool {
+const fn timestamp_within_skew(timestamp: u64, now: u64, allowed_skew_seconds: u64) -> bool {
     now.abs_diff(timestamp) <= allowed_skew_seconds
 }
 
@@ -10173,7 +10183,7 @@ pub struct DatabaseCloneApiResponse {
     operation: OperationRecord,
 }
 
-fn default_branch_mode() -> BranchMode {
+const fn default_branch_mode() -> BranchMode {
     BranchMode::HeadCow
 }
 
@@ -10194,7 +10204,7 @@ struct CreateBranchRequest {
     redaction_policy_id: Option<String>,
     #[serde(default)]
     terminate_source_connections: bool,
-    /// When set, also provision and start a SyncDeployment for the branch.
+    /// When set, also provision and start a `SyncDeployment` for the branch.
     /// Supported for point-in-time branches (which run as a dedicated cluster).
     #[serde(default)]
     provision_sync_deployment: bool,
@@ -10393,8 +10403,7 @@ async fn run_managed_postgres_read_only_query(
 
     let wrapped_sql = format!(
         "SELECT COALESCE(jsonb_agg(to_jsonb(palimpsest_console_rows)), '[]'::jsonb) AS rows \
-         FROM (SELECT * FROM ({}) AS palimpsest_console_query LIMIT $1) palimpsest_console_rows",
-        statement_sql
+         FROM (SELECT * FROM ({statement_sql}) AS palimpsest_console_query LIMIT $1) palimpsest_console_rows"
     );
     let SqlJson(mut rows): SqlJson<Vec<JsonValue>> = sqlx::query_scalar(&wrapped_sql)
         .bind(i64::from(limit) + 1)
@@ -10602,7 +10611,7 @@ async fn inspect_managed_postgres_query(
         .execute(&mut *tx)
         .await
         .map_err(managed_postgres_sql_error)?;
-    let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", statement_sql);
+    let explain_sql = format!("EXPLAIN (FORMAT JSON) {statement_sql}");
     let SqlJson(explain_plan): SqlJson<JsonValue> = sqlx::query_scalar(&explain_sql)
         .fetch_one(&mut *tx)
         .await
@@ -10746,7 +10755,7 @@ async fn collect_managed_postgres_runtime_metrics(
     })
 }
 
-fn runtime_check_status(metrics: &ManagedPostgresRuntimeMetrics) -> RuntimeCheckStatus {
+const fn runtime_check_status(metrics: &ManagedPostgresRuntimeMetrics) -> RuntimeCheckStatus {
     let saturated = metrics.max_connections > 0
         && metrics.connection_count.saturating_mul(100) >= metrics.max_connections * 90;
     if saturated || metrics.long_running_query_count > 0 || metrics.blocked_lock_count > 0 {
@@ -10938,10 +10947,7 @@ fn validate_managed_postgres_read_only_sql(sql: &str) -> Result<(), SqlApiError>
 
 fn managed_postgres_console_statement(sql: &str) -> &str {
     let trimmed = sql.trim();
-    trimmed
-        .strip_suffix(';')
-        .map(str::trim_end)
-        .unwrap_or(trimmed)
+    trimmed.strip_suffix(';').map_or(trimmed, str::trim_end)
 }
 
 fn validate_query_permission_policy(policy: &QueryPermissionPolicy) -> Result<(), SqlApiError> {
@@ -11260,7 +11266,7 @@ fn validate_node_host_hardening_check(
         && check
             .error_message
             .as_ref()
-            .map_or(true, |message| message.trim().is_empty())
+            .is_none_or(|message| message.trim().is_empty())
     {
         return Err(SqlApiError::BadRequest(
             "failing hardening checks require error_message".to_owned(),
@@ -11321,7 +11327,7 @@ fn validate_managed_postgres_backup_artifact(
         && artifact
             .error_message
             .as_ref()
-            .map_or(true, |message| message.trim().is_empty())
+            .is_none_or(|message| message.trim().is_empty())
     {
         return Err(SqlApiError::BadRequest(
             "failed backup artifacts require error_message".to_owned(),
@@ -11666,7 +11672,7 @@ fn verify_permissions_dsl(request: &PermissionVerifyRequest) -> PermissionVerify
     }
 }
 
-/// Maps a column-type string (our coarse names or raw PostgreSQL `data_type`
+/// Maps a column-type string (our coarse names or raw `PostgreSQL` `data_type`
 /// labels forwarded by the UI) onto the verifier's [`ColumnType`]. Unknown
 /// types are treated as compatible with everything.
 fn parse_verify_column_type(ty: &str) -> palimpsest_sql::ColumnType {
@@ -11691,7 +11697,7 @@ fn parse_verify_column_type(ty: &str) -> palimpsest_sql::ColumnType {
 fn sql_tokens(sql: &str) -> Vec<String> {
     sql.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
         .filter(|token| !token.is_empty())
-        .map(|token| token.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .collect()
 }
 
@@ -11725,8 +11731,10 @@ impl From<ControlPlaneError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::ControlPlane(ControlPlaneError::DuplicateResource(resource))
-            | Self::ControlPlane(ControlPlaneError::DuplicateOperation(resource)) => (
+            Self::ControlPlane(
+                ControlPlaneError::DuplicateResource(resource)
+                | ControlPlaneError::DuplicateOperation(resource),
+            ) => (
                 StatusCode::CONFLICT,
                 format!("resource already exists: {resource}"),
             ),
@@ -12051,7 +12059,7 @@ predicate = \"owner_id = $user.id\"
 
         let saturated = ManagedPostgresRuntimeMetrics {
             connection_count: 90,
-            ..healthy.clone()
+            ..healthy
         };
         assert_eq!(
             runtime_check_status(&saturated),

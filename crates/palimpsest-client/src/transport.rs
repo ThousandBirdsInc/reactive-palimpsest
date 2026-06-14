@@ -183,6 +183,10 @@ mod wasm {
     /// Mirrors RFC 6455 §7.4 "Policy Violation".
     const CLOSE_POLICY_VIOLATION: u16 = 1008;
 
+    // `async` is kept for parity with the native `open_subscribe` (which does
+    // await); both are selected by `#[cfg]` and awaited at the same call site.
+    // The browser path delegates its awaits to `spawn_local` tasks.
+    #[allow(clippy::unused_async)]
     pub(super) async fn open_subscribe(
         endpoint: &Endpoint,
         auth: &Auth,
@@ -273,7 +277,7 @@ mod wasm {
     ///   `&token=…` if the URL already carries a query). Browsers
     ///   cannot set `Authorization` headers on a WS handshake, so the
     ///   server-side bridge reads the token off the URL and re-presents
-    ///   it as gRPC metadata to the inner SyncEngine.
+    ///   it as gRPC metadata to the inner `SyncEngine`.
     /// * Anything already `ws(s)://` passes through unchanged.
     fn normalize_ws_url(url: &str, auth: &Auth) -> String {
         let mut out = if let Some(rest) = url.strip_prefix("http://") {
@@ -327,7 +331,7 @@ mod wasm {
         for byte in input.bytes() {
             match byte {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(byte as char)
+                    out.push(byte as char);
                 }
                 _ => out.push_str(&format!("%{byte:02X}")),
             }

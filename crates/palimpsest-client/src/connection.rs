@@ -45,9 +45,10 @@ const COMMAND_CAPACITY: usize = 256;
 /// active connection attempt).
 const OUTBOUND_CAPACITY: usize = 256;
 
-/// Live status of the underlying gRPC/WS transport. Surfaced through
-/// [`Client::watch_connection_state`] so UIs can render a "disconnected,
-/// retrying in 800 ms" badge even while the manager is silently
+/// Live status of the underlying gRPC/WS transport.
+///
+/// Surfaced through [`Client::watch_connection_state`] so UIs can render a
+/// "disconnected, retrying in 800 ms" badge even while the manager is silently
 /// reconnecting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionState {

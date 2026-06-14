@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     Err(err) => {
-                        tracing::warn!(error = %err, "database proxy TLS material fetch failed")
+                        tracing::warn!(error = %err, "database proxy TLS material fetch failed");
                     }
                 }
             }

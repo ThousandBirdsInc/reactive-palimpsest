@@ -25,6 +25,11 @@ const BACKEND_PID: u32 = 4242;
 const BACKEND_SECRET: u32 = 0x5041_4c49;
 const COPY_BOTH_FORMAT: i16 = 0;
 const COPY_BOTH_COLUMN_COUNT: i16 = 0;
+// Generous window for the *first* client standby-status message: the client
+// must read the streamed WAL before replying, and a tight timeout here races
+// that round-trip (especially on loaded CI runners). Once one message has
+// arrived, `STATUS_READ_TIMEOUT` drains any remaining ones quickly.
+const STATUS_INITIAL_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_READ_TIMEOUT: Duration = Duration::from_millis(25);
 
 pub mod catalog {
@@ -164,11 +169,7 @@ impl MockPostgres {
         let startup = read_startup(&mut stream)?;
         write_startup_response(&mut stream)?;
 
-        loop {
-            let Some(message) = read_client_message(&mut stream)? else {
-                break;
-            };
-
+        while let Some(message) = read_client_message(&mut stream)? {
             match message {
                 ClientMessage::Query(query) => {
                     let outcome = self.handle_query(&mut stream, &query)?;
@@ -541,13 +542,16 @@ fn stream_copy_both(
     }
     write_primary_keepalive(stream, lsn)?;
 
-    stream.set_read_timeout(Some(STATUS_READ_TIMEOUT))?;
+    // Wait generously for the first client reply, then drain the rest quickly.
+    stream.set_read_timeout(Some(STATUS_INITIAL_READ_TIMEOUT))?;
     while let Some(message) = read_client_message(stream)? {
         match message {
-            ClientMessage::StandbyStatus(status) => acks
-                .lock()
-                .expect("standby status mutex should not be poisoned")
-                .push(status),
+            ClientMessage::StandbyStatus(status) => {
+                acks.lock()
+                    .expect("standby status mutex should not be poisoned")
+                    .push(status);
+                stream.set_read_timeout(Some(STATUS_READ_TIMEOUT))?;
+            }
             ClientMessage::Terminate => break,
             ClientMessage::Query(_) => return Err(invalid_data("query during CopyBoth mode")),
         }

@@ -1,11 +1,11 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Shared models for the Palimpsest managed PaaS.
+//! Shared models for the Palimpsest managed `PaaS`.
 //!
 //! This crate intentionally has no runtime dependencies on the existing
 //! Palimpsest server. It captures platform intent and agent command contracts
-//! so the PaaS can be built additively under `paas/`.
+//! so the `PaaS` can be built additively under `paas/`.
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
@@ -34,10 +34,12 @@ impl PostgresVersion {
         Ok(Self { major, original })
     }
 
+    #[must_use]
     pub const fn major(&self) -> u16 {
         self.major
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.original
     }
@@ -1535,7 +1537,7 @@ pub struct QuotaAlert {
     pub resolved_at: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryPermissionPolicy {
     pub policy_id: String,
     pub organization_id: String,
@@ -1551,7 +1553,7 @@ pub struct QueryPermissionPolicy {
     pub status: QueryPermissionPolicyStatus,
 }
 
-/// Per-environment permission-rule DSL document authored in the PaaS UI.
+/// Per-environment permission-rule DSL document authored in the `PaaS` UI.
 ///
 /// The `dsl` field holds the raw `palimpsest-permissions` TOML config; it is
 /// stored verbatim so operators can keep drafts, and is compiled by the

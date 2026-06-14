@@ -15,7 +15,7 @@ categories.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-palimpsest-client = { path = "../palimpsest-client" }
+palimpsest-client = { path = "../palimpsest-client", version = "0.1.1" }
 
 # Only built when targeting wasm32 — keeps `cargo build -p
 # palimpsest-client-js` on native a no-op (the cdylib has nothing to

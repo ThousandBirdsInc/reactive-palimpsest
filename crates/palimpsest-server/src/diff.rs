@@ -53,7 +53,7 @@ pub enum DiffEvent {
     },
     /// Complete live update for one upstream transaction.
     TransactionUpdate {
-        /// PostgreSQL transaction id, when known.
+        /// `PostgreSQL` transaction id, when known.
         transaction_id: Option<u32>,
         /// Begin marker LSN, when known.
         begin_lsn: Option<Lsn>,

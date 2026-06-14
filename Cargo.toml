@@ -80,6 +80,31 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 multiple_crate_versions = "allow"
+# Stylistic pedantic/nursery lints that flag large, pre-existing surfaces
+# (handler signatures, long request handlers, lock scopes, boxed futures) where
+# mechanical rewrites would add churn and risk without improving correctness.
+# Kept curated and explicit, like the allows above.
+needless_pass_by_value = "allow"
+too_many_lines = "allow"
+significant_drop_tightening = "allow"
+large_futures = "allow"
+format_push_string = "allow"
+option_if_let_else = "allow"
+struct_field_names = "allow"
+match_same_arms = "allow"
+type_complexity = "allow"
+unused_self = "allow"
+unnecessary_wraps = "allow"
+similar_names = "allow"
+return_self_not_must_use = "allow"
+assigning_clones = "allow"
+# Numeric casts in cursor/LSN/offset arithmetic are intentional and bounded.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+# Misfires on shell/template strings containing `${var}` (e.g. node-agent's
+# container bootstrap command), which are not Rust format strings.
+literal_string_with_formatting_args = "allow"
 
 # Used by `xtask check-wasm-size` and the React example's build:
 # squeeze the wasm bundle hard. `panic = "abort"` drops the panic

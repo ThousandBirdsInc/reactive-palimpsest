@@ -1,7 +1,7 @@
 // Copyright 2026 Thousand Birds Inc.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Managed SyncDeployment wrapper primitives.
+//! Managed `SyncDeployment` wrapper primitives.
 //!
 //! The wrapper renders ordinary `palimpsest serve` configuration from
 //! platform deployment intent. It does not change the standalone server
@@ -81,7 +81,9 @@ pub struct SyncRuntime {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SyncAuth {
+    #[default]
     Anonymous,
     Jwt {
         secret: String,
@@ -90,12 +92,6 @@ pub enum SyncAuth {
         #[serde(default)]
         claim_to_field: BTreeMap<String, String>,
     },
-}
-
-impl Default for SyncAuth {
-    fn default() -> Self {
-        Self::Anonymous
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +140,7 @@ pub struct InMemorySecretResolver {
 }
 
 impl InMemorySecretResolver {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -338,6 +335,7 @@ pub struct SyncDeploymentHealth {
 }
 
 impl SyncDeploymentHealth {
+    #[must_use]
     pub fn overall(&self) -> ComponentHealth {
         let components = [
             self.postgres,
@@ -357,6 +355,7 @@ impl SyncDeploymentHealth {
         }
     }
 
+    #[must_use]
     pub fn actionable_status(&self) -> &'static str {
         match self.overall() {
             ComponentHealth::Healthy => "ready",
@@ -384,6 +383,7 @@ pub enum ReloadClassification {
     Blocked,
 }
 
+#[must_use]
 pub fn classify_reload(old: &DeploymentSpec, new: &DeploymentSpec) -> ReloadClassification {
     if old.deployment_id != new.deployment_id
         || old.environment_id != new.environment_id
@@ -431,6 +431,7 @@ impl Default for DrainPolicy {
     }
 }
 
+#[must_use]
 pub fn plan_initial_start(new: &DeploymentSpec, config_path: &str) -> SupervisorPlan {
     SupervisorPlan {
         deployment_id: new.deployment_id.clone(),
@@ -445,6 +446,7 @@ pub fn plan_initial_start(new: &DeploymentSpec, config_path: &str) -> Supervisor
     }
 }
 
+#[must_use]
 pub fn plan_supervisor_transition(
     old: &DeploymentSpec,
     new: &DeploymentSpec,

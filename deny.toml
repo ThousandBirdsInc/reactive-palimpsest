@@ -3,26 +3,42 @@ version = 2
 allow = [
     "Apache-2.0",
     "BSD-3-Clause",
+    "ISC",
     "MIT",
     "Unicode-3.0",
+    "Zlib",
 ]
 confidence-threshold = 0.8
 
 [advisories]
 version = 2
-# Vulnerabilities and unmaintained crates are hard failures; the CI
-# job (`.github/workflows/ci.yml::deny`) blocks merges on either.
+# Vulnerabilities and yanked crates are hard failures; the CI job
+# (`.github/workflows/ci.yml::deny`) blocks merges on either.
 yanked = "deny"
-# `ignore` is intentionally empty: every advisory we know about must be
-# fixed (or the dependency replaced), not silenced. If you genuinely
-# need to grant a temporary exception, list the RUSTSEC id here with a
-# short justification *and* an expiry comment, and open a tracking
-# issue.
-ignore = []
+# Documented, justified exceptions only. Each entry below is an
+# *unmaintained* advisory (informational; not a vulnerability) for which no
+# safe upgrade exists, and each crate is a transitive/indirect dependency we
+# do not select directly. Revisit when an upstream replacement lands.
+ignore = [
+    # `paste` (proc-macro) archived by its author. Transitive via
+    # columnation -> timely (dataflow). No drop-in replacement adopted upstream.
+    "RUSTSEC-2024-0436",
+    # `rustls-pemfile` archived; upstream points to rustls-pki-types. Pulled in
+    # transitively through the TLS stack used by the PaaS crates.
+    "RUSTSEC-2025-0134",
+    # `bincode` 1.x unmaintained advisory. Transitive only.
+    "RUSTSEC-2025-0141",
+    # `memmap` unmaintained. Transitive via the dataflow/timely stack.
+    "RUSTSEC-2020-0077",
+]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal workspace crates are referenced by path without a version req;
+# cargo-deny treats those as wildcards. They are first-party path deps, not
+# registry wildcards, so allow them while still denying registry `*` deps.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

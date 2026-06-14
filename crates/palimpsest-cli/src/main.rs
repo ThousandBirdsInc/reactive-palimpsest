@@ -21,7 +21,7 @@
 //! - `slot-info <config>` — connect to the configured upstream Postgres
 //!   and print one line per replication slot. Requires the optional
 //!   `slot-info` Cargo feature.
-//! - `dev ...` and `db ...` — additive PaaS helpers for local PostgreSQL 18+
+//! - `dev ...` and `db ...` — additive `PaaS` helpers for local `PostgreSQL` 18+
 //!   development, managed cluster intent creation, and database branch
 //!   operations (`db branch create|list|get|delete`) against the control plane.
 
@@ -820,7 +820,7 @@ enum SkillTarget {
 }
 
 impl SkillTarget {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
@@ -839,7 +839,7 @@ enum SkillInstallStatus {
 }
 
 impl SkillInstallStatus {
-    fn label(&self) -> &'static str {
+    const fn label(&self) -> &'static str {
         match self {
             Self::Created => "created",
             Self::Updated => "updated",
@@ -860,7 +860,7 @@ struct SkillInstallReport {
 
 const PALIMPSEST_CLI_SKILL_NAME: &str = "palimpsest-cli";
 
-const PALIMPSEST_CLI_SKILL: &str = r#"---
+const PALIMPSEST_CLI_SKILL: &str = r"---
 name: palimpsest-cli
 description: Use when operating the Palimpsest CLI, including config validation, permission query evaluation, local PaaS stack management, managed Postgres helper commands, and CLI installation checks.
 ---
@@ -898,7 +898,7 @@ Use the `palimpsest` binary for local operation and diagnostics. Start with `pal
 3. Check `palimpsest dev status` before starting or stopping the local stack.
 4. Prefer `palimpsest dev env` and `palimpsest db psql --local` over manually reconstructing local database URLs.
 5. Use `cargo install palimpsest-cli` for the published CLI, or `cargo install --path crates/palimpsest-cli` from a checkout.
-"#;
+";
 
 fn cmd_skills_install(rest: &[String]) -> Result<(), CliError> {
     let options = parse_skills_install_options(rest)?;
@@ -985,23 +985,20 @@ fn parse_skills_install_options(rest: &[String]) -> Result<SkillsInstallOptions,
 
 fn default_codex_skills_dir() -> PathBuf {
     std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_relative(".codex"))
+        .map_or_else(|| home_relative(".codex"), PathBuf::from)
         .join("skills")
 }
 
 fn default_claude_skills_dir() -> PathBuf {
     std::env::var_os("CLAUDE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_relative(".claude"))
+        .map_or_else(|| home_relative(".claude"), PathBuf::from)
         .join("skills")
 }
 
 fn home_relative(path: &str) -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
         .join(path)
 }
 

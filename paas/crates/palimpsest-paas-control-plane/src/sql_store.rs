@@ -69,8 +69,9 @@ pub async fn connect(database_url: &str) -> Result<PgPool, SqlStoreError> {
         .map_err(SqlStoreError::from)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SecretMaterialBackend {
+    #[default]
     LocalDev,
     EnvEnvelope(EnvEnvelopeSecretBackend),
     FileEnvelope(EnvEnvelopeSecretBackend),
@@ -121,7 +122,7 @@ impl SecretMaterialBackend {
         }
     }
 
-    fn provider(&self) -> &'static str {
+    const fn provider(&self) -> &'static str {
         match self {
             Self::LocalDev => "local-dev",
             Self::EnvEnvelope(_) => "env-envelope",
@@ -206,12 +207,6 @@ impl SecretMaterialBackend {
                 backend.open_for_key(external_ref, &encrypted_material, &key_ref)
             }
         }
-    }
-}
-
-impl Default for SecretMaterialBackend {
-    fn default() -> Self {
-        Self::LocalDev
     }
 }
 
@@ -695,7 +690,7 @@ fn strongest_health_state(
         .unwrap_or(CustomerEnvironmentHealthState::Unavailable)
 }
 
-fn health_score(state: CustomerEnvironmentHealthState) -> u8 {
+const fn health_score(state: CustomerEnvironmentHealthState) -> u8 {
     match state {
         CustomerEnvironmentHealthState::Healthy => 0,
         CustomerEnvironmentHealthState::Degraded => 1,
@@ -773,9 +768,10 @@ fn deliver_billing_export(
 fn local_jsonl_export_dir(destination: &str) -> Option<PathBuf> {
     if destination == "local-jsonl" {
         return Some(
-            std::env::var("PALIMPSEST_PAAS_BILLING_EXPORT_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/tmp/palimpsest-paas-billing-exports")),
+            std::env::var("PALIMPSEST_PAAS_BILLING_EXPORT_DIR").map_or_else(
+                |_| PathBuf::from("/tmp/palimpsest-paas-billing-exports"),
+                PathBuf::from,
+            ),
         );
     }
     destination
@@ -791,11 +787,13 @@ pub struct SqlControlPlaneStore {
 }
 
 impl SqlControlPlaneStore {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self::with_secret_backend(pool, SecretMaterialBackend::default())
     }
 
-    pub fn with_secret_backend(pool: PgPool, secret_backend: SecretMaterialBackend) -> Self {
+    #[must_use]
+    pub const fn with_secret_backend(pool: PgPool, secret_backend: SecretMaterialBackend) -> Self {
         Self {
             pool,
             secret_backend,
@@ -3898,6 +3896,7 @@ impl SqlControlPlaneStore {
     /// Per-cluster Postgres role name for one of the standard suffixes
     /// (`app`, `migration`, `support`, `replication`). Matches the names
     /// the node agent provisions in [`render_role_sql`].
+    #[must_use]
     pub fn managed_postgres_role_name(cluster_id: &str, role_suffix: &str) -> String {
         format!(
             "{}_{}",
@@ -7174,17 +7173,17 @@ impl SqlControlPlaneStore {
 
         self.enforce_usage_quota(event).await?;
         let quantity = checked_i64(event.quantity, "quantity")?;
-        let (signature_key_id, signature_algorithm, signature) = event
-            .signature
-            .as_ref()
-            .map(|signature| {
-                (
-                    Some(signature.key_id.as_str()),
-                    Some(signature.algorithm.as_str()),
-                    Some(signature.signature.as_str()),
-                )
-            })
-            .unwrap_or((None, None, None));
+        let (signature_key_id, signature_algorithm, signature) =
+            event
+                .signature
+                .as_ref()
+                .map_or((None, None, None), |signature| {
+                    (
+                        Some(signature.key_id.as_str()),
+                        Some(signature.algorithm.as_str()),
+                        Some(signature.signature.as_str()),
+                    )
+                });
         let result = sqlx::query(
             "INSERT INTO usage_events \
                 (id, idempotency_key, organization_id, project_id, environment_id, metric, quantity, occurred_at, signature_key_id, signature_algorithm, signature) \
@@ -8574,14 +8573,14 @@ pub struct ControlPlaneMetricsSnapshot {
     pub storage_used_ratios: Vec<HostStorageRatioMetric>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterLifecycleMetric {
     pub cluster_id: String,
     pub environment_id: String,
     pub lifecycle_state: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterStorageMetric {
     pub cluster_id: String,
     pub environment_id: String,
@@ -9652,7 +9651,7 @@ fn billing_export_from_row(row: sqlx::postgres::PgRow) -> Result<BillingExport, 
     })
 }
 
-fn quota_enforcement_label(enforcement: QuotaEnforcement) -> &'static str {
+const fn quota_enforcement_label(enforcement: QuotaEnforcement) -> &'static str {
     match enforcement {
         QuotaEnforcement::Reject => "reject",
         QuotaEnforcement::Observe => "observe",
@@ -9669,7 +9668,7 @@ fn parse_quota_enforcement(value: &str) -> Result<QuotaEnforcement, SqlStoreErro
     }
 }
 
-fn quota_alert_state_label(state: QuotaAlertState) -> &'static str {
+const fn quota_alert_state_label(state: QuotaAlertState) -> &'static str {
     match state {
         QuotaAlertState::Ok => "ok",
         QuotaAlertState::Firing => "firing",
@@ -9700,7 +9699,7 @@ fn quota_alert_should_fire(
     current * 10_000 >= limit * threshold
 }
 
-fn query_permission_operation_label(operation: QueryPermissionOperation) -> &'static str {
+const fn query_permission_operation_label(operation: QueryPermissionOperation) -> &'static str {
     match operation {
         QueryPermissionOperation::Read => "read",
         QueryPermissionOperation::Subscribe => "subscribe",
@@ -9719,7 +9718,7 @@ fn parse_query_permission_operation(
     }
 }
 
-fn query_permission_policy_status_label(status: QueryPermissionPolicyStatus) -> &'static str {
+const fn query_permission_policy_status_label(status: QueryPermissionPolicyStatus) -> &'static str {
     match status {
         QueryPermissionPolicyStatus::Draft => "draft",
         QueryPermissionPolicyStatus::Active => "active",
@@ -9738,7 +9737,7 @@ fn parse_query_permission_policy_status(
     }
 }
 
-fn billing_export_status_label(status: BillingExportStatus) -> &'static str {
+const fn billing_export_status_label(status: BillingExportStatus) -> &'static str {
     match status {
         BillingExportStatus::Succeeded => "succeeded",
         BillingExportStatus::Failed => "failed",
@@ -9755,6 +9754,7 @@ fn parse_billing_export_status(value: &str) -> Result<BillingExportStatus, SqlSt
     }
 }
 
+#[must_use]
 pub fn is_unique_violation(err: &SqlStoreError) -> bool {
     matches!(
         err,
@@ -9763,6 +9763,7 @@ pub fn is_unique_violation(err: &SqlStoreError) -> bool {
     )
 }
 
+#[must_use]
 pub fn is_foreign_key_violation(err: &SqlStoreError) -> bool {
     matches!(
         err,
@@ -10039,7 +10040,7 @@ fn sanitize_identifier_component(value: &str) -> String {
     }
 }
 
-fn operation_kind_label(kind: OperationKind) -> &'static str {
+const fn operation_kind_label(kind: OperationKind) -> &'static str {
     match kind {
         OperationKind::CreateCluster => "create_cluster",
         OperationKind::StartCluster => "start_cluster",
@@ -10064,7 +10065,7 @@ fn operation_kind_label(kind: OperationKind) -> &'static str {
     }
 }
 
-fn operation_status_label(status: OperationStatus) -> &'static str {
+const fn operation_status_label(status: OperationStatus) -> &'static str {
     match status {
         OperationStatus::Pending => "pending",
         OperationStatus::Running => "running",
@@ -10113,7 +10114,7 @@ fn parse_operation_status(value: &str) -> Result<OperationStatus, SqlStoreError>
     }
 }
 
-fn team_role_label(role: TeamRole) -> &'static str {
+const fn team_role_label(role: TeamRole) -> &'static str {
     match role {
         TeamRole::Owner => "owner",
         TeamRole::Admin => "admin",
@@ -10136,7 +10137,7 @@ fn parse_team_role(value: &str) -> Result<TeamRole, SqlStoreError> {
     }
 }
 
-fn jwt_issuer_status_label(status: JwtIssuerStatus) -> &'static str {
+const fn jwt_issuer_status_label(status: JwtIssuerStatus) -> &'static str {
     match status {
         JwtIssuerStatus::Active => "active",
         JwtIssuerStatus::Disabled => "disabled",
@@ -10153,7 +10154,7 @@ fn parse_jwt_issuer_status(value: &str) -> Result<JwtIssuerStatus, SqlStoreError
     }
 }
 
-fn webhook_endpoint_status_label(status: WebhookEndpointStatus) -> &'static str {
+const fn webhook_endpoint_status_label(status: WebhookEndpointStatus) -> &'static str {
     match status {
         WebhookEndpointStatus::Active => "active",
         WebhookEndpointStatus::Disabled => "disabled",
@@ -10170,7 +10171,7 @@ fn parse_webhook_endpoint_status(value: &str) -> Result<WebhookEndpointStatus, S
     }
 }
 
-fn sso_provider_kind_label(kind: SsoProviderKind) -> &'static str {
+const fn sso_provider_kind_label(kind: SsoProviderKind) -> &'static str {
     match kind {
         SsoProviderKind::Saml => "saml",
         SsoProviderKind::Oidc => "oidc",
@@ -10187,7 +10188,7 @@ fn parse_sso_provider_kind(value: &str) -> Result<SsoProviderKind, SqlStoreError
     }
 }
 
-fn sso_provider_status_label(status: SsoProviderStatus) -> &'static str {
+const fn sso_provider_status_label(status: SsoProviderStatus) -> &'static str {
     match status {
         SsoProviderStatus::Active => "active",
         SsoProviderStatus::Disabled => "disabled",
@@ -10204,7 +10205,7 @@ fn parse_sso_provider_status(value: &str) -> Result<SsoProviderStatus, SqlStoreE
     }
 }
 
-fn incident_severity_label(severity: IncidentSeverity) -> &'static str {
+const fn incident_severity_label(severity: IncidentSeverity) -> &'static str {
     match severity {
         IncidentSeverity::Info => "info",
         IncidentSeverity::Warning => "warning",
@@ -10223,7 +10224,7 @@ fn parse_incident_severity(value: &str) -> Result<IncidentSeverity, SqlStoreErro
     }
 }
 
-fn incident_status_label(status: IncidentStatus) -> &'static str {
+const fn incident_status_label(status: IncidentStatus) -> &'static str {
     match status {
         IncidentStatus::Investigating => "investigating",
         IncidentStatus::Identified => "identified",
@@ -10244,7 +10245,7 @@ fn parse_incident_status(value: &str) -> Result<IncidentStatus, SqlStoreError> {
     }
 }
 
-fn config_status_label(status: ConfigVersionStatus) -> &'static str {
+const fn config_status_label(status: ConfigVersionStatus) -> &'static str {
     match status {
         ConfigVersionStatus::Uploaded => "uploaded",
         ConfigVersionStatus::Validated => "validated",
@@ -10265,7 +10266,9 @@ fn parse_config_status(value: &str) -> Result<ConfigVersionStatus, SqlStoreError
     }
 }
 
-fn sync_deployment_lifecycle_state_label(state: SyncDeploymentLifecycleState) -> &'static str {
+const fn sync_deployment_lifecycle_state_label(
+    state: SyncDeploymentLifecycleState,
+) -> &'static str {
     match state {
         SyncDeploymentLifecycleState::Requested => "requested",
         SyncDeploymentLifecycleState::Starting => "starting",
@@ -10346,7 +10349,7 @@ fn parse_gateway_tls_policy(
     }
 }
 
-fn domain_verification_status_label(status: DomainVerificationStatus) -> &'static str {
+const fn domain_verification_status_label(status: DomainVerificationStatus) -> &'static str {
     match status {
         DomainVerificationStatus::Pending => "pending",
         DomainVerificationStatus::Verified => "verified",
@@ -10367,7 +10370,7 @@ fn parse_domain_verification_status(
     }
 }
 
-fn domain_tls_status_label(status: DomainTlsStatus) -> &'static str {
+const fn domain_tls_status_label(status: DomainTlsStatus) -> &'static str {
     match status {
         DomainTlsStatus::Pending => "pending",
         DomainTlsStatus::Active => "active",
@@ -10386,7 +10389,7 @@ fn parse_domain_tls_status(value: &str) -> Result<DomainTlsStatus, SqlStoreError
     }
 }
 
-fn ip_allowlist_purpose_label(purpose: IpAllowlistPurpose) -> &'static str {
+const fn ip_allowlist_purpose_label(purpose: IpAllowlistPurpose) -> &'static str {
     match purpose {
         IpAllowlistPurpose::App => "app",
         IpAllowlistPurpose::Migration => "migration",
@@ -10405,7 +10408,7 @@ fn parse_ip_allowlist_purpose(value: &str) -> Result<IpAllowlistPurpose, SqlStor
     }
 }
 
-fn ip_allowlist_status_label(status: IpAllowlistStatus) -> &'static str {
+const fn ip_allowlist_status_label(status: IpAllowlistStatus) -> &'static str {
     match status {
         IpAllowlistStatus::Active => "active",
         IpAllowlistStatus::Disabled => "disabled",
@@ -10422,7 +10425,7 @@ fn parse_ip_allowlist_status(value: &str) -> Result<IpAllowlistStatus, SqlStoreE
     }
 }
 
-fn static_egress_ip_status_label(status: StaticEgressIpStatus) -> &'static str {
+const fn static_egress_ip_status_label(status: StaticEgressIpStatus) -> &'static str {
     match status {
         StaticEgressIpStatus::Provisioning => "provisioning",
         StaticEgressIpStatus::Active => "active",
@@ -10441,7 +10444,7 @@ fn parse_static_egress_ip_status(value: &str) -> Result<StaticEgressIpStatus, Sq
     }
 }
 
-fn maintenance_day_of_week_label(day: MaintenanceDayOfWeek) -> &'static str {
+const fn maintenance_day_of_week_label(day: MaintenanceDayOfWeek) -> &'static str {
     match day {
         MaintenanceDayOfWeek::Monday => "monday",
         MaintenanceDayOfWeek::Tuesday => "tuesday",
@@ -10468,7 +10471,7 @@ fn parse_maintenance_day_of_week(value: &str) -> Result<MaintenanceDayOfWeek, Sq
     }
 }
 
-fn maintenance_window_status_label(status: MaintenanceWindowStatus) -> &'static str {
+const fn maintenance_window_status_label(status: MaintenanceWindowStatus) -> &'static str {
     match status {
         MaintenanceWindowStatus::Active => "active",
         MaintenanceWindowStatus::Disabled => "disabled",
@@ -10485,7 +10488,7 @@ fn parse_maintenance_window_status(value: &str) -> Result<MaintenanceWindowStatu
     }
 }
 
-fn lifecycle_state_label(state: ClusterLifecycleState) -> &'static str {
+const fn lifecycle_state_label(state: ClusterLifecycleState) -> &'static str {
     match state {
         ClusterLifecycleState::Requested => "requested",
         ClusterLifecycleState::Placing => "placing",
@@ -10507,7 +10510,7 @@ fn lifecycle_state_label(state: ClusterLifecycleState) -> &'static str {
     }
 }
 
-fn backup_status_label(status: BackupLifecycleState) -> &'static str {
+const fn backup_status_label(status: BackupLifecycleState) -> &'static str {
     match status {
         BackupLifecycleState::Requested => "requested",
         BackupLifecycleState::Running => "running",
@@ -10517,7 +10520,7 @@ fn backup_status_label(status: BackupLifecycleState) -> &'static str {
     }
 }
 
-fn backup_artifact_status_label(status: BackupArtifactStatus) -> &'static str {
+const fn backup_artifact_status_label(status: BackupArtifactStatus) -> &'static str {
     match status {
         BackupArtifactStatus::Pending => "pending",
         BackupArtifactStatus::Available => "available",
@@ -10527,7 +10530,7 @@ fn backup_artifact_status_label(status: BackupArtifactStatus) -> &'static str {
     }
 }
 
-fn restore_status_label(status: RestoreLifecycleState) -> &'static str {
+const fn restore_status_label(status: RestoreLifecycleState) -> &'static str {
     match status {
         RestoreLifecycleState::Requested => "requested",
         RestoreLifecycleState::Running => "running",
@@ -10536,7 +10539,7 @@ fn restore_status_label(status: RestoreLifecycleState) -> &'static str {
     }
 }
 
-fn branch_mode_label(mode: BranchMode) -> &'static str {
+const fn branch_mode_label(mode: BranchMode) -> &'static str {
     match mode {
         BranchMode::HeadCow => "head_cow",
         BranchMode::PointInTime => "point_in_time",
@@ -10553,7 +10556,7 @@ fn parse_branch_mode(value: &str) -> Result<BranchMode, SqlStoreError> {
     }
 }
 
-fn branch_lifecycle_state_label(state: BranchLifecycleState) -> &'static str {
+const fn branch_lifecycle_state_label(state: BranchLifecycleState) -> &'static str {
     match state {
         BranchLifecycleState::Creating => "creating",
         BranchLifecycleState::Ready => "ready",
@@ -10576,7 +10579,7 @@ fn parse_branch_lifecycle_state(value: &str) -> Result<BranchLifecycleState, Sql
     }
 }
 
-fn wal_archive_segment_status_label(status: WalArchiveSegmentStatus) -> &'static str {
+const fn wal_archive_segment_status_label(status: WalArchiveSegmentStatus) -> &'static str {
     match status {
         WalArchiveSegmentStatus::Running => "running",
         WalArchiveSegmentStatus::Succeeded => "succeeded",
@@ -10584,14 +10587,14 @@ fn wal_archive_segment_status_label(status: WalArchiveSegmentStatus) -> &'static
     }
 }
 
-fn pitr_check_status_label(status: PitrCheckStatus) -> &'static str {
+const fn pitr_check_status_label(status: PitrCheckStatus) -> &'static str {
     match status {
         PitrCheckStatus::Succeeded => "succeeded",
         PitrCheckStatus::Failed => "failed",
     }
 }
 
-fn failover_status_label(status: FailoverLifecycleState) -> &'static str {
+const fn failover_status_label(status: FailoverLifecycleState) -> &'static str {
     match status {
         FailoverLifecycleState::Running => "running",
         FailoverLifecycleState::Succeeded => "succeeded",
@@ -10599,7 +10602,7 @@ fn failover_status_label(status: FailoverLifecycleState) -> &'static str {
     }
 }
 
-fn standby_status_label(status: StandbyLifecycleState) -> &'static str {
+const fn standby_status_label(status: StandbyLifecycleState) -> &'static str {
     match status {
         StandbyLifecycleState::Running => "running",
         StandbyLifecycleState::Succeeded => "succeeded",
@@ -10607,7 +10610,7 @@ fn standby_status_label(status: StandbyLifecycleState) -> &'static str {
     }
 }
 
-fn standby_check_status_label(status: StandbyCheckStatus) -> &'static str {
+const fn standby_check_status_label(status: StandbyCheckStatus) -> &'static str {
     match status {
         StandbyCheckStatus::Running => "running",
         StandbyCheckStatus::Succeeded => "succeeded",
@@ -10615,7 +10618,7 @@ fn standby_check_status_label(status: StandbyCheckStatus) -> &'static str {
     }
 }
 
-fn runtime_check_status_label(status: RuntimeCheckStatus) -> &'static str {
+const fn runtime_check_status_label(status: RuntimeCheckStatus) -> &'static str {
     match status {
         RuntimeCheckStatus::Healthy => "healthy",
         RuntimeCheckStatus::Degraded => "degraded",
@@ -10623,14 +10626,16 @@ fn runtime_check_status_label(status: RuntimeCheckStatus) -> &'static str {
     }
 }
 
-fn major_upgrade_strategy_label(strategy: ManagedPostgresMajorUpgradeStrategy) -> &'static str {
+const fn major_upgrade_strategy_label(
+    strategy: ManagedPostgresMajorUpgradeStrategy,
+) -> &'static str {
     match strategy {
         ManagedPostgresMajorUpgradeStrategy::LogicalReplicationCopy => "logical_replication_copy",
         ManagedPostgresMajorUpgradeStrategy::PgUpgradeCopy => "pg_upgrade_copy",
     }
 }
 
-fn major_upgrade_status_label(status: ManagedPostgresMajorUpgradeStatus) -> &'static str {
+const fn major_upgrade_status_label(status: ManagedPostgresMajorUpgradeStatus) -> &'static str {
     match status {
         ManagedPostgresMajorUpgradeStatus::Running => "running",
         ManagedPostgresMajorUpgradeStatus::Succeeded => "succeeded",
@@ -10639,14 +10644,14 @@ fn major_upgrade_status_label(status: ManagedPostgresMajorUpgradeStatus) -> &'st
     }
 }
 
-fn clone_redaction_policy_status_label(status: CloneRedactionPolicyStatus) -> &'static str {
+const fn clone_redaction_policy_status_label(status: CloneRedactionPolicyStatus) -> &'static str {
     match status {
         CloneRedactionPolicyStatus::Active => "active",
         CloneRedactionPolicyStatus::Disabled => "disabled",
     }
 }
 
-fn support_access_status_label(status: SupportAccessStatus) -> &'static str {
+const fn support_access_status_label(status: SupportAccessStatus) -> &'static str {
     match status {
         SupportAccessStatus::Requested => "requested",
         SupportAccessStatus::Active => "active",
@@ -10655,7 +10660,7 @@ fn support_access_status_label(status: SupportAccessStatus) -> &'static str {
     }
 }
 
-fn secret_encryption_key_status_label(status: SecretEncryptionKeyStatus) -> &'static str {
+const fn secret_encryption_key_status_label(status: SecretEncryptionKeyStatus) -> &'static str {
     match status {
         SecretEncryptionKeyStatus::Active => "active",
         SecretEncryptionKeyStatus::Retiring => "retiring",
@@ -10663,7 +10668,7 @@ fn secret_encryption_key_status_label(status: SecretEncryptionKeyStatus) -> &'st
     }
 }
 
-fn secret_rewrap_plan_status_label(status: SecretRewrapPlanStatus) -> &'static str {
+const fn secret_rewrap_plan_status_label(status: SecretRewrapPlanStatus) -> &'static str {
     match status {
         SecretRewrapPlanStatus::Planned => "planned",
         SecretRewrapPlanStatus::Running => "running",
@@ -10672,7 +10677,7 @@ fn secret_rewrap_plan_status_label(status: SecretRewrapPlanStatus) -> &'static s
     }
 }
 
-fn certificate_status_label(status: CertificateLifecycleState) -> &'static str {
+const fn certificate_status_label(status: CertificateLifecycleState) -> &'static str {
     match status {
         CertificateLifecycleState::Provisioning => "provisioning",
         CertificateLifecycleState::Active => "active",
@@ -10682,13 +10687,13 @@ fn certificate_status_label(status: CertificateLifecycleState) -> &'static str {
     }
 }
 
-fn acme_challenge_type_label(challenge_type: AcmeChallengeType) -> &'static str {
+const fn acme_challenge_type_label(challenge_type: AcmeChallengeType) -> &'static str {
     match challenge_type {
         AcmeChallengeType::Http01 => "http_01",
     }
 }
 
-fn acme_order_status_label(status: AcmeOrderStatus) -> &'static str {
+const fn acme_order_status_label(status: AcmeOrderStatus) -> &'static str {
     match status {
         AcmeOrderStatus::PendingChallenge => "pending_challenge",
         AcmeOrderStatus::ReadyToFinalize => "ready_to_finalize",
@@ -10697,7 +10702,7 @@ fn acme_order_status_label(status: AcmeOrderStatus) -> &'static str {
     }
 }
 
-fn ca_provider_kind_label(kind: CertificateAuthorityProviderKind) -> &'static str {
+const fn ca_provider_kind_label(kind: CertificateAuthorityProviderKind) -> &'static str {
     match kind {
         CertificateAuthorityProviderKind::LocalDev => "local_dev",
         CertificateAuthorityProviderKind::Acme => "acme",
@@ -10705,7 +10710,7 @@ fn ca_provider_kind_label(kind: CertificateAuthorityProviderKind) -> &'static st
     }
 }
 
-fn ca_provider_status_label(status: CertificateAuthorityProviderStatus) -> &'static str {
+const fn ca_provider_status_label(status: CertificateAuthorityProviderStatus) -> &'static str {
     match status {
         CertificateAuthorityProviderStatus::Active => "active",
         CertificateAuthorityProviderStatus::Disabled => "disabled",
@@ -11047,7 +11052,7 @@ fn next_state_after_agent_command_for_operation(
     }
 }
 
-fn node_host_state_label(state: NodeHostState) -> &'static str {
+const fn node_host_state_label(state: NodeHostState) -> &'static str {
     match state {
         NodeHostState::Registering => "registering",
         NodeHostState::Active => "active",
@@ -11070,7 +11075,9 @@ fn parse_node_host_state(value: &str) -> Result<NodeHostState, SqlStoreError> {
     }
 }
 
-fn node_host_agent_credential_state_label(state: NodeHostAgentCredentialState) -> &'static str {
+const fn node_host_agent_credential_state_label(
+    state: NodeHostAgentCredentialState,
+) -> &'static str {
     match state {
         NodeHostAgentCredentialState::Active => "active",
         NodeHostAgentCredentialState::Rotated => "rotated",
@@ -11091,7 +11098,7 @@ fn parse_node_host_agent_credential_state(
     }
 }
 
-fn node_host_hardening_status_label(status: NodeHostHardeningStatus) -> &'static str {
+const fn node_host_hardening_status_label(status: NodeHostHardeningStatus) -> &'static str {
     match status {
         NodeHostHardeningStatus::Passing => "passing",
         NodeHostHardeningStatus::Warning => "warning",
@@ -11110,7 +11117,7 @@ fn parse_node_host_hardening_status(value: &str) -> Result<NodeHostHardeningStat
     }
 }
 
-fn agent_command_status_label(status: AgentCommandStatus) -> &'static str {
+const fn agent_command_status_label(status: AgentCommandStatus) -> &'static str {
     match status {
         AgentCommandStatus::Pending => "pending",
         AgentCommandStatus::Running => "running",

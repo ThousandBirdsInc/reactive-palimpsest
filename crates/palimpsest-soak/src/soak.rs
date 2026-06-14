@@ -66,8 +66,7 @@ async fn main() -> ExitCode {
     let seed = AtomicU64::new(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(1),
+            .map_or(1, |d| d.as_nanos() as u64),
     );
 
     let router = Arc::new(SubscriptionRouter::new(RouterConfig::default()));
@@ -171,8 +170,7 @@ fn next_seed(state: &AtomicU64) -> u64 {
 fn capture_failure(round: u64, message: &str) -> ExitCode {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let dir: PathBuf = Path::new(FAILURE_DIR).join(format!("{ts}-round-{round}"));
     if let Err(err) = fs::create_dir_all(&dir) {
         eprintln!("could not create {}: {err}", dir.display());
