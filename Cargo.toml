@@ -17,7 +17,7 @@ members = [
     "paas/crates/palimpsest-paas-control-plane",
     "paas/crates/palimpsest-paas-core",
     "paas/crates/palimpsest-paas-gateway",
-    "paas/crates/palimpsest-paas-node-agent",
+    "paas/crates/palimpsest-paas-runtime",
     "paas/crates/palimpsest-paas-sync-wrapper",
     "xtask",
 ]

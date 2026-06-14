@@ -1,7 +1,13 @@
 # ADR 0002: Owned Rust Runtime Without Kubernetes
 
-**Status:** Accepted
+**Status:** Superseded by [ADR 0003](0003-kubernetes-cloudnativepg-runtime.md)
 **Date:** 2026-05-17
+
+> **Superseded (2026-06-14).** The managed-database runtime now uses Kubernetes
+> and the CloudNativePG operator, packaged with Helm. The owned node agent,
+> host placement engine, systemd units, and host bootstrap scripts described
+> below have been removed. This record is kept for history; see ADR 0003 for
+> the current decision and rationale.
 
 ## Context
 

@@ -79,7 +79,7 @@ jobs:
           cargo fmt \
             --package palimpsest-paas-core \
             --package palimpsest-paas-control-plane \
-            --package palimpsest-paas-node-agent \
+            --package palimpsest-paas-runtime \
             --package palimpsest-paas-sync-wrapper \
             --package palimpsest-paas-gateway \
             --check
@@ -89,7 +89,7 @@ jobs:
           cargo test \
             -p palimpsest-paas-core \
             -p palimpsest-paas-control-plane \
-            -p palimpsest-paas-node-agent \
+            -p palimpsest-paas-runtime \
             -p palimpsest-paas-sync-wrapper \
             -p palimpsest-paas-gateway
 

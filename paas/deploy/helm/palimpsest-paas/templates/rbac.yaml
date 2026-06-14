@@ -1,0 +1,56 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "palimpsest-paas.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palimpsest-paas.labels" . | nindent 4 }}
+{{- end }}
+{{- if .Values.rbac.create }}
+---
+{{- $kind := ternary "ClusterRole" "Role" .Values.rbac.clusterWide }}
+{{- $bindingKind := ternary "ClusterRoleBinding" "RoleBinding" .Values.rbac.clusterWide }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ $kind }}
+metadata:
+  name: {{ include "palimpsest-paas.fullname" . }}-runtime
+  {{- if not .Values.rbac.clusterWide }}
+  namespace: {{ .Release.Namespace }}
+  {{- end }}
+  labels:
+    {{- include "palimpsest-paas.labels" . | nindent 4 }}
+rules:
+  # Manage managed-Postgres clusters and their backups via CloudNativePG.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters", "scheduledbackups", "backups", "poolers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Role-password and TLS Secrets referenced by managed clusters.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  {{- if .Values.rbac.clusterWide }}
+  # Create per-environment namespaces for tenant isolation.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ $bindingKind }}
+metadata:
+  name: {{ include "palimpsest-paas.fullname" . }}-runtime
+  {{- if not .Values.rbac.clusterWide }}
+  namespace: {{ .Release.Namespace }}
+  {{- end }}
+  labels:
+    {{- include "palimpsest-paas.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: {{ $kind }}
+  name: {{ include "palimpsest-paas.fullname" . }}-runtime
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "palimpsest-paas.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
