@@ -326,8 +326,10 @@ Core services:
 - **Connection gateway:** Terminates public gRPC-Web/WebSocket/HTTP
   connections, validates project routing, enforces coarse rate limits, and
   forwards traffic to the right SyncDeployment.
-- **Node agent:** Rust daemon on each data-plane host that reconciles assigned
-  Postgres and SyncDeployment workloads without Kubernetes.
+- **Managed Postgres runtime:** The CloudNativePG operator on Kubernetes. The
+  control plane renders desired state into CloudNativePG `Cluster` resources
+  (via `palimpsest-paas-runtime`) and applies them; the operator owns
+  placement, failover, backups, PITR, upgrades, and storage resize.
 - **SyncDeployment:** A managed Palimpsest runtime built around
   `palimpsest-server` and `palimpsest-wal`.
 - **Managed Postgres cluster:** Customer-dedicated database instance with logical
@@ -414,10 +416,13 @@ customers will need private connectivity:
 ## 8. Managed Postgres Product
 
 Managed Postgres is part of the core platform, not an integration. The
-platform should own the customer database lifecycle end to end. The managed
-runtime uses a Rust control plane and Rust node agents on regional hosts; it
-does not use Kubernetes, Kubernetes operators, CRDs, StatefulSets, or Helm for
-customer databases.
+platform owns the customer database lifecycle end to end through a Rust control
+plane that persists desired state and policy. The managed runtime is Kubernetes
+with the CloudNativePG operator: the control plane renders desired state into
+CloudNativePG `Cluster` resources and applies them, and the platform ships as a
+Helm chart. See [ADR 0003](../paas/adr/0003-kubernetes-cloudnativepg-runtime.md).
+(This reverses the original no-Kubernetes decision; sections below that mention
+the Rust node agent and host fleet are historical record.)
 
 - Provision Postgres clusters in supported regions.
 - Support PostgreSQL 18 and newer only for managed clusters.
