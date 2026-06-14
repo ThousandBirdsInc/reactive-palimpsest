@@ -55,10 +55,17 @@ placement engine, the systemd units, and the host-image bootstrap scripts.
   the node pool / managed Kubernetes layer.
 - The control plane requires RBAC to manage `postgresql.cnpg.io` resources,
   Secrets, and (for per-environment isolation) Namespaces.
+- Cluster provisioning and deletion reconcile to CloudNativePG today (the
+  reconcile loop renders + applies a `Cluster`, and delete removes it). The
+  remaining cluster operations (resume/pause, resize, backup, restore, clone,
+  branch, standby, failover, and major/minor upgrade) still carry the legacy
+  host-command shape and currently error on the Kubernetes runtime; they are
+  being converted to CloudNativePG-native equivalents (storage expansion,
+  `Backup`/recovery, replica clusters, and image-tag changes).
 - The control plane's legacy host-fleet and agent-command persistence (node-host
   tables, the `agent_commands` queue, and related endpoints/UI) is deprecated
-  and slated for removal; it is retained only until dependent read paths are
-  migrated.
+  and slated for removal; it is retained only until those operations and their
+  read paths are migrated.
 - Any future decision to leave Kubernetes must justify itself against this
   operator-based model.
 

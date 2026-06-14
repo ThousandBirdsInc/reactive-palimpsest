@@ -4822,16 +4822,18 @@ async fn sql_api_delete_managed_postgres_cluster(
         ));
     }
 
-    // Fast path: cluster never reached a host. The request is being
-    // cancelled — there's nothing on a host to clean up, no agent
-    // command to dispatch, no lifecycle gate to honor. Mark the record
-    // Deleted directly, audit, and return.
+    // CloudNativePG clusters carry no host assignment: delete the operator's
+    // resources for this cluster, then tombstone the record. (Final backups are
+    // not yet wired to CloudNativePG `Backup` resources.)
     if cluster.host_assignment.is_none() {
         if final_backup_requested {
             return Err(SqlApiError::BadRequest(
-                "final backup cannot be taken: cluster has no host assignment".to_owned(),
+                "final backup is not yet supported on the Kubernetes runtime".to_owned(),
             ));
         }
+        let runtime = runtime::ClusterRuntime::from_env();
+        let manifests = runtime.render(&cluster, None, &[]).map_err(runtime_error)?;
+        runtime.delete(&manifests).map_err(runtime_error)?;
         cluster.lifecycle_state = ClusterLifecycleState::Deleted;
         store.update_managed_postgres_cluster(&cluster).await?;
         store
