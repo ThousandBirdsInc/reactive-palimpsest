@@ -7711,10 +7711,6 @@ async fn queue_managed_postgres_minor_update(
     audit_action: &str,
 ) -> Result<UpdatePostgresMinorApiResponse, SqlApiError> {
     let mut cluster = cluster.clone();
-    let assignment = cluster
-        .host_assignment
-        .clone()
-        .ok_or_else(|| SqlApiError::BadRequest("cluster has no host assignment".to_owned()))?;
 
     if cluster.lifecycle_state != ClusterLifecycleState::Ready {
         return Err(SqlApiError::BadRequest(format!(
@@ -7735,49 +7731,28 @@ async fn queue_managed_postgres_minor_update(
         )));
     }
 
-    let host_is_active = store
-        .active_host_capacities()
-        .await?
-        .into_iter()
-        .any(|host| host.host_id == assignment.host_id);
-    if !host_is_active {
-        return Err(SqlApiError::BadRequest(format!(
-            "assigned host {} is not active for minor update",
-            assignment.host_id
-        )));
-    }
-
-    cluster.postgres_version = target_postgres_version.clone();
+    // Record the desired version and re-apply. CloudNativePG performs a rolling
+    // update of the instances to the new image.
+    cluster.postgres_version = target_postgres_version;
     cluster.lifecycle_state = ClusterLifecycleState::UpdatingPostgres;
-    let command = NodeAgentCommand {
-        command_id: format!(
-            "{}:update-postgres-minor:{}",
-            cluster.cluster_id,
-            monotonic_nanos()
-        ),
-        cluster_id: cluster.cluster_id.clone(),
-        action: NodeAgentAction::UpdatePostgresMinor {
-            data_dir: assignment.data_dir.clone(),
-            target_postgres_version,
-        },
-    };
-
     store.update_managed_postgres_cluster(&cluster).await?;
-    let operation =
-        operation_for_agent_command(OperationKind::UpdateCluster, &cluster.cluster_id, &command);
-    store.insert_operation(&operation).await?;
-    store
-        .enqueue_agent_command(&assignment.host_id, Some(&operation.operation_id), &command)
+
+    let runtime = runtime::ClusterRuntime::from_env();
+    let roles = store
+        .issue_database_role_credentials(&cluster.cluster_id)
         .await?;
+    let manifests = runtime
+        .render(&cluster, None, &roles)
+        .map_err(runtime_error)?;
+    runtime.apply(&manifests).map_err(runtime_error)?;
+
+    cluster.lifecycle_state = ClusterLifecycleState::Verifying;
+    store.update_managed_postgres_cluster(&cluster).await?;
     store
         .append_audit_event(&audit_event(actor_id, audit_action, &cluster.cluster_id))
         .await?;
 
-    Ok(UpdatePostgresMinorApiResponse {
-        cluster,
-        command,
-        operation,
-    })
+    Ok(UpdatePostgresMinorApiResponse { cluster })
 }
 
 async fn queue_managed_postgres_major_upgrade(
@@ -9957,8 +9932,6 @@ pub struct UpdatePostgresMinorRequest {
 #[derive(Debug, Serialize)]
 pub struct UpdatePostgresMinorApiResponse {
     cluster: ManagedPostgresCluster,
-    command: NodeAgentCommand,
-    operation: OperationRecord,
 }
 
 #[derive(Debug, Serialize)]
