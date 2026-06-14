@@ -195,14 +195,17 @@ impl Reconciler {
             // Re-apply when Verifying/Ready to converge any drift; the caller
             // promotes Verifying -> Ready once the operator reports readiness.
             ClusterLifecycleState::Verifying | ClusterLifecycleState::Ready => RuntimeAction::Apply,
+            // Pause: apply the hibernation annotation (rendered from the Stopped
+            // state) so CloudNativePG scales the cluster down but keeps volumes.
+            ClusterLifecycleState::Stopping | ClusterLifecycleState::Stopped => {
+                next_cluster.lifecycle_state = ClusterLifecycleState::Stopped;
+                RuntimeAction::Apply
+            }
             ClusterLifecycleState::Deleting => {
                 next_cluster.lifecycle_state = ClusterLifecycleState::Deleted;
                 RuntimeAction::Delete
             }
-            ClusterLifecycleState::Stopping
-            | ClusterLifecycleState::Stopped
-            | ClusterLifecycleState::Deleted
-            | ClusterLifecycleState::Failed => RuntimeAction::None,
+            ClusterLifecycleState::Deleted | ClusterLifecycleState::Failed => RuntimeAction::None,
         };
 
         let manifests = match action {
@@ -4449,10 +4452,6 @@ async fn sql_api_stop_managed_postgres_cluster(
         .await?
         .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
     auth.require_scope(ResourceScope::from_cluster(&cluster))?;
-    let assignment = cluster
-        .host_assignment
-        .clone()
-        .ok_or_else(|| SqlApiError::BadRequest("cluster has no host assignment".to_owned()))?;
 
     if !matches!(
         cluster.lifecycle_state,
@@ -4464,19 +4463,13 @@ async fn sql_api_stop_managed_postgres_cluster(
         )));
     }
 
+    // Pause = CloudNativePG hibernation, applied via the reconcile path (which
+    // re-renders the cluster with the hibernation annotation from the Stopped
+    // state).
     cluster.lifecycle_state = ClusterLifecycleState::Stopping;
-    let command = NodeAgentCommand {
-        command_id: format!("{}:stop-postgres:{}", cluster.cluster_id, monotonic_nanos()),
-        cluster_id: cluster.cluster_id.clone(),
-        action: NodeAgentAction::StopPostgres,
-    };
-
     store.update_managed_postgres_cluster(&cluster).await?;
-    let operation = operation_for_agent_command(OperationKind::StopCluster, &cluster_id, &command);
-    store.insert_operation(&operation).await?;
-    store
-        .enqueue_agent_command(&assignment.host_id, Some(&operation.operation_id), &command)
-        .await?;
+    let response =
+        reconcile_managed_postgres_cluster_once(&store, auth.actor_id(), &cluster_id).await?;
     store
         .append_audit_event(&audit_event(
             auth.actor_id(),
@@ -4486,9 +4479,7 @@ async fn sql_api_stop_managed_postgres_cluster(
         .await?;
 
     Ok(Json(StopClusterApiResponse {
-        cluster,
-        command,
-        operation,
+        cluster: response.cluster,
     }))
 }
 
@@ -4503,10 +4494,6 @@ async fn sql_api_resume_managed_postgres_cluster(
         .await?
         .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
     auth.require_scope(ResourceScope::from_cluster(&cluster))?;
-    let assignment = cluster
-        .host_assignment
-        .clone()
-        .ok_or_else(|| SqlApiError::BadRequest("cluster has no host assignment".to_owned()))?;
 
     if cluster.lifecycle_state != ClusterLifecycleState::Stopped {
         return Err(SqlApiError::BadRequest(format!(
@@ -4515,23 +4502,12 @@ async fn sql_api_resume_managed_postgres_cluster(
         )));
     }
 
+    // Resume by re-rendering without the hibernation annotation and applying;
+    // readiness then promotes the cluster back to Ready.
     cluster.lifecycle_state = ClusterLifecycleState::Starting;
-    let command = NodeAgentCommand {
-        command_id: format!(
-            "{}:start-postgres:{}",
-            cluster.cluster_id,
-            monotonic_nanos()
-        ),
-        cluster_id: cluster.cluster_id.clone(),
-        action: NodeAgentAction::StartPostgres,
-    };
-
     store.update_managed_postgres_cluster(&cluster).await?;
-    let operation = operation_for_agent_command(OperationKind::StartCluster, &cluster_id, &command);
-    store.insert_operation(&operation).await?;
-    store
-        .enqueue_agent_command(&assignment.host_id, Some(&operation.operation_id), &command)
-        .await?;
+    let response =
+        reconcile_managed_postgres_cluster_once(&store, auth.actor_id(), &cluster_id).await?;
     store
         .append_audit_event(&audit_event(
             auth.actor_id(),
@@ -4541,9 +4517,7 @@ async fn sql_api_resume_managed_postgres_cluster(
         .await?;
 
     Ok(Json(StartClusterApiResponse {
-        cluster,
-        command,
-        operation,
+        cluster: response.cluster,
     }))
 }
 
@@ -4559,10 +4533,6 @@ async fn sql_api_resize_managed_postgres_cluster(
         .await?
         .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
     auth.require_scope(ResourceScope::from_cluster(&cluster))?;
-    let assignment = cluster
-        .host_assignment
-        .clone()
-        .ok_or_else(|| SqlApiError::BadRequest("cluster has no host assignment".to_owned()))?;
 
     if cluster.lifecycle_state != ClusterLifecycleState::Ready {
         return Err(SqlApiError::BadRequest(format!(
@@ -4577,51 +4547,13 @@ async fn sql_api_resize_managed_postgres_cluster(
         )));
     }
 
-    let host = store
-        .active_host_capacities()
-        .await?
-        .into_iter()
-        .find(|host| host.host_id == assignment.host_id)
-        .ok_or_else(|| {
-            SqlApiError::BadRequest(format!(
-                "assigned host {} is not active for resize",
-                assignment.host_id
-            ))
-        })?;
-    let additional_gib = payload.storage_gib - cluster.storage_gib;
-    if host
-        .used_storage_gib
-        .checked_add(additional_gib)
-        .is_none_or(|used| used > host.storage_gib)
-    {
-        return Err(SqlApiError::BadRequest(format!(
-            "host {} has insufficient storage for resize to {} GiB",
-            assignment.host_id, payload.storage_gib
-        )));
-    }
-
+    // CloudNativePG expands the PersistentVolumeClaims when the cluster's
+    // storage size grows; re-render with the new size and apply via reconcile.
     cluster.storage_gib = payload.storage_gib;
     cluster.lifecycle_state = ClusterLifecycleState::Resizing;
-    let command = NodeAgentCommand {
-        command_id: format!(
-            "{}:resize-postgres-storage:{}",
-            cluster.cluster_id,
-            monotonic_nanos()
-        ),
-        cluster_id: cluster.cluster_id.clone(),
-        action: NodeAgentAction::ResizePostgresStorage {
-            data_dir: assignment.data_dir.clone(),
-            storage_gib: payload.storage_gib,
-        },
-    };
-
     store.update_managed_postgres_cluster(&cluster).await?;
-    let operation =
-        operation_for_agent_command(OperationKind::ResizeCluster, &cluster_id, &command);
-    store.insert_operation(&operation).await?;
-    store
-        .enqueue_agent_command(&assignment.host_id, Some(&operation.operation_id), &command)
-        .await?;
+    let response =
+        reconcile_managed_postgres_cluster_once(&store, auth.actor_id(), &cluster_id).await?;
     store
         .append_audit_event(&audit_event(
             auth.actor_id(),
@@ -4631,9 +4563,7 @@ async fn sql_api_resize_managed_postgres_cluster(
         .await?;
 
     Ok(Json(ResizeClusterApiResponse {
-        cluster,
-        command,
-        operation,
+        cluster: response.cluster,
     }))
 }
 
@@ -10002,15 +9932,11 @@ struct ManagedPostgresEndpointCertificatesResponse {
 #[derive(Debug, Serialize)]
 pub struct StopClusterApiResponse {
     cluster: ManagedPostgresCluster,
-    command: NodeAgentCommand,
-    operation: OperationRecord,
 }
 
 #[derive(Debug, Serialize)]
 pub struct StartClusterApiResponse {
     cluster: ManagedPostgresCluster,
-    command: NodeAgentCommand,
-    operation: OperationRecord,
 }
 
 #[derive(Debug, Deserialize)]
@@ -10021,8 +9947,6 @@ pub struct ResizeClusterRequest {
 #[derive(Debug, Serialize)]
 pub struct ResizeClusterApiResponse {
     cluster: ManagedPostgresCluster,
-    command: NodeAgentCommand,
-    operation: OperationRecord,
 }
 
 #[derive(Debug, Deserialize)]
@@ -12509,10 +12433,34 @@ predicate = \"owner_id = $user.id\"
     }
 
     #[test]
-    fn stopped_cluster_is_a_runtime_noop() {
+    fn stopped_cluster_applies_hibernation() {
         let plan = Reconciler::new()
             .reconcile(
                 &cluster(ClusterLifecycleState::Stopped),
+                None,
+                &[],
+                &RuntimeConfig::default(),
+            )
+            .expect("reconcile succeeds");
+
+        assert_eq!(plan.action, RuntimeAction::Apply);
+        assert_eq!(
+            plan.next_cluster.lifecycle_state,
+            ClusterLifecycleState::Stopped
+        );
+        let yaml = plan
+            .manifests
+            .expect("manifests rendered")
+            .to_yaml()
+            .expect("yaml renders");
+        assert!(yaml.contains("cnpg.io/hibernation"));
+    }
+
+    #[test]
+    fn failed_cluster_is_a_runtime_noop() {
+        let plan = Reconciler::new()
+            .reconcile(
+                &cluster(ClusterLifecycleState::Failed),
                 None,
                 &[],
                 &RuntimeConfig::default(),

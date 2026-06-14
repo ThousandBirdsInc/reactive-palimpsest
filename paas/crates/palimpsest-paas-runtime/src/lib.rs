@@ -32,8 +32,8 @@ use std::{
 };
 
 use palimpsest_paas_core::{
-    BackupPolicy, DatabaseRoleCredential, DatabaseRoleKind, ManagedPostgresCluster,
-    ManagedPostgresSpec, MIN_SUPPORTED_POSTGRES_MAJOR,
+    BackupPolicy, ClusterLifecycleState, DatabaseRoleCredential, DatabaseRoleKind,
+    ManagedPostgresCluster, ManagedPostgresSpec, MIN_SUPPORTED_POSTGRES_MAJOR,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -318,6 +318,7 @@ pub fn render_scheduled_backup(
             name: format!("{}-base", resource_name(cluster)),
             namespace: config.namespace_for(cluster),
             labels: ownership_labels(cluster),
+            annotations: BTreeMap::new(),
         },
         spec: CnpgScheduledBackupSpec {
             schedule,
@@ -362,10 +363,21 @@ impl RenderedManifests {
 }
 
 fn object_meta(cluster: &ManagedPostgresCluster, config: &RuntimeConfig) -> ObjectMeta {
+    // A Stopped/Stopping cluster is expressed declaratively to CloudNativePG via
+    // the hibernation annotation, which scales the instances down while keeping
+    // the data volumes (the operator equivalent of pausing).
+    let mut annotations = BTreeMap::new();
+    if matches!(
+        cluster.lifecycle_state,
+        ClusterLifecycleState::Stopping | ClusterLifecycleState::Stopped
+    ) {
+        annotations.insert("cnpg.io/hibernation".to_owned(), "on".to_owned());
+    }
     ObjectMeta {
         name: resource_name(cluster),
         namespace: config.namespace_for(cluster),
         labels: ownership_labels(cluster),
+        annotations,
     }
 }
 
@@ -530,6 +542,8 @@ pub struct ObjectMeta {
     pub namespace: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -819,6 +833,24 @@ mod tests {
         assert!(yaml.contains("kind: Cluster"));
         assert!(yaml.contains("kind: ScheduledBackup"));
         assert!(yaml.contains("---"));
+    }
+
+    #[test]
+    fn stopped_cluster_renders_hibernation_annotation() {
+        let cluster = ManagedPostgresCluster {
+            lifecycle_state: ClusterLifecycleState::Stopped,
+            ..sample_cluster("dev")
+        };
+        let rendered = render_cluster(&cluster, None, &[], &RuntimeConfig::default()).unwrap();
+        assert_eq!(
+            rendered.metadata.annotations.get("cnpg.io/hibernation"),
+            Some(&"on".to_owned())
+        );
+
+        // A running cluster carries no hibernation annotation.
+        let running =
+            render_cluster(&sample_cluster("dev"), None, &[], &RuntimeConfig::default()).unwrap();
+        assert!(running.metadata.annotations.is_empty());
     }
 
     #[test]
