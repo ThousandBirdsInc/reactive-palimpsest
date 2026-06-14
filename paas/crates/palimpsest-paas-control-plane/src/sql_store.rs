@@ -11,36 +11,37 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use palimpsest_paas_core::{
     AcmeChallengeType, AcmeOrderStatus, AgentCommandStatus, ApiKey, AuditEvent,
     BackupArtifactStatus, BackupLifecycleState, BillingExport, BillingExportStatus,
-    CertificateAuthorityProviderKind, CertificateAuthorityProviderStatus,
-    CertificateLifecycleState, CloneRedactionPolicyStatus, CloneRedactionRule,
-    ClusterLifecycleState, ConfigVersion, ConfigVersionStatus, CustomerEnvironmentHealth,
-    CustomerEnvironmentHealthComponent, CustomerEnvironmentHealthState, DatabaseProxyPolicy,
-    DatabaseProxyRoute, DatabaseProxyTlsConfig, DatabaseProxyTlsMode, DatabaseRoleCredential,
-    DatabaseRoleKind, Domain, DomainTlsStatus, DomainVerificationStatus, Environment,
-    FailoverLifecycleState, GatewayRoute, GatewayRouteMtlsBundle, HostAssignment, Incident,
-    IncidentSeverity, IncidentStatus, IpAllowlistPurpose, IpAllowlistRule, IpAllowlistStatus,
-    JwtIssuer, JwtIssuerStatus, MaintenanceDayOfWeek, MaintenanceWindow, MaintenanceWindowStatus,
-    ManagedPostgresAcmeOrder, ManagedPostgresBackup, ManagedPostgresBackupArtifact,
-    ManagedPostgresBackupRetentionPolicy, ManagedPostgresCertificateAuthorityProvider,
-    ManagedPostgresCloneRedactionPolicy, ManagedPostgresCluster, ManagedPostgresDeletionTombstone,
-    ManagedPostgresEndpoint, ManagedPostgresEndpointCertificate,
-    ManagedPostgresEndpointCertificateBundle, ManagedPostgresFailover, ManagedPostgresMajorUpgrade,
-    ManagedPostgresMajorUpgradeStatus, ManagedPostgresMajorUpgradeStrategy,
-    ManagedPostgresPitrCheck, ManagedPostgresRestore, ManagedPostgresRestoreDrill,
-    ManagedPostgresRuntimeCheck, ManagedPostgresStandby, ManagedPostgresStandbyCheck,
-    ManagedPostgresSupportAccessSession, ManagedPostgresWalArchiveSegment, NodeAgentAction,
-    NodeAgentBackupArtifact, NodeAgentCommand, NodeHost, NodeHostAgentCredential,
-    NodeHostAgentCredentialState, NodeHostClusterObservation, NodeHostHardeningCheck,
-    NodeHostHardeningStatus, NodeHostHeartbeat, NodeHostState, NodeHostSyncDeploymentObservation,
-    OperationKind, OperationRecord, OperationStatus, Organization, PermissionRuleDocument,
-    PitrCheckStatus, PostgresVersion, Project, QueryPermissionOperation, QueryPermissionPolicy,
-    QueryPermissionPolicyStatus, QueuedNodeAgentCommand, QuotaAlert, QuotaAlertState,
-    QuotaEnforcement, QuotaPolicy, RateLimitPolicy, RestoreLifecycleState, RuntimeCheckStatus,
-    SecretEncryptionKey, SecretEncryptionKeyStatus, SecretRef, SecretRewrapPlan,
-    SecretRewrapPlanStatus, SsoIdentityProvider, SsoProviderKind, SsoProviderStatus,
-    StandbyCheckStatus, StandbyLifecycleState, StaticEgressIp, StaticEgressIpStatus,
-    SupportAccessStatus, SyncDeployment, SyncDeploymentLifecycleState, TeamMembership, TeamRole,
-    TlsPolicy, UsageEvent, WalArchiveSegmentStatus, WebhookEndpoint, WebhookEndpointStatus,
+    BranchLifecycleState, BranchMode, CertificateAuthorityProviderKind,
+    CertificateAuthorityProviderStatus, CertificateLifecycleState, CloneRedactionPolicyStatus,
+    CloneRedactionRule, ClusterLifecycleState, ConfigVersion, ConfigVersionStatus,
+    CustomerEnvironmentHealth, CustomerEnvironmentHealthComponent, CustomerEnvironmentHealthState,
+    DatabaseProxyPolicy, DatabaseProxyRoute, DatabaseProxyTlsConfig, DatabaseProxyTlsMode,
+    DatabaseRoleCredential, DatabaseRoleKind, Domain, DomainTlsStatus, DomainVerificationStatus,
+    Environment, FailoverLifecycleState, GatewayRoute, GatewayRouteMtlsBundle, HostAssignment,
+    Incident, IncidentSeverity, IncidentStatus, IpAllowlistPurpose, IpAllowlistRule,
+    IpAllowlistStatus, JwtIssuer, JwtIssuerStatus, MaintenanceDayOfWeek, MaintenanceWindow,
+    MaintenanceWindowStatus, ManagedPostgresAcmeOrder, ManagedPostgresBackup,
+    ManagedPostgresBackupArtifact, ManagedPostgresBackupRetentionPolicy, ManagedPostgresBranch,
+    ManagedPostgresCertificateAuthorityProvider, ManagedPostgresCloneRedactionPolicy,
+    ManagedPostgresCluster, ManagedPostgresDeletionTombstone, ManagedPostgresEndpoint,
+    ManagedPostgresEndpointCertificate, ManagedPostgresEndpointCertificateBundle,
+    ManagedPostgresFailover, ManagedPostgresMajorUpgrade, ManagedPostgresMajorUpgradeStatus,
+    ManagedPostgresMajorUpgradeStrategy, ManagedPostgresPitrCheck, ManagedPostgresRestore,
+    ManagedPostgresRestoreDrill, ManagedPostgresRuntimeCheck, ManagedPostgresStandby,
+    ManagedPostgresStandbyCheck, ManagedPostgresSupportAccessSession,
+    ManagedPostgresWalArchiveSegment, NodeAgentAction, NodeAgentBackupArtifact, NodeAgentCommand,
+    NodeHost, NodeHostAgentCredential, NodeHostAgentCredentialState, NodeHostClusterObservation,
+    NodeHostHardeningCheck, NodeHostHardeningStatus, NodeHostHeartbeat, NodeHostState,
+    NodeHostSyncDeploymentObservation, OperationKind, OperationRecord, OperationStatus,
+    Organization, PermissionRuleDocument, PitrCheckStatus, PostgresVersion, Project,
+    QueryPermissionOperation, QueryPermissionPolicy, QueryPermissionPolicyStatus,
+    QueuedNodeAgentCommand, QuotaAlert, QuotaAlertState, QuotaEnforcement, QuotaPolicy,
+    RateLimitPolicy, RestoreLifecycleState, RuntimeCheckStatus, SecretEncryptionKey,
+    SecretEncryptionKeyStatus, SecretRef, SecretRewrapPlan, SecretRewrapPlanStatus,
+    SsoIdentityProvider, SsoProviderKind, SsoProviderStatus, StandbyCheckStatus,
+    StandbyLifecycleState, StaticEgressIp, StaticEgressIpStatus, SupportAccessStatus,
+    SyncDeployment, SyncDeploymentLifecycleState, TeamMembership, TeamRole, TlsPolicy, UsageEvent,
+    WalArchiveSegmentStatus, WebhookEndpoint, WebhookEndpointStatus,
 };
 use rcgen::{CertificateParams, CertifiedKey, KeyPair};
 use ring::{
@@ -4881,6 +4882,118 @@ impl SqlControlPlaneStore {
         Ok(())
     }
 
+    pub async fn insert_managed_postgres_branch(
+        &self,
+        branch: &ManagedPostgresBranch,
+    ) -> Result<(), SqlStoreError> {
+        sqlx::query(
+            "INSERT INTO managed_postgres_branches \
+                (id, cluster_id, name, parent_branch_id, mode, source_database, branch_database, \
+                 branch_cluster_id, created_from_lsn, redaction_policy_id, lifecycle_state, error_message) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        )
+        .bind(&branch.branch_id)
+        .bind(&branch.cluster_id)
+        .bind(&branch.name)
+        .bind(branch.parent_branch_id.as_deref())
+        .bind(branch_mode_label(branch.mode))
+        .bind(&branch.source_database)
+        .bind(branch.branch_database.as_deref())
+        .bind(branch.branch_cluster_id.as_deref())
+        .bind(branch.created_from_lsn.as_deref())
+        .bind(branch.redaction_policy_id.as_deref())
+        .bind(branch_lifecycle_state_label(branch.lifecycle_state))
+        .bind(branch.error_message.as_deref())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn managed_postgres_branch(
+        &self,
+        branch_id: &str,
+    ) -> Result<Option<ManagedPostgresBranch>, SqlStoreError> {
+        let row = sqlx::query(
+            "SELECT id, cluster_id, name, parent_branch_id, mode, source_database, branch_database, \
+                    branch_cluster_id, created_from_lsn, redaction_policy_id, lifecycle_state, error_message \
+             FROM managed_postgres_branches WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(branch_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(managed_postgres_branch_from_row).transpose()
+    }
+
+    pub async fn managed_postgres_branches(
+        &self,
+        cluster_id: &str,
+    ) -> Result<Vec<ManagedPostgresBranch>, SqlStoreError> {
+        let rows = sqlx::query(
+            "SELECT id, cluster_id, name, parent_branch_id, mode, source_database, branch_database, \
+                    branch_cluster_id, created_from_lsn, redaction_policy_id, lifecycle_state, error_message \
+             FROM managed_postgres_branches \
+             WHERE cluster_id = $1 AND deleted_at IS NULL \
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(cluster_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(managed_postgres_branch_from_row)
+            .collect()
+    }
+
+    /// Number of live (non-deleted) branches whose parent is `branch_id`.
+    pub async fn managed_postgres_branch_child_count(
+        &self,
+        branch_id: &str,
+    ) -> Result<u64, SqlStoreError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS child_count FROM managed_postgres_branches \
+             WHERE parent_branch_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(branch_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let count: i64 = row.try_get("child_count")?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    pub async fn update_managed_postgres_branch_state(
+        &self,
+        branch_id: &str,
+        lifecycle_state: BranchLifecycleState,
+        error_message: Option<&str>,
+    ) -> Result<(), SqlStoreError> {
+        sqlx::query(
+            "UPDATE managed_postgres_branches \
+             SET lifecycle_state = $2, error_message = $3, updated_at = now() \
+             WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(branch_id)
+        .bind(branch_lifecycle_state_label(lifecycle_state))
+        .bind(error_message)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Soft-deletes (tombstones) a branch so its name can be reused.
+    pub async fn tombstone_managed_postgres_branch(
+        &self,
+        branch_id: &str,
+    ) -> Result<(), SqlStoreError> {
+        sqlx::query(
+            "UPDATE managed_postgres_branches \
+             SET lifecycle_state = 'deleted', deleted_at = now(), updated_at = now() \
+             WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(branch_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn upsert_wal_archive_segment(
         &self,
         segment: &ManagedPostgresWalArchiveSegment,
@@ -6025,6 +6138,95 @@ impl SqlControlPlaneStore {
         .execute(&self.pool)
         .await?;
         Ok(Some(next))
+    }
+
+    /// Advances a branch's lifecycle when its backing clone/drop command
+    /// reports a result.
+    ///
+    /// Matches the branch by cluster and backing database, so non-branch clone
+    /// commands (which have no branch row) are no-ops.
+    pub async fn advance_branch_after_agent_command(
+        &self,
+        host_id: &str,
+        command_id: &str,
+        status: AgentCommandStatus,
+        detail: Option<&str>,
+    ) -> Result<Option<BranchLifecycleState>, SqlStoreError> {
+        let row = sqlx::query(
+            "SELECT agent_commands.cluster_id, agent_commands.action \
+             FROM agent_commands \
+             WHERE agent_commands.host_id = $1 AND agent_commands.id = $2",
+        )
+        .bind(host_id)
+        .bind(command_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Err(SqlStoreError::MissingResource(command_id.to_owned()));
+        };
+        let cluster_id: String = row.try_get("cluster_id")?;
+        let action: Json<NodeAgentAction> = row.try_get("action")?;
+
+        match action.0 {
+            NodeAgentAction::CreateCopyOnWriteDatabaseClone {
+                target_database, ..
+            } => {
+                let next = match status {
+                    AgentCommandStatus::Succeeded => BranchLifecycleState::Ready,
+                    AgentCommandStatus::Failed | AgentCommandStatus::Cancelled => {
+                        BranchLifecycleState::Failed
+                    }
+                    _ => return Ok(None),
+                };
+                let result = sqlx::query(
+                    "UPDATE managed_postgres_branches SET \
+                        lifecycle_state = $3, error_message = $4, updated_at = now() \
+                     WHERE cluster_id = $1 AND branch_database = $2 \
+                       AND lifecycle_state = 'creating' AND deleted_at IS NULL",
+                )
+                .bind(&cluster_id)
+                .bind(&target_database)
+                .bind(branch_lifecycle_state_label(next))
+                .bind(match next {
+                    BranchLifecycleState::Failed => detail,
+                    _ => None,
+                })
+                .execute(&self.pool)
+                .await?;
+                Ok((result.rows_affected() > 0).then_some(next))
+            }
+            NodeAgentAction::DropDatabase { database, .. } => match status {
+                AgentCommandStatus::Succeeded => {
+                    let result = sqlx::query(
+                        "UPDATE managed_postgres_branches SET \
+                            lifecycle_state = 'deleted', deleted_at = now(), updated_at = now() \
+                         WHERE cluster_id = $1 AND branch_database = $2 \
+                           AND lifecycle_state = 'deleting' AND deleted_at IS NULL",
+                    )
+                    .bind(&cluster_id)
+                    .bind(&database)
+                    .execute(&self.pool)
+                    .await?;
+                    Ok((result.rows_affected() > 0).then_some(BranchLifecycleState::Deleted))
+                }
+                AgentCommandStatus::Failed | AgentCommandStatus::Cancelled => {
+                    let result = sqlx::query(
+                        "UPDATE managed_postgres_branches SET \
+                            lifecycle_state = 'failed', error_message = $3, updated_at = now() \
+                         WHERE cluster_id = $1 AND branch_database = $2 \
+                           AND lifecycle_state = 'deleting' AND deleted_at IS NULL",
+                    )
+                    .bind(&cluster_id)
+                    .bind(&database)
+                    .bind(detail)
+                    .execute(&self.pool)
+                    .await?;
+                    Ok((result.rows_affected() > 0).then_some(BranchLifecycleState::Failed))
+                }
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        }
     }
 
     pub async fn advance_restore_drill_after_agent_command(
@@ -8906,6 +9108,27 @@ fn managed_postgres_restore_drill_from_row(
     })
 }
 
+fn managed_postgres_branch_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<ManagedPostgresBranch, SqlStoreError> {
+    let mode: String = row.try_get("mode")?;
+    let lifecycle_state: String = row.try_get("lifecycle_state")?;
+    Ok(ManagedPostgresBranch {
+        branch_id: row.try_get("id")?,
+        cluster_id: row.try_get("cluster_id")?,
+        name: row.try_get("name")?,
+        parent_branch_id: row.try_get("parent_branch_id")?,
+        mode: parse_branch_mode(&mode)?,
+        source_database: row.try_get("source_database")?,
+        branch_database: row.try_get("branch_database")?,
+        branch_cluster_id: row.try_get("branch_cluster_id")?,
+        created_from_lsn: row.try_get("created_from_lsn")?,
+        redaction_policy_id: row.try_get("redaction_policy_id")?,
+        lifecycle_state: parse_branch_lifecycle_state(&lifecycle_state)?,
+        error_message: row.try_get("error_message")?,
+    })
+}
+
 fn wal_archive_segment_from_row(
     row: sqlx::postgres::PgRow,
 ) -> Result<ManagedPostgresWalArchiveSegment, SqlStoreError> {
@@ -9777,6 +10000,8 @@ fn operation_kind_label(kind: OperationKind) -> &'static str {
         OperationKind::ArchiveWalSegment => "archive_wal_segment",
         OperationKind::RestoreCluster => "restore_cluster",
         OperationKind::CreateDatabaseClone => "create_database_clone",
+        OperationKind::CreateBranch => "create_branch",
+        OperationKind::DeleteBranch => "delete_branch",
         OperationKind::PrepareStandby => "prepare_standby",
         OperationKind::CheckStandby => "check_standby",
         OperationKind::FencePrimary => "fence_primary",
@@ -10256,6 +10481,46 @@ fn restore_status_label(status: RestoreLifecycleState) -> &'static str {
         RestoreLifecycleState::Running => "running",
         RestoreLifecycleState::Succeeded => "succeeded",
         RestoreLifecycleState::Failed => "failed",
+    }
+}
+
+fn branch_mode_label(mode: BranchMode) -> &'static str {
+    match mode {
+        BranchMode::HeadCow => "head_cow",
+        BranchMode::PointInTime => "point_in_time",
+    }
+}
+
+fn parse_branch_mode(value: &str) -> Result<BranchMode, SqlStoreError> {
+    match value {
+        "head_cow" => Ok(BranchMode::HeadCow),
+        "point_in_time" => Ok(BranchMode::PointInTime),
+        other => Err(SqlStoreError::InvalidValue(format!(
+            "invalid branch mode '{other}'"
+        ))),
+    }
+}
+
+fn branch_lifecycle_state_label(state: BranchLifecycleState) -> &'static str {
+    match state {
+        BranchLifecycleState::Creating => "creating",
+        BranchLifecycleState::Ready => "ready",
+        BranchLifecycleState::Failed => "failed",
+        BranchLifecycleState::Deleting => "deleting",
+        BranchLifecycleState::Deleted => "deleted",
+    }
+}
+
+fn parse_branch_lifecycle_state(value: &str) -> Result<BranchLifecycleState, SqlStoreError> {
+    match value {
+        "creating" => Ok(BranchLifecycleState::Creating),
+        "ready" => Ok(BranchLifecycleState::Ready),
+        "failed" => Ok(BranchLifecycleState::Failed),
+        "deleting" => Ok(BranchLifecycleState::Deleting),
+        "deleted" => Ok(BranchLifecycleState::Deleted),
+        other => Err(SqlStoreError::InvalidValue(format!(
+            "invalid branch lifecycle state '{other}'"
+        ))),
     }
 }
 

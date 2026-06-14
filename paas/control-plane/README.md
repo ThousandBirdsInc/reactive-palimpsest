@@ -170,6 +170,10 @@ Additional SQL-backed node-agent and reconciliation routes:
 - `GET /v1/managed-postgres/clusters/{cluster_id}/restores?status=<status>`
 - `GET /v1/managed-postgres/clusters/{cluster_id}/restores/{restore_id}`
 - `POST /v1/managed-postgres/clusters/{cluster_id}/database-clones`
+- `POST /v1/managed-postgres/clusters/{cluster_id}/branches`
+- `GET /v1/managed-postgres/clusters/{cluster_id}/branches`
+- `GET /v1/managed-postgres/clusters/{cluster_id}/branches/{branch_id}`
+- `DELETE /v1/managed-postgres/clusters/{cluster_id}/branches/{branch_id}`
 - `POST /v1/managed-postgres/clone-redaction-policies`
 - `GET /v1/managed-postgres/clone-redaction-policies?organization_id=<org>&project_id=<project>&environment_id=<env>&status=<status>`
 - `GET /v1/managed-postgres/clone-redaction-policies/{policy_id}`
@@ -236,6 +240,28 @@ The source cluster must be ready. The request accepts `source_database`,
 `target_database`, and `terminate_source_connections`; when termination is
 enabled the agent first clears active source database sessions so PostgreSQL's
 template clone can take the file-copy path.
+
+## Database Branches
+
+Branches are named, addressable database states with parent lineage, in the
+style of Neon branches, layered on the copy-on-write clone primitive. See
+`paas/BRANCHING-API-DESIGN.md` for the full design.
+
+`POST /v1/managed-postgres/clusters/{cluster_id}/branches` creates a branch.
+The current implementation supports HEAD copy-on-write branches
+(`mode = "head_cow"`, the default): the source database — the parent branch's
+database, or a root branch's `source_database` (defaulting to `postgres`) — is
+cloned into a derived database (`branch_<name>`) on the same cluster instance
+via the `CreateCopyOnWriteDatabaseClone` agent command. The branch row tracks
+`creating → ready`/`failed` from the command result. Point-in-time branches
+(`mode = "point_in_time"`, backed by a PITR restore into a new cluster) are
+specified in the design and reserved for the next increment.
+
+`GET .../branches` lists a cluster's live branches (with parent pointers for the
+tree); `GET .../branches/{branch_id}` fetches one. `DELETE
+.../branches/{branch_id}` queues a guarded `DropDatabase` agent command and
+tombstones the branch on success; it rejects deletion of a branch that still has
+child branches.
 
 `POST /v1/onboarding/workspaces` is the first self-serve signup workflow
 backend. It creates an organization, first project, first environment, and

@@ -115,6 +115,14 @@ pub enum AgentStep {
         target_database: String,
         terminate_source_connections: bool,
     },
+    DropDatabase {
+        program: PathBuf,
+        data_dir: PathBuf,
+        port: u16,
+        admin_database: String,
+        database: String,
+        terminate_connections: bool,
+    },
     CreatePhysicalReplicationSlot {
         program: PathBuf,
         data_dir: PathBuf,
@@ -494,6 +502,22 @@ impl NodeAgent {
                     source_database: source_database.clone(),
                     target_database: target_database.clone(),
                     terminate_source_connections: *terminate_source_connections,
+                }]
+            }
+            NodeAgentAction::DropDatabase {
+                data_dir,
+                port,
+                database,
+                terminate_connections,
+            } => {
+                ensure_droppable_database(database)?;
+                vec![AgentStep::DropDatabase {
+                    program: self.program("psql"),
+                    data_dir: PathBuf::from(data_dir),
+                    port: *port,
+                    admin_database: "postgres".to_owned(),
+                    database: database.clone(),
+                    terminate_connections: *terminate_connections,
                 }]
             }
             NodeAgentAction::ReportStatus => vec![AgentStep::ProbeStatus {
@@ -962,6 +986,24 @@ impl NodeAgent {
                         "created copy-on-write database clone {target_database} from {source_database}"
                     ),
                 ))
+            }
+            AgentStep::DropDatabase {
+                program,
+                data_dir,
+                port,
+                admin_database,
+                database,
+                terminate_connections,
+            } => {
+                ensure_under_root(data_dir, &self.config.runtime_root)?;
+                ensure_droppable_database(database)?;
+                if *terminate_connections {
+                    let terminate_sql = render_terminate_database_connections_sql(database)?;
+                    runner.run_sql(program, data_dir, *port, admin_database, &terminate_sql)?;
+                }
+                let drop_sql = render_drop_database_sql(database, *terminate_connections)?;
+                runner.run_sql(program, data_dir, *port, admin_database, &drop_sql)?;
+                Ok(succeeded(step, format!("dropped database {database}")))
             }
             AgentStep::CreatePhysicalReplicationSlot {
                 program,
@@ -3444,6 +3486,29 @@ fn render_copy_on_write_database_clone_sql(
     ))
 }
 
+/// Databases the node agent must never drop, regardless of caller input.
+///
+/// These are PostgreSQL's built-in admin/template databases; a branch is always
+/// a distinct cloned database.
+const PROTECTED_DATABASES: [&str; 3] = ["postgres", "template0", "template1"];
+
+fn ensure_droppable_database(database: &str) -> Result<(), NodeAgentError> {
+    validate_identifier(database)?;
+    if PROTECTED_DATABASES.contains(&database) {
+        return Err(NodeAgentError::ProtectedDatabase(database.to_owned()));
+    }
+    Ok(())
+}
+
+fn render_drop_database_sql(database: &str, force: bool) -> Result<String, NodeAgentError> {
+    ensure_droppable_database(database)?;
+    let force_clause = if force { " WITH (FORCE)" } else { "" };
+    Ok(format!(
+        "DROP DATABASE IF EXISTS {database}{force_clause};\n",
+        database = quote_ident(database),
+    ))
+}
+
 fn render_physical_replication_slot_sql(slot_name: &str) -> Result<String, NodeAgentError> {
     validate_identifier(slot_name)?;
     let slot_literal = quote_literal(slot_name);
@@ -3851,6 +3916,8 @@ pub enum NodeAgentError {
     InvalidPath(String),
     #[error("invalid postgres identifier: {0}")]
     InvalidIdentifier(String),
+    #[error("refusing to drop protected database: {0}")]
+    ProtectedDatabase(String),
     #[error("invalid clone redaction policy: {0}")]
     InvalidRedactionPolicy(String),
     #[error("invalid postgres major upgrade: {0}")]
@@ -4025,6 +4092,66 @@ mod tests {
             .contains("CREATE DATABASE \"target_db\" TEMPLATE \"source_db\" STRATEGY FILE_COPY"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn execute_drop_database_terminates_then_drops_with_force() {
+        let root = unique_temp_root("drop-db");
+        let data_dir = root.join("postgres/cluster_123");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let agent = NodeAgent::new(AgentConfig {
+            host_id: "test-host".to_owned(),
+            postgres_bin_dir: PathBuf::from("/pg18/bin"),
+            runtime_root: root.clone(),
+        });
+        let command = NodeAgentCommand {
+            command_id: "cmd_drop".to_owned(),
+            cluster_id: "cluster_123".to_owned(),
+            action: NodeAgentAction::DropDatabase {
+                data_dir: data_dir.display().to_string(),
+                port: 55_000,
+                database: "branch_db".to_owned(),
+                terminate_connections: true,
+            },
+        };
+        let runner = RecordingRunner::default();
+
+        let report = agent
+            .execute_with_runner(&command, &runner)
+            .expect("execution succeeds");
+
+        assert_eq!(report.outcomes.len(), 1);
+        let sql_calls = runner.sql_calls.borrow();
+        assert_eq!(sql_calls.len(), 2);
+        assert_eq!(sql_calls[0].3, "postgres");
+        assert!(sql_calls[0].4.contains("SELECT pg_terminate_backend(pid)"));
+        assert!(sql_calls[1]
+            .4
+            .contains("DROP DATABASE IF EXISTS \"branch_db\" WITH (FORCE)"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plan_drop_database_refuses_protected_database() {
+        let agent = NodeAgent::new(AgentConfig {
+            host_id: "test-host".to_owned(),
+            postgres_bin_dir: PathBuf::from("/pg18/bin"),
+            runtime_root: unique_temp_root("drop-db-guard"),
+        });
+        let command = NodeAgentCommand {
+            command_id: "cmd_drop_guard".to_owned(),
+            cluster_id: "cluster_123".to_owned(),
+            action: NodeAgentAction::DropDatabase {
+                data_dir: "/var/lib/palimpsest/postgres/cluster_123".to_owned(),
+                port: 55_000,
+                database: "postgres".to_owned(),
+                terminate_connections: false,
+            },
+        };
+
+        let err = agent.plan(&command).expect_err("plan must reject");
+        assert!(matches!(err, NodeAgentError::ProtectedDatabase(db) if db == "postgres"));
     }
 
     #[test]

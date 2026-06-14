@@ -1,6 +1,9 @@
 # Managed Postgres Branching API Design
 
-**Status:** Proposed (design only; no implementation yet).
+**Status:** In progress. Phase 1 (data model, core types, `DropDatabase`
+node-agent primitive, sql_store CRUD) and the Phase 2 HEAD copy-on-write branch
+endpoints (create/list/get/delete) are implemented. Point-in-time branches
+(Phase 3) and UI (Phase 4) are pending.
 **Scope:** A Neon-style database branching API for the Palimpsest managed
 Postgres PaaS, layered on the existing copy-on-write (CoW) clone and
 point-in-time-recovery (PITR) restore primitives. Standard PostgreSQL only —
@@ -240,13 +243,15 @@ that chains a `StartSyncDeployment` operation after the branch is `ready`.
 
 ## 9. Phased implementation plan
 
-1. **Migration + core types.** `V50__managed_postgres_branches.sql`,
+1. **Migration + core types.** ✅ Done. `V50__managed_postgres_branches.sql`,
    `ManagedPostgresBranch` model, `DropDatabase` action, `CreateBranch` /
    `DeleteBranch` operation kinds, sql_store CRUD.
-2. **HEAD branch path.** Create/list/get/delete endpoints wired to
+2. **HEAD branch path.** ✅ Done. Create/list/get/delete endpoints wired to
    `CreateCopyOnWriteDatabaseClone` and `DropDatabase`; lineage validation;
-   audit events; node-agent `DropDatabase` step + guard.
-3. **Point-in-time branch path.** Create with `recovery_target_lsn` via
+   `creating → ready/failed` and `deleting → deleted/failed` transitions driven
+   from agent command results; audit events; node-agent `DropDatabase` step +
+   protected-database guard.
+3. **Point-in-time branch path.** (Pending.) Create with `recovery_target_lsn` via
    `PrepareRestore`; reuse redaction-policy enforcement and PITR continuity
    checks; branch cluster teardown on delete.
 4. **UI.** Extend the Cluster detail Clones/Branches tab with the branch tree,

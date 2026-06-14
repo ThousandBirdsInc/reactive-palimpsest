@@ -22,15 +22,16 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palimpsest_paas_core::{
     AgentCommandStatus, ApiKey, AuditEvent, BackupArtifactStatus, BackupLifecycleState,
-    BillingExport, BillingExportStatus, CertificateAuthorityProviderKind,
-    CertificateAuthorityProviderStatus, CertificateLifecycleState, CloneRedactionPolicyStatus,
-    ClusterLifecycleState, ConfigVersion, ConfigVersionStatus, CustomerEnvironmentHealth,
-    DatabaseProxyRoute, DatabaseRoleCredential, DatabaseRoleKind, Domain, DomainTlsStatus,
-    DomainVerificationStatus, Environment, FailoverLifecycleState, GatewayRoute,
-    GatewayRouteMtlsBundle, HostAssignment, Incident, IncidentSeverity, IncidentStatus,
-    IpAllowlistPurpose, IpAllowlistRule, IpAllowlistStatus, JwtIssuer, JwtIssuerStatus,
-    MaintenanceDayOfWeek, MaintenanceWindow, MaintenanceWindowStatus, ManagedPostgresAcmeOrder,
-    ManagedPostgresBackup, ManagedPostgresBackupArtifact, ManagedPostgresBackupRetentionPolicy,
+    BillingExport, BillingExportStatus, BranchLifecycleState, BranchMode,
+    CertificateAuthorityProviderKind, CertificateAuthorityProviderStatus,
+    CertificateLifecycleState, CloneRedactionPolicyStatus, ClusterLifecycleState, ConfigVersion,
+    ConfigVersionStatus, CustomerEnvironmentHealth, DatabaseProxyRoute, DatabaseRoleCredential,
+    DatabaseRoleKind, Domain, DomainTlsStatus, DomainVerificationStatus, Environment,
+    FailoverLifecycleState, GatewayRoute, GatewayRouteMtlsBundle, HostAssignment, Incident,
+    IncidentSeverity, IncidentStatus, IpAllowlistPurpose, IpAllowlistRule, IpAllowlistStatus,
+    JwtIssuer, JwtIssuerStatus, MaintenanceDayOfWeek, MaintenanceWindow, MaintenanceWindowStatus,
+    ManagedPostgresAcmeOrder, ManagedPostgresBackup, ManagedPostgresBackupArtifact,
+    ManagedPostgresBackupRetentionPolicy, ManagedPostgresBranch,
     ManagedPostgresCertificateAuthorityProvider, ManagedPostgresCloneRedactionPolicy,
     ManagedPostgresCluster, ManagedPostgresDeletionTombstone, ManagedPostgresEndpoint,
     ManagedPostgresEndpointCertificate, ManagedPostgresEndpointCertificateBundle,
@@ -1159,6 +1160,16 @@ pub fn sql_control_plane_router(store: SharedSqlControlPlaneStore) -> Router {
             post(sql_api_request_managed_postgres_database_clone),
         )
         .route(
+            "/v1/managed-postgres/clusters/:cluster_id/branches",
+            post(sql_api_create_managed_postgres_branch)
+                .get(sql_api_list_managed_postgres_branches),
+        )
+        .route(
+            "/v1/managed-postgres/clusters/:cluster_id/branches/:branch_id",
+            get(sql_api_get_managed_postgres_branch)
+                .delete(sql_api_delete_managed_postgres_branch),
+        )
+        .route(
             "/v1/managed-postgres/clusters/:cluster_id/restores/:restore_id",
             get(sql_api_get_managed_postgres_restore),
         )
@@ -1946,6 +1957,27 @@ async fn sql_api_complete_agent_command(
             payload.detail.as_deref(),
         )
         .await?;
+    if let Some(state) = store
+        .advance_branch_after_agent_command(
+            &host_id,
+            &command_id,
+            payload.status,
+            payload.detail.as_deref(),
+        )
+        .await?
+    {
+        let action = match state {
+            BranchLifecycleState::Ready => "managed_postgres_branch.ready",
+            BranchLifecycleState::Deleted => "managed_postgres_branch.deleted",
+            BranchLifecycleState::Failed => "managed_postgres_branch.failed",
+            BranchLifecycleState::Creating | BranchLifecycleState::Deleting => {
+                "managed_postgres_branch.updated"
+            }
+        };
+        store
+            .append_audit_event(&audit_event("node-agent", action, &command_id))
+            .await?;
+    }
     store
         .advance_restore_drill_after_agent_command(
             &host_id,
@@ -6925,6 +6957,267 @@ async fn sql_api_request_managed_postgres_database_clone(
     }))
 }
 
+/// Validates a user-facing branch name: 1-63 chars, ASCII alphanumerics plus
+/// `_`/`-`.
+///
+/// The backing database identifier is derived separately and further sanitized
+/// to a strict Postgres identifier.
+fn validate_branch_name(value: &str) -> Result<(), SqlApiError> {
+    if value.is_empty()
+        || value.len() > 63
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return Err(SqlApiError::BadRequest(format!(
+            "invalid branch name '{value}'"
+        )));
+    }
+    Ok(())
+}
+
+async fn sql_api_create_managed_postgres_branch(
+    State(store): State<SharedSqlControlPlaneStore>,
+    headers: HeaderMap,
+    Path(cluster_id): Path<String>,
+    Json(payload): Json<CreateBranchRequest>,
+) -> Result<Json<BranchApiResponse>, SqlApiError> {
+    let auth = sql_mutation_auth_context(&store, &headers).await?;
+    let cluster = store
+        .managed_postgres_cluster(&cluster_id)
+        .await?
+        .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
+    auth.require_scope(ResourceScope::from_cluster(&cluster))?;
+
+    validate_branch_name(&payload.name)?;
+
+    // Point-in-time branching (restore into a new cluster) is the next
+    // increment; the data model and node-agent primitive already accommodate
+    // it. Only HEAD copy-on-write branches are wired today.
+    if !matches!(payload.mode, BranchMode::HeadCow) {
+        return Err(SqlApiError::BadRequest(
+            "point-in-time branch creation is not yet implemented".to_owned(),
+        ));
+    }
+
+    if cluster.lifecycle_state != ClusterLifecycleState::Ready {
+        return Err(SqlApiError::BadRequest(
+            "copy-on-write branch requires a ready cluster".to_owned(),
+        ));
+    }
+    if cluster.postgres_version.major() < MIN_SUPPORTED_POSTGRES_MAJOR {
+        return Err(SqlApiError::BadRequest(format!(
+            "copy-on-write branch requires PostgreSQL {MIN_SUPPORTED_POSTGRES_MAJOR}+"
+        )));
+    }
+    let assignment = cluster
+        .host_assignment
+        .as_ref()
+        .ok_or_else(|| SqlApiError::BadRequest("cluster has no host assignment".to_owned()))?;
+
+    // Resolve the source database: a parent branch's database, or — for a root
+    // branch — the requested source database (defaulting to `postgres`).
+    let source_database = match payload.parent_branch_id.as_deref() {
+        Some(parent_id) => {
+            let parent = store
+                .managed_postgres_branch(parent_id)
+                .await?
+                .ok_or_else(|| SqlApiError::MissingResource(parent_id.to_owned()))?;
+            if parent.cluster_id != cluster.cluster_id {
+                return Err(SqlApiError::BadRequest(
+                    "parent branch belongs to a different cluster".to_owned(),
+                ));
+            }
+            if parent.lifecycle_state != BranchLifecycleState::Ready {
+                return Err(SqlApiError::BadRequest(
+                    "parent branch is not ready".to_owned(),
+                ));
+            }
+            parent.branch_database.clone().ok_or_else(|| {
+                SqlApiError::BadRequest(
+                    "parent branch has no copy-on-write database to branch from".to_owned(),
+                )
+            })?
+        }
+        None => payload
+            .source_database
+            .clone()
+            .unwrap_or_else(|| "postgres".to_owned()),
+    };
+    validate_database_identifier(&source_database)?;
+
+    let branch_database = sanitize_identifier_component(&format!("branch_{}", payload.name));
+    validate_database_identifier(&branch_database)?;
+    if branch_database == source_database {
+        return Err(SqlApiError::BadRequest(
+            "derived branch database must differ from the source database".to_owned(),
+        ));
+    }
+
+    let branch_id = format!(
+        "{}:branch:{}",
+        cluster.cluster_id,
+        sanitize_identifier_component(&payload.name)
+    );
+    let command = NodeAgentCommand {
+        command_id: format!("{}:create-branch:{}", cluster.cluster_id, monotonic_nanos()),
+        cluster_id: cluster.cluster_id.clone(),
+        action: NodeAgentAction::CreateCopyOnWriteDatabaseClone {
+            data_dir: assignment.data_dir.clone(),
+            port: assignment.port,
+            source_database: source_database.clone(),
+            target_database: branch_database.clone(),
+            terminate_source_connections: payload.terminate_source_connections,
+        },
+    };
+
+    let branch = ManagedPostgresBranch {
+        branch_id: branch_id.clone(),
+        cluster_id: cluster.cluster_id.clone(),
+        name: payload.name.clone(),
+        parent_branch_id: payload.parent_branch_id.clone(),
+        mode: BranchMode::HeadCow,
+        source_database,
+        branch_database: Some(branch_database),
+        branch_cluster_id: None,
+        created_from_lsn: None,
+        redaction_policy_id: payload.redaction_policy_id.clone(),
+        lifecycle_state: BranchLifecycleState::Creating,
+        error_message: None,
+    };
+    store.insert_managed_postgres_branch(&branch).await?;
+
+    let operation = operation_for_agent_command(OperationKind::CreateBranch, &branch_id, &command);
+    store.insert_operation(&operation).await?;
+    store
+        .enqueue_agent_command(&assignment.host_id, Some(&operation.operation_id), &command)
+        .await?;
+    store
+        .append_audit_event(&audit_event(
+            auth.actor_id(),
+            "managed_postgres_branch.create",
+            &branch_id,
+        ))
+        .await?;
+
+    Ok(Json(BranchApiResponse {
+        branch,
+        command,
+        operation,
+    }))
+}
+
+async fn sql_api_list_managed_postgres_branches(
+    State(store): State<SharedSqlControlPlaneStore>,
+    headers: HeaderMap,
+    Path(cluster_id): Path<String>,
+) -> Result<Json<BranchesResponse>, SqlApiError> {
+    let auth = sql_read_auth_context(&store, &headers).await?;
+    let cluster = store
+        .managed_postgres_cluster(&cluster_id)
+        .await?
+        .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
+    auth.require_scope(ResourceScope::from_cluster(&cluster))?;
+    let branches = store.managed_postgres_branches(&cluster_id).await?;
+    Ok(Json(BranchesResponse { branches }))
+}
+
+async fn sql_api_get_managed_postgres_branch(
+    State(store): State<SharedSqlControlPlaneStore>,
+    headers: HeaderMap,
+    Path((cluster_id, branch_id)): Path<(String, String)>,
+) -> Result<Json<ManagedPostgresBranch>, SqlApiError> {
+    let auth = sql_read_auth_context(&store, &headers).await?;
+    let cluster = store
+        .managed_postgres_cluster(&cluster_id)
+        .await?
+        .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
+    auth.require_scope(ResourceScope::from_cluster(&cluster))?;
+    let branch = store
+        .managed_postgres_branch(&branch_id)
+        .await?
+        .ok_or_else(|| SqlApiError::MissingResource(branch_id.clone()))?;
+    if branch.cluster_id != cluster_id {
+        return Err(SqlApiError::MissingResource(branch_id));
+    }
+    Ok(Json(branch))
+}
+
+async fn sql_api_delete_managed_postgres_branch(
+    State(store): State<SharedSqlControlPlaneStore>,
+    headers: HeaderMap,
+    Path((cluster_id, branch_id)): Path<(String, String)>,
+) -> Result<Json<BranchApiResponse>, SqlApiError> {
+    let auth = sql_mutation_auth_context(&store, &headers).await?;
+    let cluster = store
+        .managed_postgres_cluster(&cluster_id)
+        .await?
+        .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
+    auth.require_scope(ResourceScope::from_cluster(&cluster))?;
+    let branch = store
+        .managed_postgres_branch(&branch_id)
+        .await?
+        .ok_or_else(|| SqlApiError::MissingResource(branch_id.clone()))?;
+    if branch.cluster_id != cluster_id {
+        return Err(SqlApiError::MissingResource(branch_id));
+    }
+
+    if store
+        .managed_postgres_branch_child_count(&branch_id)
+        .await?
+        > 0
+    {
+        return Err(SqlApiError::Conflict(
+            "branch has child branches; delete them first".to_owned(),
+        ));
+    }
+
+    let branch_database = branch.branch_database.clone().ok_or_else(|| {
+        SqlApiError::BadRequest("point-in-time branch deletion is not yet implemented".to_owned())
+    })?;
+    let assignment = cluster
+        .host_assignment
+        .as_ref()
+        .ok_or_else(|| SqlApiError::BadRequest("cluster has no host assignment".to_owned()))?;
+
+    let command = NodeAgentCommand {
+        command_id: format!("{}:delete-branch:{}", cluster.cluster_id, monotonic_nanos()),
+        cluster_id: cluster.cluster_id.clone(),
+        action: NodeAgentAction::DropDatabase {
+            data_dir: assignment.data_dir.clone(),
+            port: assignment.port,
+            database: branch_database,
+            terminate_connections: true,
+        },
+    };
+
+    store
+        .update_managed_postgres_branch_state(&branch_id, BranchLifecycleState::Deleting, None)
+        .await?;
+    let operation = operation_for_agent_command(OperationKind::DeleteBranch, &branch_id, &command);
+    store.insert_operation(&operation).await?;
+    store
+        .enqueue_agent_command(&assignment.host_id, Some(&operation.operation_id), &command)
+        .await?;
+    store
+        .append_audit_event(&audit_event(
+            auth.actor_id(),
+            "managed_postgres_branch.delete",
+            &branch_id,
+        ))
+        .await?;
+
+    let branch = store
+        .managed_postgres_branch(&branch_id)
+        .await?
+        .ok_or_else(|| SqlApiError::MissingResource(branch_id.clone()))?;
+    Ok(Json(BranchApiResponse {
+        branch,
+        command,
+        operation,
+    }))
+}
+
 async fn sql_api_list_managed_postgres_restores(
     State(store): State<SharedSqlControlPlaneStore>,
     headers: HeaderMap,
@@ -8025,6 +8318,8 @@ fn operation_kind_slug(kind: OperationKind) -> &'static str {
         OperationKind::ArchiveWalSegment => "archive_wal_segment",
         OperationKind::RestoreCluster => "restore_cluster",
         OperationKind::CreateDatabaseClone => "create_database_clone",
+        OperationKind::CreateBranch => "create_branch",
+        OperationKind::DeleteBranch => "delete_branch",
         OperationKind::PrepareStandby => "prepare_standby",
         OperationKind::CheckStandby => "check_standby",
         OperationKind::FencePrimary => "fence_primary",
@@ -8045,6 +8340,7 @@ fn node_agent_action_step(action: &NodeAgentAction) -> &'static str {
         NodeAgentAction::CreateCopyOnWriteDatabaseClone { .. } => {
             "create_copy_on_write_database_clone"
         }
+        NodeAgentAction::DropDatabase { .. } => "drop_database",
         NodeAgentAction::ReportStatus => "report_status",
         NodeAgentAction::CheckPostgresStandbyLag { .. } => "check_postgres_standby_lag",
         NodeAgentAction::RunBaseBackup { .. } => "run_base_backup",
@@ -9655,6 +9951,43 @@ pub struct DatabaseCloneApiResponse {
     operation: OperationRecord,
 }
 
+fn default_branch_mode() -> BranchMode {
+    BranchMode::HeadCow
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateBranchRequest {
+    name: String,
+    #[serde(default)]
+    parent_branch_id: Option<String>,
+    #[serde(default = "default_branch_mode")]
+    mode: BranchMode,
+    /// Source database for a root branch (no parent). Defaults to `postgres`.
+    #[serde(default)]
+    source_database: Option<String>,
+    /// Recovery target LSN for point-in-time branches. Accepted now; consumed
+    /// when point-in-time branching lands.
+    #[serde(default)]
+    #[allow(dead_code)]
+    recovery_target_lsn: Option<String>,
+    #[serde(default)]
+    redaction_policy_id: Option<String>,
+    #[serde(default)]
+    terminate_source_connections: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BranchApiResponse {
+    branch: ManagedPostgresBranch,
+    command: NodeAgentCommand,
+    operation: OperationRecord,
+}
+
+#[derive(Debug, Serialize)]
+struct BranchesResponse {
+    branches: Vec<ManagedPostgresBranch>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RestoreDrillRequest {
     backup_id: Option<String>,
@@ -11197,6 +11530,7 @@ pub enum SqlApiError {
     Store(sql_store::SqlStoreError),
     MissingResource(String),
     BadRequest(String),
+    Conflict(String),
     Unauthorized,
 }
 
@@ -11241,6 +11575,7 @@ impl IntoResponse for SqlApiError {
                 format!("resource not found: {resource}"),
             ),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "missing, invalid, or out-of-scope authorization".to_owned(),

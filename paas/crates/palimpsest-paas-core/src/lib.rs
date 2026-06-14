@@ -712,6 +712,51 @@ pub struct ManagedPostgresRestore {
     pub error_message: Option<String>,
 }
 
+/// A named, addressable database state with a parent pointer.
+///
+/// Modeled on Neon database branches and backed by either a copy-on-write
+/// clone (`HeadCow`) or a point-in-time restore (`PointInTime`); see
+/// `paas/BRANCHING-API-DESIGN.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedPostgresBranch {
+    pub branch_id: String,
+    pub cluster_id: String,
+    pub name: String,
+    pub parent_branch_id: Option<String>,
+    pub mode: BranchMode,
+    pub source_database: String,
+    /// Set for `HeadCow` branches: the cloned database in the same instance.
+    pub branch_database: Option<String>,
+    /// Set for `PointInTime` branches: the restored cluster backing the branch.
+    pub branch_cluster_id: Option<String>,
+    /// `None` for `HeadCow` (means "HEAD at creation"); the recovery target LSN
+    /// for `PointInTime`.
+    pub created_from_lsn: Option<String>,
+    pub redaction_policy_id: Option<String>,
+    pub lifecycle_state: BranchLifecycleState,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchMode {
+    /// Instant copy-on-write clone of the parent database within the same
+    /// cluster instance (`CREATE DATABASE ... STRATEGY FILE_COPY`).
+    HeadCow,
+    /// Point-in-time restore of the parent into its own cluster instance.
+    PointInTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchLifecycleState {
+    Creating,
+    Ready,
+    Failed,
+    Deleting,
+    Deleted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedPostgresRestoreDrill {
     pub drill_id: String,
@@ -998,6 +1043,13 @@ pub enum NodeAgentAction {
         #[serde(default)]
         terminate_source_connections: bool,
     },
+    DropDatabase {
+        data_dir: String,
+        port: u16,
+        database: String,
+        #[serde(default)]
+        terminate_connections: bool,
+    },
     ReportStatus,
     CheckPostgresStandbyLag {
         source_data_dir: String,
@@ -1218,6 +1270,8 @@ pub enum OperationKind {
     ArchiveWalSegment,
     RestoreCluster,
     CreateDatabaseClone,
+    CreateBranch,
+    DeleteBranch,
     PrepareStandby,
     CheckStandby,
     FencePrimary,
