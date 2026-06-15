@@ -87,6 +87,47 @@ impl ClusterRuntime {
             .map_err(|err| RuntimeAdapterError(err.to_string()))
     }
 
+    /// Create an on-demand CloudNativePG `Backup` for a cluster (no-op in
+    /// dry-run). The cluster must have object-storage backups configured.
+    pub fn create_backup(
+        &self,
+        cluster: &ManagedPostgresCluster,
+        backup_id: &str,
+    ) -> Result<(), RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let backup =
+            palimpsest_paas_runtime::render_backup_resource(cluster, backup_id, &self.config);
+        let json =
+            serde_json::to_string(&backup).map_err(|err| RuntimeAdapterError(err.to_string()))?;
+        self.applier
+            .apply(&json)
+            .map_err(|err| RuntimeAdapterError(err.to_string()))
+    }
+
+    /// Read the phase CloudNativePG reports for an on-demand backup
+    /// (e.g. `running`, `completed`, `failed`); `None` if not found / dry-run.
+    pub fn backup_phase(
+        &self,
+        cluster: &ManagedPostgresCluster,
+        backup_id: &str,
+    ) -> Result<Option<String>, RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(None);
+        }
+        let namespace = self.config.namespace_for(cluster);
+        let name = palimpsest_paas_runtime::backup_resource_name(cluster, backup_id);
+        self.applier
+            .resource_field(
+                "backups.postgresql.cnpg.io",
+                &name,
+                &namespace,
+                "{.status.phase}",
+            )
+            .map_err(|err| RuntimeAdapterError(err.to_string()))
+    }
+
     /// Whether CloudNativePG reports the cluster's instances ready.
     ///
     /// In dry-run mode this is always `true` so local provisioning converges.

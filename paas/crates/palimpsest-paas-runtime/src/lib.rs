@@ -80,6 +80,9 @@ pub struct RuntimeConfig {
     /// Name of the Kubernetes `Secret` holding object-store credentials for
     /// backups (referenced by the CloudNativePG `barmanObjectStore`).
     pub backup_credentials_secret: Option<String>,
+    /// Object-store endpoint URL for S3-compatible stores (e.g. MinIO). `None`
+    /// uses the provider default (AWS S3).
+    pub backup_object_store_endpoint: Option<String>,
     /// When true, each environment gets its own namespace
     /// (`palimpsest-<environment_id>`); otherwise everything lands in
     /// [`RuntimeConfig::default_namespace`].
@@ -95,6 +98,7 @@ impl Default for RuntimeConfig {
             storage_class: None,
             backup_object_store_base: None,
             backup_credentials_secret: None,
+            backup_object_store_endpoint: None,
             namespace_per_environment: true,
             default_namespace: "palimpsest-paas".to_owned(),
         }
@@ -115,6 +119,8 @@ impl RuntimeConfig {
             non_empty_env("PALIMPSEST_PAAS_RUNTIME_BACKUP_OBJECT_STORE");
         config.backup_credentials_secret =
             non_empty_env("PALIMPSEST_PAAS_RUNTIME_BACKUP_CREDENTIALS_SECRET");
+        config.backup_object_store_endpoint =
+            non_empty_env("PALIMPSEST_PAAS_RUNTIME_BACKUP_ENDPOINT");
         if let Some(value) = non_empty_env("PALIMPSEST_PAAS_RUNTIME_DEFAULT_NAMESPACE") {
             config.default_namespace = value;
         }
@@ -279,6 +285,7 @@ fn render_backup(
         retention_policy: format!("{retention_days}d"),
         barman_object_store: CnpgBarmanObjectStore {
             destination_path: format!("{}/{}", base.trim_end_matches('/'), cluster.cluster_id),
+            endpoint_url: config.backup_object_store_endpoint.clone(),
             s3_credentials: config.backup_credentials_secret.as_ref().map(|secret| {
                 CnpgS3Credentials {
                     access_key_id: CnpgSecretKeyRef {
@@ -291,6 +298,41 @@ fn render_backup(
                     },
                 }
             }),
+        },
+    }
+}
+
+/// Kubernetes object name for an on-demand backup of a cluster.
+#[must_use]
+pub fn backup_resource_name(cluster: &ManagedPostgresCluster, backup_id: &str) -> String {
+    format!("{}-{}", resource_name(cluster), sanitize_dns(backup_id))
+}
+
+/// Render a CloudNativePG `Backup` resource for an on-demand base backup.
+///
+/// The backup uses the `barmanObjectStore` method, so the cluster must be
+/// configured with object-storage backups (see [`render_backup`]); otherwise
+/// the operator rejects the backup for lack of a target.
+#[must_use]
+pub fn render_backup_resource(
+    cluster: &ManagedPostgresCluster,
+    backup_id: &str,
+    config: &RuntimeConfig,
+) -> CnpgBackupResource {
+    CnpgBackupResource {
+        api_version: CNPG_API_VERSION.to_owned(),
+        kind: "Backup".to_owned(),
+        metadata: ObjectMeta {
+            name: backup_resource_name(cluster, backup_id),
+            namespace: config.namespace_for(cluster),
+            labels: ownership_labels(cluster),
+            annotations: BTreeMap::new(),
+        },
+        spec: CnpgBackupResourceSpec {
+            cluster: CnpgLocalRef {
+                name: resource_name(cluster),
+            },
+            method: "barmanObjectStore".to_owned(),
         },
     }
 }
@@ -513,6 +555,32 @@ impl KubectlApplier {
         Ok(stdout.trim().parse().unwrap_or(0))
     }
 
+    /// Read a single jsonpath field from a named resource. Returns `None` when
+    /// the resource does not exist (or the field is empty).
+    pub fn resource_field(
+        &self,
+        resource: &str,
+        name: &str,
+        namespace: &str,
+        jsonpath: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        let stdout = self.run(
+            &[
+                "get",
+                resource,
+                name,
+                "-n",
+                namespace,
+                "--ignore-not-found",
+                "-o",
+                &format!("jsonpath={jsonpath}"),
+            ],
+            None,
+        )?;
+        let trimmed = stdout.trim();
+        Ok((!trimmed.is_empty()).then(|| trimmed.to_owned()))
+    }
+
     fn run(&self, args: &[&str], stdin: Option<&str>) -> Result<String, RuntimeError> {
         let mut command = Command::new(&self.binary);
         if let Some(context) = &self.context {
@@ -644,6 +712,8 @@ pub struct CnpgBackup {
 pub struct CnpgBarmanObjectStore {
     #[serde(rename = "destinationPath")]
     pub destination_path: String,
+    #[serde(rename = "endpointURL", skip_serializing_if = "Option::is_none")]
+    pub endpoint_url: Option<String>,
     #[serde(rename = "s3Credentials", skip_serializing_if = "Option::is_none")]
     pub s3_credentials: Option<CnpgS3Credentials>,
 }
@@ -682,6 +752,23 @@ pub struct CnpgScheduledBackupSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CnpgLocalRef {
     pub name: String,
+}
+
+/// A CloudNativePG `Backup` resource: an on-demand base backup of a cluster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CnpgBackupResource {
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+    pub kind: String,
+    pub metadata: ObjectMeta,
+    pub spec: CnpgBackupResourceSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CnpgBackupResourceSpec {
+    pub cluster: CnpgLocalRef,
+    /// Backup target: `barmanObjectStore` (object storage) or `volumeSnapshot`.
+    pub method: String,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -850,6 +937,21 @@ mod tests {
         for doc in stream.split("\n---\n") {
             serde_yaml::from_str::<serde_yaml::Value>(doc).expect("each document parses as YAML");
         }
+    }
+
+    #[test]
+    fn renders_on_demand_backup_resource() {
+        let cluster = sample_cluster("dev");
+        let backup = render_backup_resource(&cluster, "backup_42", &RuntimeConfig::default());
+        assert_eq!(backup.kind, "Backup");
+        assert_eq!(backup.spec.cluster.name, resource_name(&cluster));
+        assert_eq!(backup.spec.method, "barmanObjectStore");
+        assert_eq!(
+            backup.metadata.name,
+            backup_resource_name(&cluster, "backup_42")
+        );
+        // The name must be DNS-safe (underscores sanitized).
+        assert!(!backup.metadata.name.contains('_'));
     }
 
     #[test]

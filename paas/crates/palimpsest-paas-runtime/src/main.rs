@@ -55,6 +55,21 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        [command, cluster_path, backup_id] if command == "backup" => {
+            let cluster = read_cluster(cluster_path)?;
+            let config = RuntimeConfig::from_env();
+            let backup = palimpsest_paas_runtime::render_backup_resource(&cluster, backup_id, &config);
+            let json = serde_json::to_string_pretty(&backup).map_err(|err| err.to_string())?;
+            KubectlApplier::default()
+                .apply(&json)
+                .map_err(|err| err.to_string())?;
+            println!(
+                "requested CloudNativePG backup {} for cluster {}",
+                palimpsest_paas_runtime::backup_resource_name(&cluster, backup_id),
+                cluster.cluster_id
+            );
+            Ok(())
+        }
         [command, cluster_path] if command == "delete" => {
             let cluster = read_cluster(cluster_path)?;
             let manifests =
@@ -74,9 +89,10 @@ fn run() -> Result<(), String> {
             print_help();
             Ok(())
         }
-        _ => {
-            Err("usage: palimpsest-paas-runtime render|reconcile|delete <cluster.json>".to_owned())
-        }
+        _ => Err(
+            "usage: palimpsest-paas-runtime render|reconcile|delete <cluster.json> | backup <cluster.json> <backup_id>"
+                .to_owned(),
+        ),
     }
 }
 
@@ -91,7 +107,7 @@ fn print_help() {
         "palimpsest-paas-runtime\n\n\
          Renders and reconciles CloudNativePG manifests for managed Postgres.\n\n\
          Usage:\n  palimpsest-paas-runtime <command> <cluster.json>\n\n\
-         Commands:\n  render <cluster.json>     Render CloudNativePG manifests to stdout (YAML)\n  reconcile <cluster.json>  Render and `kubectl apply --server-side` the manifests\n  delete <cluster.json>     Render and `kubectl delete` the manifests\n  help                      Show this message\n\n\
+         Commands:\n  render <cluster.json>          Render CloudNativePG manifests to stdout\n  reconcile <cluster.json>       Render and `kubectl apply --server-side`\n  delete <cluster.json>          Render and `kubectl delete` the manifests\n  backup <cluster.json> <id>     Request an on-demand CloudNativePG backup\n  help                           Show this message\n\n\
          Configuration (env):\n  PALIMPSEST_PAAS_RUNTIME_POSTGRES_IMAGE            managed Postgres image repo\n  PALIMPSEST_PAAS_RUNTIME_STORAGE_CLASS            volume StorageClass\n  PALIMPSEST_PAAS_RUNTIME_BACKUP_OBJECT_STORE      base object-store URI for backups\n  PALIMPSEST_PAAS_RUNTIME_BACKUP_CREDENTIALS_SECRET  backup credentials Secret name\n  PALIMPSEST_PAAS_RUNTIME_DEFAULT_NAMESPACE        namespace when not per-environment\n  PALIMPSEST_PAAS_RUNTIME_NAMESPACE_PER_ENVIRONMENT  1/true for per-environment namespaces\n  PALIMPSEST_PAAS_KUBECTL                          kubectl binary (default: kubectl)\n  PALIMPSEST_PAAS_KUBE_CONTEXT                     kube context to target"
     );
 }

@@ -4867,13 +4867,11 @@ async fn sql_api_delete_managed_postgres_cluster(
         cluster,
         command: Some(command),
         operation: Some(operation),
-        final_backup: final_backup
-            .as_ref()
-            .map(|response| response.backup.clone()),
-        final_backup_command: final_backup
-            .as_ref()
-            .map(|response| response.command.clone()),
-        final_backup_operation: final_backup.map(|response| response.operation),
+        final_backup: final_backup.map(|response| response.backup),
+        // The final backup now runs as a CloudNativePG `Backup` resource rather
+        // than a host command, so no agent command/operation is produced.
+        final_backup_command: None,
+        final_backup_operation: None,
         stop_command,
         stop_operation,
     }))
@@ -7485,23 +7483,6 @@ async fn sql_api_config_diff(
     }))
 }
 
-fn backup_root_for_data_dir(data_dir: &str, cluster_id: &str) -> Result<PathBuf, SqlApiError> {
-    let data_dir = FsPath::new(data_dir);
-    let Some(postgres_root) = data_dir.parent() else {
-        return Err(SqlApiError::BadRequest(format!(
-            "data dir has no parent: {}",
-            data_dir.display()
-        )));
-    };
-    let Some(runtime_root) = postgres_root.parent() else {
-        return Err(SqlApiError::BadRequest(format!(
-            "postgres root has no parent: {}",
-            postgres_root.display()
-        )));
-    };
-    Ok(runtime_root.join("backups").join(cluster_id))
-}
-
 fn wal_archive_root_for_data_dir(data_dir: &str, cluster_id: &str) -> Result<PathBuf, SqlApiError> {
     let data_dir = FsPath::new(data_dir);
     let Some(postgres_root) = data_dir.parent() else {
@@ -7573,44 +7554,27 @@ async fn queue_managed_postgres_backup(
     store: &sql_store::SqlControlPlaneStore,
     cluster: &ManagedPostgresCluster,
 ) -> Result<BackupApiResponse, SqlApiError> {
-    let assignment = cluster
-        .host_assignment
-        .as_ref()
-        .ok_or_else(|| SqlApiError::BadRequest("cluster has no host assignment".to_owned()))?;
-
     let backup_id = format!("backup_{}", monotonic_nanos());
-    let backup_root = backup_root_for_data_dir(&assignment.data_dir, &cluster.cluster_id)?;
+
+    // Apply a CloudNativePG `Backup` resource; the operator streams a base
+    // backup to the cluster's configured object store. We record the Backup
+    // resource name so its status can be reconciled back later.
+    let runtime = runtime::ClusterRuntime::from_env();
+    let backup_resource = palimpsest_paas_runtime::backup_resource_name(cluster, &backup_id);
+    runtime
+        .create_backup(cluster, &backup_id)
+        .map_err(runtime_error)?;
+
     let backup = ManagedPostgresBackup {
-        backup_id: backup_id.clone(),
+        backup_id,
         cluster_id: cluster.cluster_id.clone(),
         status: BackupLifecycleState::Running,
-        backup_dir: backup_root.display().to_string(),
+        backup_dir: backup_resource,
         error_message: None,
     };
-    let command = NodeAgentCommand {
-        command_id: format!("{}:run-base-backup:{}", cluster.cluster_id, backup_id),
-        cluster_id: cluster.cluster_id.clone(),
-        action: NodeAgentAction::RunBaseBackup {
-            backup_id,
-            data_dir: assignment.data_dir.clone(),
-            postgres_url: format!("postgres://postgres@127.0.0.1:{}/postgres", assignment.port),
-            backup_dir: backup.backup_dir.clone(),
-        },
-    };
-
     store.insert_managed_postgres_backup(&backup).await?;
-    let operation =
-        operation_for_agent_command(OperationKind::BackupCluster, &cluster.cluster_id, &command);
-    store.insert_operation(&operation).await?;
-    store
-        .enqueue_agent_command(&assignment.host_id, Some(&operation.operation_id), &command)
-        .await?;
 
-    Ok(BackupApiResponse {
-        backup,
-        command,
-        operation,
-    })
+    Ok(BackupApiResponse { backup })
 }
 
 async fn queue_managed_postgres_backup_cleanup(
@@ -9996,8 +9960,6 @@ pub struct DeleteClusterApiResponse {
 #[derive(Debug, Serialize)]
 pub struct BackupApiResponse {
     backup: ManagedPostgresBackup,
-    command: NodeAgentCommand,
-    operation: OperationRecord,
 }
 
 #[derive(Debug, Serialize)]
