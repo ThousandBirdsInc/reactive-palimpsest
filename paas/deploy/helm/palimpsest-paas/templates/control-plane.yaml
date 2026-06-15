@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "palimpsest-paas.fullname" . }}-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palimpsest-paas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: {{ .Values.controlPlane.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: control-plane
+  template:
+    metadata:
+      labels:
+        {{- include "palimpsest-paas.labels" . | nindent 8 }}
+        app.kubernetes.io/component: control-plane
+    spec:
+      serviceAccountName: {{ include "palimpsest-paas.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: control-plane
+          image: "{{ .Values.controlPlane.image.repository }}:{{ .Values.controlPlane.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - exec palimpsest-paas-control-plane serve-sql-api 0.0.0.0:{{ .Values.controlPlane.listenPort }} "$DATABASE_URL"
+          env:
+            - name: HOME
+              value: /tmp
+            - name: KUBECACHEDIR
+              value: /tmp/.kube-cache
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "palimpsest-paas.fullname" . }}-control-db-app
+                  key: uri
+            - name: PALIMPSEST_PAAS_SECRET_PROVIDER
+              value: {{ .Values.controlPlane.secretProvider | quote }}
+            - name: PALIMPSEST_PAAS_SECRET_KEY_REF
+              value: {{ .Values.controlPlane.secretKeyRef | quote }}
+            {{- if .Values.controlPlane.existingSecretEncryptionSecret }}
+            - name: PALIMPSEST_PAAS_SECRET_KEY_BASE64
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.controlPlane.existingSecretEncryptionSecret }}
+                  key: PALIMPSEST_PAAS_SECRET_KEY_BASE64
+            {{- end }}
+            - name: PALIMPSEST_PAAS_RUNTIME_POSTGRES_IMAGE
+              value: {{ .Values.runtime.postgresImageRepository | quote }}
+            - name: PALIMPSEST_PAAS_RUNTIME_NAMESPACE_PER_ENVIRONMENT
+              value: {{ .Values.runtime.namespacePerEnvironment | quote }}
+            - name: PALIMPSEST_PAAS_RUNTIME_DEFAULT_NAMESPACE
+              value: {{ .Values.runtime.defaultNamespace | default .Release.Namespace | quote }}
+            {{- with .Values.runtime.storageClass }}
+            - name: PALIMPSEST_PAAS_RUNTIME_STORAGE_CLASS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.runtime.backupObjectStoreBase }}
+            - name: PALIMPSEST_PAAS_RUNTIME_BACKUP_OBJECT_STORE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.runtime.backupCredentialsSecret }}
+            - name: PALIMPSEST_PAAS_RUNTIME_BACKUP_CREDENTIALS_SECRET
+              value: {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.controlPlane.listenPort }}
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "palimpsest-paas.fullname" . }}-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "palimpsest-paas.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  type: {{ .Values.controlPlane.service.type }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: control-plane
+  ports:
+    - name: http
+      port: {{ .Values.controlPlane.service.port }}
+      targetPort: http

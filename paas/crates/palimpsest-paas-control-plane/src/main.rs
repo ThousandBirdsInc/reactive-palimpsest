@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::{
-    collections::BTreeSet,
     fs,
     net::SocketAddr,
     path::PathBuf,
@@ -15,9 +14,9 @@ use palimpsest_paas_control_plane::{
     control_plane_router, run_acme_order_scheduler_once, run_backup_scheduler_once,
     run_maintenance_scheduler_once, run_pitr_check_scheduler_once,
     run_restore_drill_scheduler_once, sql_control_plane_router, sql_store, ControlPlaneService,
-    HostCapacity, Reconciler,
 };
 use palimpsest_paas_core::{ManagedPostgresCluster, PostgresVersion};
+use palimpsest_paas_runtime::{RenderedManifests, RuntimeConfig};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -96,25 +95,12 @@ async fn run() -> Result<(), String> {
                 .await
                 .map_err(|err| format!("serve SQL API: {err}"))
         }
-        [command, cluster_path] if command == "plan" => {
+        [command, cluster_path] if command == "render" || command == "plan" => {
             let cluster = read_cluster(cluster_path)?;
-            let hosts = [HostCapacity {
-                host_id: "local-dev-host".to_owned(),
-                data_root: "/var/lib/palimpsest/postgres".to_owned(),
-                first_port: 55_000,
-                max_clusters: 16,
-                assigned_clusters: 0,
-                used_ports: BTreeSet::new(),
-                storage_gib: 1024,
-                used_storage_gib: 0,
-            }];
-            let plan = Reconciler::new()
-                .reconcile(&cluster, &hosts)
-                .map_err(|err| err.to_string())?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&plan.commands).map_err(|err| err.to_string())?
-            );
+            let manifests =
+                RenderedManifests::render(&cluster, None, &[], &RuntimeConfig::from_env())
+                    .map_err(|err| err.to_string())?;
+            print!("{}", manifests.to_yaml().map_err(|err| err.to_string())?);
             Ok(())
         }
         [] => {
@@ -122,7 +108,7 @@ async fn run() -> Result<(), String> {
             Ok(())
         }
         _ => Err(
-            "usage: palimpsest-paas-control-plane plan <cluster.json> | serve-api <addr> | serve-sql-api <addr> <postgres-url>"
+            "usage: palimpsest-paas-control-plane render <cluster.json> | serve-api <addr> | serve-sql-api <addr> <postgres-url>"
                 .to_owned(),
         ),
     }
@@ -374,8 +360,8 @@ fn read_cluster(path: &str) -> Result<ManagedPostgresCluster, String> {
 fn print_help() {
     println!(
         "palimpsest-paas-control-plane\n\n\
-         Usage:\n  palimpsest-paas-control-plane plan <cluster.json>\n  palimpsest-paas-control-plane serve-api <addr>\n  palimpsest-paas-control-plane serve-sql-api <addr> <postgres-url>\n\n\
-         Commands:\n  plan <cluster.json>             Render node-agent commands for one cluster\n  serve-api <addr>                Start the in-memory control-plane HTTP API\n  serve-sql-api <addr> <url>      Start the SQL-backed control-plane HTTP API\n  help                            Show this message\n\n\
+         Usage:\n  palimpsest-paas-control-plane render <cluster.json>\n  palimpsest-paas-control-plane serve-api <addr>\n  palimpsest-paas-control-plane serve-sql-api <addr> <postgres-url>\n\n\
+         Commands:\n  render <cluster.json>           Render CloudNativePG manifests for one cluster\n  serve-api <addr>                Start the in-memory control-plane HTTP API\n  serve-sql-api <addr> <url>      Start the SQL-backed control-plane HTTP API\n  help                            Show this message\n\n\
          Environment:\n  PALIMPSEST_PAAS_BACKUP_SCHEDULER_INTERVAL_SECONDS enables the SQL backup scheduler loop when set to a positive number of seconds\n  PALIMPSEST_PAAS_RESTORE_DRILL_SCHEDULER_INTERVAL_SECONDS enables the SQL restore-drill scheduler loop\n  PALIMPSEST_PAAS_RESTORE_DRILL_MAX_AGE_HOURS overrides the restore-drill freshness window\n  PALIMPSEST_PAAS_PITR_CHECK_SCHEDULER_INTERVAL_SECONDS enables the SQL PITR-check scheduler loop\n  PALIMPSEST_PAAS_PITR_CHECK_MAX_AGE_HOURS overrides the PITR-check freshness window\n  PALIMPSEST_PAAS_ACME_ORDER_SCHEDULER_INTERVAL_SECONDS enables the SQL ACME order scheduler loop\n  PALIMPSEST_PAAS_MAINTENANCE_SCHEDULER_INTERVAL_SECONDS enables the SQL maintenance scheduler loop\n  PALIMPSEST_PAAS_MAINTENANCE_TARGET_POSTGRES_VERSION sets the PostgreSQL 18+ minor target for auto updates"
     );
 }

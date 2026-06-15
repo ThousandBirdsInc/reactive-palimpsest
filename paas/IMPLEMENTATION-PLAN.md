@@ -24,9 +24,13 @@ Standalone Palimpsest remains a first-class deliverable.
    `palimpsest-wal`, `palimpsest-dataflow`, and client packages.
 5. Keep managed Postgres support PostgreSQL 18+ only. Local development uses
    PostgreSQL 18+ as well.
-6. Do not use Kubernetes for managed database runtime. The PaaS uses a Rust
-   control plane, Rust node agents, and host-based process supervision that we
-   own.
+6. Run the managed database runtime on Kubernetes with the CloudNativePG
+   operator, packaged via Helm. The control plane renders desired state into
+   CloudNativePG `Cluster` resources and applies them; CloudNativePG owns
+   host-local Postgres lifecycle. (This reverses the original owned-runtime
+   directive — see [ADR 0003](adr/0003-kubernetes-cloudnativepg-runtime.md).
+   Implementation notes below that describe the Rust node agent and host fleet
+   are retained as historical record; that runtime has been removed.)
 7. Make every phase independently testable and reversible.
 
 ## 2. Proposed Directory Layout

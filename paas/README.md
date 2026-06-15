@@ -23,10 +23,10 @@ the current client SDKs, or the existing test harnesses.
 > - **No authentication.** The control-plane API and UI assume a trusted local
 >   caller. The UI sends an `x-actor-id` header for audit attribution only;
 >   there is no login, API-key enforcement on the UI path, or RBAC.
-> - **Single host.** The node agent registers one local host
->   (`local-dev-host`) and runs Postgres binaries directly on your machine.
->   There is no multi-host scheduling, failure-domain spreading, or remote
->   host fleet yet.
+> - **Local Kubernetes.** Managed databases run as CloudNativePG `Cluster`
+>   resources on whatever Kubernetes cluster your kube context targets
+>   (locally, a `kind` cluster). Scheduling, failover, and storage are handled
+>   by Kubernetes and the CloudNativePG operator, not an owned host fleet.
 > - **Local secret material by default.** Role passwords use a local-dev
 >   plaintext provider unless you opt into envelope encryption (see below).
 > - **Connection routing falls back to the backend port.** Until a certificate
@@ -59,10 +59,11 @@ The current slice can, entirely on a local machine:
   health, plus pages for clusters, node hosts, incidents, quota, gateway and
   database-proxy routes, and the audit log.
 - **A control plane** that turns desired cluster/deployment state into
-  node-agent commands, tracks operations, records an audit trail, enforces
-  quota policies and alerts, and exposes Prometheus metrics at `/metrics`.
-- **A node agent** that leases queued commands and applies them against local
-  PostgreSQL 18 binaries (or the Postgres 18 container image).
+  CloudNativePG `Cluster` manifests and applies them to Kubernetes, tracks
+  operations, records an audit trail, enforces quota policies and alerts, and
+  exposes Prometheus metrics at `/metrics`.
+- **The CloudNativePG operator**, which owns host-local PostgreSQL 18 lifecycle
+  — provisioning, failover, backups, PITR, upgrades, and storage resize.
 - **An owned gateway and raw database TCP proxy** for hosted SyncDeployments
   and managed Postgres endpoints, including PostgreSQL TLS (`SSLRequest`)
   negotiation, startup-packet validation, and route-level user/database policy.
@@ -74,18 +75,21 @@ below; the UI design is documented in [PAAS-UI-DESIGN.md](PAAS-UI-DESIGN.md).
 
 ## Prerequisites
 
-The recommended local workflow ([Tilt](https://tilt.dev/)) needs:
+The local workflow runs the platform on a throwaway Kubernetes cluster. You
+need:
 
-- **Docker** (with `docker compose`) — runs the control-plane PostgreSQL 18
-  container and the Flyway migration job.
-- **Rust** (stable toolchain, `cargo`) — builds and runs the control plane and
-  node agent.
-- **Node.js** (18+) and `npm` — installs and serves the React UI.
-- **Tilt** — orchestrates the resources above.
+- **Docker** — the container runtime backing the local `kind` cluster.
+- **kind** — creates the local Kubernetes cluster.
+- **kubectl** — talks to the cluster.
+- **Helm** (3.13+) — installs the `palimpsest-paas` chart and the CloudNativePG
+  operator.
+- **Rust** (stable toolchain, `cargo`) — builds the control plane, gateway, and
+  runtime images.
+- **Node.js** (18+) and `npm` — builds the React UI.
 
-Local Postgres 18 client/server binaries are used when the node agent applies
-commands directly; the Tilt stack uses `poll-once-container` so the Postgres 18
-container image supplies those binaries instead.
+Managed PostgreSQL 18 runs inside the cluster as CloudNativePG `Cluster`
+resources; the operator supplies the Postgres 18 image, so no host-local
+Postgres binaries are required.
 
 ## Design docs
 
@@ -94,73 +98,68 @@ Start with:
 - [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) for the repo integration
   and buildout plan.
 - [MANAGED-POSTGRES-DESIGN.md](MANAGED-POSTGRES-DESIGN.md) for the
-  PostgreSQL 18+ runtime, Rust control plane, and host-agent design.
+  PostgreSQL 18+ runtime and control-plane design.
 - [PRODUCTION-READINESS-DESIGN.md](PRODUCTION-READINESS-DESIGN.md) for the
   concrete work needed to move the current prototype to a production PaaS.
 - [../docs/PAAS-DESIGN.md](../docs/PAAS-DESIGN.md) for the product and
   systems design.
 - [adr/0001-managed-postgres-version-floor.md](adr/0001-managed-postgres-version-floor.md)
-  and [adr/0002-owned-rust-runtime-no-kubernetes.md](adr/0002-owned-rust-runtime-no-kubernetes.md)
-  for the initial platform decisions.
+  for the version floor, and
+  [adr/0003-kubernetes-cloudnativepg-runtime.md](adr/0003-kubernetes-cloudnativepg-runtime.md)
+  for the Kubernetes + CloudNativePG runtime decision (superseding
+  [adr/0002](adr/0002-owned-rust-runtime-no-kubernetes.md)).
 
 ## Run the self-hosted PaaS (local)
 
-The recommended way to run the whole stack is [Tilt](https://tilt.dev/) — it
-brings up every component in dependency order and watches sources for reload.
-Make sure the [prerequisites](#prerequisites) are installed, then:
+Bring up a local `kind` cluster, install the CloudNativePG operator and the
+`palimpsest-paas` chart, and reach the console. The `paas/local` helper script
+wraps these steps:
 
 ```text
 cd paas
-tilt up
+./local/up.sh        # create kind cluster + helm install palimpsest-paas
 ```
 
-The [Tiltfile](Tiltfile) starts the control-plane PostgreSQL 18 container,
-applies Flyway migrations, starts the SQL-backed control-plane API, seeds the
-default local scope, starts a node-agent poll loop, installs UI dependencies,
-and starts the React PaaS console. Open the Tilt UI it prints to watch each
-resource come up; the stack is ready once `paas-ui` and `node-agent` are green.
+Under the hood this:
 
-To tear it down, stop Tilt (`Ctrl-C` / `tilt down`); the control-plane Postgres
-container keeps its volume so state survives restarts. Created clusters write
-PostgreSQL data under `/tmp/palimpsest-paas-tilt` — remove that directory for a
-clean slate.
+1. Creates a `kind` cluster (if one is not already running).
+2. Runs `helm dependency build` and installs the
+   [`palimpsest-paas`](deploy/helm/palimpsest-paas) chart into the
+   `palimpsest-paas` namespace, which deploys the CloudNativePG operator, the
+   control plane and its CloudNativePG-backed metadata database, the gateway,
+   the database proxy, and the React console.
 
-If you prefer to run components by hand (without Tilt), see
-[Running components individually](#running-components-individually) below.
+Watch it come up:
 
-Local endpoints:
+```text
+kubectl -n palimpsest-paas get pods
+kubectl get clusters.postgresql.cnpg.io -A
+```
 
-- PaaS UI: `http://127.0.0.1:8090/`
-- Control-plane API: `http://127.0.0.1:18088`
-- Control-plane metrics: `http://127.0.0.1:18088/metrics`
-- Control-plane Postgres: `127.0.0.1:54330`
-- Managed Postgres clusters created by the Tilt node-agent start at port `56000`
+Reach the console and APIs by port-forwarding the services:
 
-The UI defaults to `org_123 / project_123 / env_123`, which the Tilt seed
-resource creates. The node-agent resource registers `local-dev-host`, sends
-heartbeats, and repeatedly polls for queued managed Postgres commands, so
-database create/reconcile actions from the UI can progress locally.
+```text
+kubectl -n palimpsest-paas port-forward svc/paas-palimpsest-paas-ui 8090:80
+kubectl -n palimpsest-paas port-forward svc/paas-palimpsest-paas-control-plane 8088:8088
+```
 
-The `paas-smoke` Tilt resource is manual. Trigger it from Tilt when you want
-the full Docker-backed end-to-end smoke path. It uses an isolated smoke API
-on `127.0.0.1:8188`, an isolated control-plane Postgres host port `54331`,
-and managed Postgres cluster ports starting at `57000` so it can run without
-competing with the live Tilt stack.
+Managed databases created from the UI are reconciled into CloudNativePG
+`Cluster` resources by the control plane; watch them with
+`kubectl get clusters.postgresql.cnpg.io -A`. Tear everything down with
+`./local/down.sh` (deletes the `kind` cluster).
 
 ## Initial Implementation
 
 The first implementation slice is deliberately additive:
 
 - `crates/palimpsest-paas-core` defines shared PaaS models, including the
-  PostgreSQL 18+ version gate and the control-plane to node-agent command
-  contract.
-- `crates/palimpsest-paas-control-plane` contains a small placement and
-  reconciliation skeleton that turns a managed Postgres cluster state into
-  node-agent commands.
-- `crates/palimpsest-paas-node-agent` contains a host-local planner for
-  PostgreSQL lifecycle commands. It can plan or apply one command locally,
-  and it can poll the control-plane HTTP queue once to lease, execute, and
-  complete a command.
+  PostgreSQL 18+ version gate and managed-cluster desired state.
+- `crates/palimpsest-paas-control-plane` contains the SQL-backed control plane
+  that persists desired state and reconciles managed clusters into
+  CloudNativePG resources.
+- `crates/palimpsest-paas-runtime` renders CloudNativePG `Cluster` /
+  `ScheduledBackup` manifests from managed-Postgres desired state and applies
+  them with `kubectl`. It replaces the former host-local node agent.
 - `crates/palimpsest-paas-sync-wrapper` renders standalone Palimpsest
   configs from signed deployment specs and classifies reload behavior.
 - `crates/palimpsest-paas-gateway` contains the hosted gateway server,
@@ -173,18 +172,20 @@ The first implementation slice is deliberately additive:
   exports, quota alerts, query permission policies, JWT issuers, webhook
   endpoints, SSO providers, and customer-facing environment health.
 - `examples/` contains sample JSON payloads for exercising the first slice.
-- `local/` contains the first local PaaS stack: PostgreSQL 18, logical
-  replication config, init SQL, and a Palimpsest config.
+- `local/` contains the local PaaS dev flow: `up.sh`/`down.sh` scripts that
+  install the Helm chart and CloudNativePG onto a `kind` cluster.
 - `control-plane/` contains durable control-plane artifacts, starting with
   metadata migrations and a SQL-backed onboarding workspace flow for creating
   the first organization/project/environment scope. Dashboard status pages can
   use the environment overview endpoint to read health, active database,
   cluster, deployment, config, quota-alert, custom-domain, network-access,
   maintenance-window, and active incident state in one scoped request. The
-  SQL control plane also includes a maintenance scheduler that converts active
-  auto-minor-upgrade windows into owned node-agent update commands.
-- `deploy/` contains owned non-Kubernetes host deployment artifacts, including
-  initial systemd units and a node-host bootstrap script.
+  SQL control plane also includes a maintenance scheduler for auto-minor-upgrade
+  windows. (Some control-plane operations still carry the legacy host-command
+  data model; see ADR 0003 for the in-progress migration to CloudNativePG.)
+- `deploy/` contains the `palimpsest-paas` Helm chart, which deploys the
+  control plane, gateway, database proxy, console, the control plane's
+  CloudNativePG-backed metadata database, and the CloudNativePG operator.
 - `observability/` contains first-pass Prometheus alert rules and a Grafana
   overview dashboard for control-plane, managed Postgres, and gateway signals.
   The SQL-backed control plane and gateway both expose Prometheus text at
@@ -199,9 +200,8 @@ The UI design is documented in [PAAS-UI-DESIGN.md](PAAS-UI-DESIGN.md).
 
 ## Running components individually
 
-`tilt up` is the recommended path. The commands below run the same components
-by hand — useful when you want to iterate on a single piece, or to understand
-what Tilt is doing under the hood.
+`./local/up.sh` is the recommended path. The commands below run individual
+pieces by hand — useful when iterating on a single component.
 
 Run the local UI with:
 
@@ -218,7 +218,7 @@ data and mutating actions.
 Run the focused checks with:
 
 ```text
-cargo test -p palimpsest-paas-core -p palimpsest-paas-control-plane -p palimpsest-paas-node-agent -p palimpsest-paas-sync-wrapper -p palimpsest-paas-gateway
+cargo test -p palimpsest-paas-core -p palimpsest-paas-control-plane -p palimpsest-paas-runtime -p palimpsest-paas-sync-wrapper -p palimpsest-paas-gateway
 ```
 
 Validate the local JSON contract examples against the PaaS schemas and check
@@ -228,10 +228,10 @@ the observability dashboard/alert artifacts with:
 ruby paas/ci/validate-json-schemas.rb
 ```
 
-Render a first control-plane command plan:
+Render the CloudNativePG manifests for a managed cluster's desired state:
 
 ```text
-cargo run -p palimpsest-paas-control-plane -- plan paas/examples/cluster.requested.json
+cargo run -p palimpsest-paas-runtime -- render paas/examples/cluster.requested.json
 ```
 
 Run the SQL control plane with envelope-encrypted managed Postgres role
@@ -244,56 +244,20 @@ PALIMPSEST_PAAS_SECRET_KEY_BASE64=<32-byte-base64-key> \
   cargo run -p palimpsest-paas-control-plane -- serve-sql-api 127.0.0.1:18088 postgres://user:pass@localhost:5432/palimpsest_control
 ```
 
-Render host-local node-agent steps:
+Apply those manifests to the cluster your kube context targets (this is what
+the control plane does internally on reconcile). Backups and WAL archiving are
+configured by setting `PALIMPSEST_PAAS_RUNTIME_BACKUP_OBJECT_STORE`, which adds
+a `barmanObjectStore` stanza and a `ScheduledBackup` to the rendered output:
 
 ```text
-cargo run -p palimpsest-paas-node-agent -- plan paas/examples/node-agent.prepare-postgres.json
+cargo run -p palimpsest-paas-runtime -- reconcile paas/examples/cluster.requested.json
+kubectl get clusters.postgresql.cnpg.io -A
 ```
 
-Execute a node-agent command on the current host:
-
-```text
-cargo run -p palimpsest-paas-node-agent -- apply paas/examples/node-agent.prepare-postgres.json
-```
-
-`apply` mutates the configured host runtime root and invokes local PostgreSQL
-18 binaries. Use `plan` first when reviewing command shape.
-
-Poll the SQL-backed control-plane queue once:
-
-```text
-cargo run -p palimpsest-paas-node-agent -- register http://127.0.0.1:18088
-cargo run -p palimpsest-paas-node-agent -- heartbeat http://127.0.0.1:18088
-cargo run -p palimpsest-paas-node-agent -- poll-once http://127.0.0.1:18088
-cargo run -p palimpsest-paas-node-agent -- poll-once-container http://127.0.0.1:18088
-cargo run -p palimpsest-paas-node-agent -- poll-once-dry-run http://127.0.0.1:18088
-```
-
-`register` upserts the local node host, `heartbeat` updates capacity and
-state, and `poll-once` uses the local node-agent host id, leases one pending
-command from `/v1/node-hosts/{host_id}/commands/lease`, executes it, and posts
-completion status back to the control plane. `poll-once-container` uses the
-PostgreSQL 18 container image as the source of Postgres binaries for controlled
-local execution. `poll-once-dry-run` follows the same queue path, but only
-renders the host-local plan before completing the command.
-
-Plan a base backup command:
-
-```text
-cargo run -p palimpsest-paas-node-agent -- plan paas/examples/node-agent.run-base-backup.json
-```
-
-Plan a restore preparation command:
-
-```text
-cargo run -p palimpsest-paas-node-agent -- plan paas/examples/node-agent.prepare-restore.json
-```
-
-Plan a WAL archive command:
-
-```text
-cargo run -p palimpsest-paas-node-agent -- plan paas/examples/node-agent.archive-wal-segment.json
-```
+`render` prints YAML to stdout; `reconcile` pipes it through
+`kubectl apply --server-side`. CloudNativePG then owns provisioning, base
+backups, WAL archiving, PITR, failover, upgrades, and storage resize — the work
+the former node agent did by hand.
 
 Render a managed SyncDeployment config:
 

@@ -1,0 +1,27 @@
+apiVersion: v2
+name: palimpsest-paas
+description: >-
+  Palimpsest managed PaaS on Kubernetes — control plane, gateway, database
+  proxy, and operator console, with managed PostgreSQL provided by the
+  CloudNativePG operator.
+type: application
+version: 0.1.0
+appVersion: "0.1.1"
+keywords:
+  - postgres
+  - paas
+  - cloudnative-pg
+  - kubernetes
+maintainers:
+  - name: Thousand Birds
+    email: colton@thousandbirds.ai
+dependencies:
+  # Managed PostgreSQL runs as CloudNativePG `Cluster` custom resources that the
+  # control plane renders and applies. The operator must be installed in the
+  # cluster; bundling it here keeps `helm install` self-contained. Disable this
+  # (cloudnative-pg.enabled=false) if the operator is already managed out of
+  # band, e.g. cluster-wide by a platform team.
+  - name: cloudnative-pg
+    version: "0.22.0"
+    repository: https://cloudnative-pg.github.io/charts
+    condition: cloudnative-pg.enabled

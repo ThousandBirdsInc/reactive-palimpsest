@@ -1,0 +1,23 @@
+Palimpsest PaaS has been installed into namespace {{ .Release.Namespace }}.
+
+Components:
+  - control plane : {{ include "palimpsest-paas.fullname" . }}-control-plane (:{{ .Values.controlPlane.service.port }})
+  - metadata DB   : {{ include "palimpsest-paas.fullname" . }}-control-db (CloudNativePG)
+{{- if .Values.gateway.enabled }}
+  - gateway       : {{ include "palimpsest-paas.fullname" . }}-gateway
+{{- end }}
+{{- if .Values.dbProxy.enabled }}
+  - db proxy      : {{ include "palimpsest-paas.fullname" . }}-db-proxy (:{{ .Values.dbProxy.service.port }})
+{{- end }}
+{{- if .Values.ui.enabled }}
+  - console (UI)  : {{ include "palimpsest-paas.fullname" . }}-ui
+{{- end }}
+
+Managed customer databases are provisioned at runtime by the control plane as
+CloudNativePG Cluster resources. Watch them with:
+
+  kubectl get clusters.postgresql.cnpg.io -A -l {{ printf "%s/cluster" "palimpsest.thousandbirds.ai" }}
+
+Reach the operator console:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "palimpsest-paas.fullname" . }}-ui 8090:{{ .Values.ui.service.port }}

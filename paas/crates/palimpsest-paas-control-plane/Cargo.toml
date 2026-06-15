@@ -19,6 +19,7 @@ path = "src/main.rs"
 axum = { workspace = true, features = ["json", "query"] }
 base64 = "0.22"
 palimpsest-paas-core = { path = "../palimpsest-paas-core", version = "0.1.1" }
+palimpsest-paas-runtime = { path = "../palimpsest-paas-runtime", version = "0.1.1" }
 palimpsest-permissions = { path = "../../../crates/palimpsest-permissions", version = "0.1.1" }
 palimpsest-sql = { path = "../../../crates/palimpsest-sql", version = "0.1.1" }
 rcgen = "0.13"
