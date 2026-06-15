@@ -12364,7 +12364,7 @@ predicate = \"owner_id = $user.id\"
         assert!(plan.next_cluster.host_assignment.is_none());
         let manifests = plan.manifests.expect("manifests rendered");
         let yaml = manifests.to_yaml().expect("yaml renders");
-        assert!(yaml.contains("kind: Cluster"));
+        assert!(yaml.contains("\"kind\": \"Cluster\""));
         assert!(yaml.contains("postgresql.cnpg.io/v1"));
     }
 

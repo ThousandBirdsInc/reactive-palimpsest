@@ -54,6 +54,8 @@ pub enum RuntimeError {
     },
     #[error("failed to render manifest: {0}")]
     Render(#[from] serde_yaml::Error),
+    #[error("failed to render manifest: {0}")]
+    RenderJson(#[from] serde_json::Error),
     #[error("kubectl invocation failed: {0}")]
     Kubectl(String),
     #[error("io error running kubectl: {0}")]
@@ -351,12 +353,23 @@ impl RenderedManifests {
         })
     }
 
-    /// Serialize all manifests as a single multi-document YAML stream.
+    /// Serialize all manifests as a multi-document stream for `kubectl apply`.
+    ///
+    /// Each manifest is emitted as pretty-printed JSON separated by `---`. JSON
+    /// is a strict subset of YAML 1.2, so the result is a valid YAML stream that
+    /// `kubectl` accepts, but unlike YAML it always quotes string scalars. That
+    /// matters because kubectl parses manifests with YAML 1.1 semantics, under
+    /// which bare tokens like `on`/`off`/`yes`/`no` become booleans and values
+    /// like `1.0` become floats. CloudNativePG's hibernation annotation value
+    /// must stay the string `"on"`, so emitting JSON keeps it a string instead
+    /// of being coerced to a boolean (which kubectl rejects for annotations).
     pub fn to_yaml(&self) -> Result<String, RuntimeError> {
-        let mut out = serde_yaml::to_string(&self.cluster)?;
+        let mut out = serde_json::to_string_pretty(&self.cluster)?;
+        out.push('\n');
         if let Some(scheduled_backup) = &self.scheduled_backup {
             out.push_str("---\n");
-            out.push_str(&serde_yaml::to_string(scheduled_backup)?);
+            out.push_str(&serde_json::to_string_pretty(scheduled_backup)?);
+            out.push('\n');
         }
         Ok(out)
     }
@@ -829,10 +842,14 @@ mod tests {
         };
         let manifests =
             RenderedManifests::render(&sample_cluster("dev"), None, &[], &config).unwrap();
-        let yaml = manifests.to_yaml().unwrap();
-        assert!(yaml.contains("kind: Cluster"));
-        assert!(yaml.contains("kind: ScheduledBackup"));
-        assert!(yaml.contains("---"));
+        let stream = manifests.to_yaml().unwrap();
+        assert!(stream.contains("\"kind\": \"Cluster\""));
+        assert!(stream.contains("\"kind\": \"ScheduledBackup\""));
+        assert!(stream.contains("---"));
+        // JSON is a valid YAML 1.2 stream and round-trips through a YAML parser.
+        for doc in stream.split("\n---\n") {
+            serde_yaml::from_str::<serde_yaml::Value>(doc).expect("each document parses as YAML");
+        }
     }
 
     #[test]
