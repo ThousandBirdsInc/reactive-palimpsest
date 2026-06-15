@@ -195,6 +195,40 @@ pub fn render_cluster(
     roles: &[DatabaseRoleCredential],
     config: &RuntimeConfig,
 ) -> Result<CnpgCluster, RuntimeError> {
+    render_cluster_inner(cluster, spec, roles, config, None)
+}
+
+/// Where a restored / cloned cluster recovers its data from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreSource {
+    /// Cluster id whose object-store backups should be recovered.
+    pub source_cluster_id: String,
+    /// RFC3339 timestamp for point-in-time recovery (branch); `None` recovers
+    /// to the end of the available WAL.
+    pub recovery_target_time: Option<String>,
+}
+
+/// Render a CloudNativePG `Cluster` that bootstraps by recovering another
+/// cluster's object-store backups (restore, clone, or point-in-time branch).
+///
+/// Requires object-storage backups to be configured ([`RuntimeConfig`]).
+pub fn render_restore_cluster(
+    cluster: &ManagedPostgresCluster,
+    source: &RestoreSource,
+    spec: Option<&ManagedPostgresSpec>,
+    roles: &[DatabaseRoleCredential],
+    config: &RuntimeConfig,
+) -> Result<CnpgCluster, RuntimeError> {
+    render_cluster_inner(cluster, spec, roles, config, Some(source))
+}
+
+fn render_cluster_inner(
+    cluster: &ManagedPostgresCluster,
+    spec: Option<&ManagedPostgresSpec>,
+    roles: &[DatabaseRoleCredential],
+    config: &RuntimeConfig,
+    restore: Option<&RestoreSource>,
+) -> Result<CnpgCluster, RuntimeError> {
     let major = cluster.postgres_version.major();
     if major < MIN_SUPPORTED_POSTGRES_MAJOR {
         return Err(RuntimeError::UnsupportedPostgresMajor {
@@ -218,6 +252,57 @@ pub fn render_cluster(
         .backup_object_store_base
         .as_ref()
         .map(|base| render_backup(base, config, cluster, spec.map(|spec| &spec.backup_policy)));
+
+    // Recovery bootstrap (restore/clone/branch) reads the source cluster's
+    // backups from object storage via an `externalClusters` entry; otherwise
+    // the cluster bootstraps a fresh database with initdb.
+    let (bootstrap, external_clusters) = match restore {
+        None => (
+            CnpgBootstrap {
+                initdb: Some(CnpgInitDb {
+                    database: "app".to_owned(),
+                    owner: "app".to_owned(),
+                }),
+                recovery: None,
+            },
+            None,
+        ),
+        Some(source) => {
+            let base = config.backup_object_store_base.as_ref().ok_or_else(|| {
+                RuntimeError::Kubectl(format!(
+                    "cannot restore cluster '{}': no backup object store is configured",
+                    cluster.cluster_id
+                ))
+            })?;
+            let source_name = "recovery-source".to_owned();
+            let external = CnpgExternalCluster {
+                name: source_name.clone(),
+                barman_object_store: CnpgBarmanObjectStore {
+                    destination_path: format!(
+                        "{}/{}",
+                        base.trim_end_matches('/'),
+                        source.source_cluster_id
+                    ),
+                    endpoint_url: config.backup_object_store_endpoint.clone(),
+                    server_name: Some(sanitize_dns(&source.source_cluster_id)),
+                    s3_credentials: s3_credentials(config),
+                },
+            };
+            (
+                CnpgBootstrap {
+                    initdb: None,
+                    recovery: Some(CnpgRecovery {
+                        source: source_name,
+                        recovery_target: source
+                            .recovery_target_time
+                            .clone()
+                            .map(|target_time| CnpgRecoveryTarget { target_time }),
+                    }),
+                },
+                Some(vec![external]),
+            )
+        }
+    };
 
     let managed_roles: Vec<CnpgManagedRole> = roles
         .iter()
@@ -252,16 +337,12 @@ pub fn render_cluster(
                 ("memory".to_owned(), tier.memory_request),
             ]),
         },
-        bootstrap: CnpgBootstrap {
-            initdb: CnpgInitDb {
-                database: "app".to_owned(),
-                owner: "app".to_owned(),
-            },
-        },
+        bootstrap,
         managed: (!managed_roles.is_empty()).then_some(CnpgManaged {
             roles: managed_roles,
         }),
         backup,
+        external_clusters,
     };
 
     Ok(CnpgCluster {
@@ -286,20 +367,27 @@ fn render_backup(
         barman_object_store: CnpgBarmanObjectStore {
             destination_path: format!("{}/{}", base.trim_end_matches('/'), cluster.cluster_id),
             endpoint_url: config.backup_object_store_endpoint.clone(),
-            s3_credentials: config.backup_credentials_secret.as_ref().map(|secret| {
-                CnpgS3Credentials {
-                    access_key_id: CnpgSecretKeyRef {
-                        name: secret.clone(),
-                        key: "ACCESS_KEY_ID".to_owned(),
-                    },
-                    secret_access_key: CnpgSecretKeyRef {
-                        name: secret.clone(),
-                        key: "ACCESS_SECRET_KEY".to_owned(),
-                    },
-                }
-            }),
+            server_name: None,
+            s3_credentials: s3_credentials(config),
         },
     }
+}
+
+/// Reference the configured object-store credentials secret, if any.
+fn s3_credentials(config: &RuntimeConfig) -> Option<CnpgS3Credentials> {
+    config
+        .backup_credentials_secret
+        .as_ref()
+        .map(|secret| CnpgS3Credentials {
+            access_key_id: CnpgSecretKeyRef {
+                name: secret.clone(),
+                key: "ACCESS_KEY_ID".to_owned(),
+            },
+            secret_access_key: CnpgSecretKeyRef {
+                name: secret.clone(),
+                key: "ACCESS_SECRET_KEY".to_owned(),
+            },
+        })
 }
 
 /// Kubernetes object name for an on-demand backup of a cluster.
@@ -391,6 +479,21 @@ impl RenderedManifests {
     ) -> Result<Self, RuntimeError> {
         Ok(Self {
             cluster: render_cluster(cluster, spec, roles, config)?,
+            scheduled_backup: render_scheduled_backup(cluster, spec, config),
+        })
+    }
+
+    /// Render manifests for a cluster that recovers another cluster's backups
+    /// (restore / clone / point-in-time branch).
+    pub fn render_restore(
+        cluster: &ManagedPostgresCluster,
+        source: &RestoreSource,
+        spec: Option<&ManagedPostgresSpec>,
+        roles: &[DatabaseRoleCredential],
+        config: &RuntimeConfig,
+    ) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            cluster: render_restore_cluster(cluster, source, spec, roles, config)?,
             scheduled_backup: render_scheduled_backup(cluster, spec, config),
         })
     }
@@ -652,6 +755,8 @@ pub struct CnpgClusterSpec {
     pub managed: Option<CnpgManaged>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<CnpgBackup>,
+    #[serde(rename = "externalClusters", skip_serializing_if = "Option::is_none")]
+    pub external_clusters: Option<Vec<CnpgExternalCluster>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,13 +773,40 @@ pub struct CnpgResources {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CnpgBootstrap {
-    pub initdb: CnpgInitDb,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initdb: Option<CnpgInitDb>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<CnpgRecovery>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CnpgInitDb {
     pub database: String,
     pub owner: String,
+}
+
+/// Bootstrap from a backup in an external object store (restore / clone / PITR).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CnpgRecovery {
+    /// Name of the entry in `externalClusters` to recover from.
+    pub source: String,
+    #[serde(rename = "recoveryTarget", skip_serializing_if = "Option::is_none")]
+    pub recovery_target: Option<CnpgRecoveryTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CnpgRecoveryTarget {
+    /// RFC3339 timestamp for point-in-time recovery.
+    #[serde(rename = "targetTime")]
+    pub target_time: String,
+}
+
+/// An external cluster CloudNativePG can recover from via object storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CnpgExternalCluster {
+    pub name: String,
+    #[serde(rename = "barmanObjectStore")]
+    pub barman_object_store: CnpgBarmanObjectStore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -714,6 +846,10 @@ pub struct CnpgBarmanObjectStore {
     pub destination_path: String,
     #[serde(rename = "endpointURL", skip_serializing_if = "Option::is_none")]
     pub endpoint_url: Option<String>,
+    /// Source server name within the store; set when recovering another
+    /// cluster's backups (defaults to the owning cluster otherwise).
+    #[serde(rename = "serverName", skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
     #[serde(rename = "s3Credentials", skip_serializing_if = "Option::is_none")]
     pub s3_credentials: Option<CnpgS3Credentials>,
 }
@@ -937,6 +1073,46 @@ mod tests {
         for doc in stream.split("\n---\n") {
             serde_yaml::from_str::<serde_yaml::Value>(doc).expect("each document parses as YAML");
         }
+    }
+
+    #[test]
+    fn renders_recovery_bootstrap_for_restore() {
+        let config = RuntimeConfig {
+            backup_object_store_base: Some("s3://backups".to_owned()),
+            backup_credentials_secret: Some("backup-credentials".to_owned()),
+            backup_object_store_endpoint: Some("http://minio:9000".to_owned()),
+            ..RuntimeConfig::default()
+        };
+        let target = ManagedPostgresCluster {
+            cluster_id: "restored".to_owned(),
+            ..sample_cluster("dev")
+        };
+        let source = RestoreSource {
+            source_cluster_id: "source_db".to_owned(),
+            recovery_target_time: Some("2026-06-15T00:00:00Z".to_owned()),
+        };
+        let cluster = render_restore_cluster(&target, &source, None, &[], &config).unwrap();
+
+        // Bootstraps via recovery, not initdb.
+        assert!(cluster.spec.bootstrap.initdb.is_none());
+        let recovery = cluster.spec.bootstrap.recovery.expect("recovery bootstrap");
+        assert_eq!(recovery.source, "recovery-source");
+        assert_eq!(
+            recovery.recovery_target.unwrap().target_time,
+            "2026-06-15T00:00:00Z"
+        );
+        let external = cluster.spec.external_clusters.expect("external clusters");
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].name, "recovery-source");
+        assert_eq!(
+            external[0].barman_object_store.destination_path,
+            "s3://backups/source_db"
+        );
+        // serverName is the sanitized source id so barman finds its backups.
+        assert_eq!(
+            external[0].barman_object_store.server_name.as_deref(),
+            Some("source-db")
+        );
     }
 
     #[test]
