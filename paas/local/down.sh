@@ -7,6 +7,11 @@ set -euo pipefail
 
 CLUSTER_NAME="${PALIMPSEST_PAAS_KIND_CLUSTER:-palimpsest-paas}"
 
+# Match the provider used by up.sh so kind can find the cluster.
+if [ "${PALIMPSEST_PAAS_KIND_NESTED:-0}" = "1" ]; then
+  export KIND_EXPERIMENTAL_PROVIDER=podman
+fi
+
 command -v kind >/dev/null 2>&1 || { echo "error: 'kind' not found on PATH" >&2; exit 1; }
 
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
