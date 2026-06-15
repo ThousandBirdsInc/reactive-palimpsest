@@ -29,21 +29,22 @@ use palimpsest_paas_core::{
     AgentCommandStatus, ApiKey, AuditEvent, BackupArtifactStatus, BackupLifecycleState,
     BillingExport, BillingExportStatus, BranchLifecycleState, BranchMode,
     CertificateAuthorityProviderKind, CertificateAuthorityProviderStatus,
-    CertificateLifecycleState, CloneRedactionPolicyStatus, ClusterLifecycleState, ConfigVersion,
-    ConfigVersionStatus, CustomerEnvironmentHealth, DatabaseProxyRoute, DatabaseRoleCredential,
-    Domain, DomainTlsStatus, DomainVerificationStatus, Environment, FailoverLifecycleState,
-    GatewayRoute, GatewayRouteMtlsBundle, HostAssignment, Incident, IncidentSeverity,
-    IncidentStatus, IpAllowlistPurpose, IpAllowlistRule, IpAllowlistStatus, JwtIssuer,
-    JwtIssuerStatus, MaintenanceDayOfWeek, MaintenanceWindow, MaintenanceWindowStatus,
-    ManagedPostgresAcmeOrder, ManagedPostgresBackup, ManagedPostgresBackupArtifact,
-    ManagedPostgresBackupRetentionPolicy, ManagedPostgresBranch,
-    ManagedPostgresCertificateAuthorityProvider, ManagedPostgresCloneRedactionPolicy,
-    ManagedPostgresCluster, ManagedPostgresDeletionTombstone, ManagedPostgresEndpoint,
-    ManagedPostgresEndpointCertificate, ManagedPostgresEndpointCertificateBundle,
-    ManagedPostgresFailover, ManagedPostgresMajorUpgrade, ManagedPostgresMajorUpgradeStatus,
-    ManagedPostgresMajorUpgradeStrategy, ManagedPostgresPitrCheck, ManagedPostgresRestore,
-    ManagedPostgresRestoreDrill, ManagedPostgresRuntimeCheck, ManagedPostgresSpec,
-    ManagedPostgresStandby, ManagedPostgresStandbyCheck, ManagedPostgresSupportAccessSession,
+    CertificateLifecycleState, CloneRedactionMethod, CloneRedactionPolicyStatus,
+    CloneRedactionRule, ClusterLifecycleState, ConfigVersion, ConfigVersionStatus,
+    CustomerEnvironmentHealth, DatabaseProxyRoute, DatabaseRoleCredential, Domain, DomainTlsStatus,
+    DomainVerificationStatus, Environment, FailoverLifecycleState, GatewayRoute,
+    GatewayRouteMtlsBundle, HostAssignment, Incident, IncidentSeverity, IncidentStatus,
+    IpAllowlistPurpose, IpAllowlistRule, IpAllowlistStatus, JwtIssuer, JwtIssuerStatus,
+    MaintenanceDayOfWeek, MaintenanceWindow, MaintenanceWindowStatus, ManagedPostgresAcmeOrder,
+    ManagedPostgresBackup, ManagedPostgresBackupArtifact, ManagedPostgresBackupRetentionPolicy,
+    ManagedPostgresBranch, ManagedPostgresCertificateAuthorityProvider,
+    ManagedPostgresCloneRedactionPolicy, ManagedPostgresCluster, ManagedPostgresDeletionTombstone,
+    ManagedPostgresEndpoint, ManagedPostgresEndpointCertificate,
+    ManagedPostgresEndpointCertificateBundle, ManagedPostgresFailover, ManagedPostgresMajorUpgrade,
+    ManagedPostgresMajorUpgradeStatus, ManagedPostgresMajorUpgradeStrategy,
+    ManagedPostgresPitrCheck, ManagedPostgresRestore, ManagedPostgresRestoreDrill,
+    ManagedPostgresRuntimeCheck, ManagedPostgresSpec, ManagedPostgresStandby,
+    ManagedPostgresStandbyCheck, ManagedPostgresSupportAccessSession,
     ManagedPostgresWalArchiveSegment, NodeAgentAction, NodeAgentCommand, NodeAgentCommandResult,
     NodeHost, NodeHostAgentCredential, NodeHostAgentCredentialState, NodeHostHardeningCheck,
     NodeHostHardeningStatus, NodeHostHeartbeat, NodeHostState, OperationKind, OperationRecord,
@@ -6606,14 +6607,6 @@ async fn sql_api_request_managed_postgres_restore(
             "cross-environment restore requires an active source clone redaction policy".to_owned(),
         ));
     }
-    // CloudNativePG recovery restores the source data verbatim; it cannot apply
-    // a clone redaction policy. Reject rather than silently restore unmasked
-    // data (which a cross-environment clone relies on being redacted).
-    if redaction_policy.is_some() {
-        return Err(SqlApiError::BadRequest(
-            "clone redaction policies are not yet supported on the Kubernetes runtime".to_owned(),
-        ));
-    }
 
     let restore_id = format!("restore_{}", monotonic_nanos());
     let target_cluster_id = payload
@@ -6641,7 +6634,9 @@ async fn sql_api_request_managed_postgres_restore(
         target_environment_id: target_environment_id.clone(),
         backup_id: backup.backup_id.clone(),
         status: RestoreLifecycleState::Running,
-        redaction_policy_id: None,
+        redaction_policy_id: redaction_policy
+            .as_ref()
+            .map(|policy| policy.policy_id.clone()),
         recovery_target_lsn: payload.recovery_target_lsn.clone(),
         error_message: None,
     };
@@ -6652,9 +6647,20 @@ async fn sql_api_request_managed_postgres_restore(
         recovery_target_lsn: payload.recovery_target_lsn.clone(),
         continuous_replica: false,
     };
-    runtime::ClusterRuntime::from_env()
+    let runtime = runtime::ClusterRuntime::from_env();
+    runtime
         .restore(&target, &restore_source)
         .map_err(runtime_error)?;
+
+    // Apply the clone redaction policy on the recovered data while the clone is
+    // still in `Restoring` (so it is not yet exposed through the gateway), then
+    // it can advance to `Ready`.
+    if let Some(policy) = &redaction_policy {
+        wait_for_cluster_ready(&runtime, &target).await?;
+        runtime
+            .exec_statements(&target, "app", &redaction_statements(&policy.rules))
+            .map_err(runtime_error)?;
+    }
 
     store.insert_managed_postgres_cluster(&target).await?;
     store.insert_managed_postgres_restore(&restore).await?;
@@ -6899,7 +6905,7 @@ async fn create_point_in_time_branch(
         .await?
         .ok_or_else(|| SqlApiError::BadRequest("cluster has no succeeded backup".to_owned()))?;
 
-    if let Some(policy_id) = payload.redaction_policy_id.as_deref() {
+    let redaction_policy = if let Some(policy_id) = payload.redaction_policy_id.as_deref() {
         let policy = store
             .managed_postgres_clone_redaction_policy(policy_id)
             .await?
@@ -6914,12 +6920,10 @@ async fn create_point_in_time_branch(
                     .to_owned(),
             ));
         }
-        // CloudNativePG recovery restores data verbatim and cannot apply a
-        // redaction policy; reject rather than expose unmasked data.
-        return Err(SqlApiError::BadRequest(
-            "clone redaction policies are not yet supported on the Kubernetes runtime".to_owned(),
-        ));
-    }
+        Some(policy)
+    } else {
+        None
+    };
 
     let source_database = payload
         .source_database
@@ -6954,9 +6958,21 @@ async fn create_point_in_time_branch(
         recovery_target_lsn: Some(recovery_target_lsn.clone()),
         continuous_replica: false,
     };
-    runtime::ClusterRuntime::from_env()
+    let runtime = runtime::ClusterRuntime::from_env();
+    runtime
         .restore(&target, &restore_source)
         .map_err(runtime_error)?;
+    // Mask the branch before it can be exposed (still `Restoring`).
+    if let Some(policy) = &redaction_policy {
+        wait_for_cluster_ready(&runtime, &target).await?;
+        runtime
+            .exec_statements(
+                &target,
+                &source_database,
+                &redaction_statements(&policy.rules),
+            )
+            .map_err(runtime_error)?;
+    }
     let branch = ManagedPostgresBranch {
         branch_id: branch_id.clone(),
         cluster_id: source.cluster_id.clone(),
@@ -6967,7 +6983,7 @@ async fn create_point_in_time_branch(
         branch_database: None,
         branch_cluster_id: Some(target_cluster_id),
         created_from_lsn: Some(recovery_target_lsn),
-        redaction_policy_id: None,
+        redaction_policy_id: redaction_policy.map(|policy| policy.policy_id),
         lifecycle_state: BranchLifecycleState::Creating,
         error_message: None,
     };
@@ -7337,6 +7353,59 @@ fn restore_command_for_data_dir(data_dir: &str, cluster_id: &str) -> Result<Stri
     ))
 }
 
+/// Quote a SQL identifier (double quotes, doubling embedded quotes).
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+/// Build the `UPDATE` statements that apply a clone redaction policy's rules to
+/// a recovered clone (one statement per rule).
+fn redaction_statements(rules: &[CloneRedactionRule]) -> Vec<String> {
+    rules
+        .iter()
+        .map(|rule| {
+            let table = format!(
+                "{}.{}",
+                quote_ident(&rule.table_schema),
+                quote_ident(&rule.table_name)
+            );
+            let column = quote_ident(&rule.column_name);
+            let value = match rule.method {
+                CloneRedactionMethod::Null => "NULL".to_owned(),
+                CloneRedactionMethod::StaticValue => {
+                    let literal = rule.static_value.as_deref().unwrap_or("");
+                    format!("'{}'", literal.replace('\'', "''"))
+                }
+                // sha256() is built in to PostgreSQL 18; hash the column's text.
+                CloneRedactionMethod::HashSha256 => {
+                    format!("encode(sha256(({column})::text::bytea), 'hex')")
+                }
+            };
+            format!("UPDATE {table} SET {column} = {value};")
+        })
+        .collect()
+}
+
+/// Wait (bounded) for CloudNativePG to report a cluster's instances ready.
+async fn wait_for_cluster_ready(
+    runtime: &runtime::ClusterRuntime,
+    cluster: &ManagedPostgresCluster,
+) -> Result<(), SqlApiError> {
+    if runtime.is_dry_run() {
+        return Ok(());
+    }
+    for _ in 0..60 {
+        if runtime.cluster_ready(cluster).map_err(runtime_error)? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    Err(SqlApiError::BadRequest(format!(
+        "timed out waiting for cluster {} to become ready",
+        cluster.cluster_id
+    )))
+}
+
 async fn queue_managed_postgres_backup(
     store: &sql_store::SqlControlPlaneStore,
     cluster: &ManagedPostgresCluster,
@@ -7514,10 +7583,6 @@ async fn queue_managed_postgres_major_upgrade(
     actor_id: &str,
 ) -> Result<RequestPostgresMajorUpgradeApiResponse, SqlApiError> {
     let mut cluster = cluster.clone();
-    let assignment = cluster
-        .host_assignment
-        .clone()
-        .ok_or_else(|| SqlApiError::BadRequest("cluster has no host assignment".to_owned()))?;
 
     if cluster.lifecycle_state != ClusterLifecycleState::Ready {
         return Err(SqlApiError::BadRequest(format!(
@@ -7532,40 +7597,23 @@ async fn queue_managed_postgres_major_upgrade(
         )));
     }
 
-    let host_is_active = store
-        .active_host_capacities()
-        .await?
-        .into_iter()
-        .any(|host| host.host_id == assignment.host_id);
-    if !host_is_active {
-        return Err(SqlApiError::BadRequest(format!(
-            "assigned host {} is not active for major upgrade",
-            assignment.host_id
-        )));
-    }
-
     let source_postgres_version = cluster.postgres_version.clone();
     let upgrade_id = format!("major_upgrade_{}", monotonic_nanos());
+    // Re-render with the new major image tag and apply; CloudNativePG performs
+    // an offline in-place pg_upgrade of the instances.
     cluster.postgres_version = target_postgres_version.clone();
     cluster.lifecycle_state = ClusterLifecycleState::UpdatingPostgres;
-    let command = NodeAgentCommand {
-        command_id: format!(
-            "{}:upgrade-postgres-major:{}",
-            cluster.cluster_id,
-            monotonic_nanos()
-        ),
-        cluster_id: cluster.cluster_id.clone(),
-        action: NodeAgentAction::UpgradePostgresMajor {
-            data_dir: assignment.data_dir.clone(),
-            source_port: Some(assignment.port),
-            database: Some("postgres".to_owned()),
-            source_postgres_version: source_postgres_version.clone(),
-            target_postgres_version: target_postgres_version.clone(),
-            strategy,
-        },
-    };
-    let operation =
-        operation_for_agent_command(OperationKind::UpdateCluster, &cluster.cluster_id, &command);
+    store.update_managed_postgres_cluster(&cluster).await?;
+
+    let runtime = runtime::ClusterRuntime::from_env();
+    let roles = store
+        .issue_database_role_credentials(&cluster.cluster_id)
+        .await?;
+    let manifests = runtime
+        .render(&cluster, None, &roles)
+        .map_err(runtime_error)?;
+    runtime.apply(&manifests).map_err(runtime_error)?;
+
     let upgrade = ManagedPostgresMajorUpgrade {
         upgrade_id,
         cluster_id: cluster.cluster_id.clone(),
@@ -7573,20 +7621,17 @@ async fn queue_managed_postgres_major_upgrade(
         target_postgres_version,
         strategy,
         status: ManagedPostgresMajorUpgradeStatus::Running,
-        command_id: Some(command.command_id.clone()),
-        operation_id: Some(operation.operation_id.clone()),
+        command_id: None,
+        operation_id: None,
         error_message: None,
         created_at: String::new(),
         completed_at: None,
     };
 
+    cluster.lifecycle_state = ClusterLifecycleState::Verifying;
     store.update_managed_postgres_cluster(&cluster).await?;
-    store.insert_operation(&operation).await?;
     let upgrade = store
         .insert_managed_postgres_major_upgrade(&upgrade)
-        .await?;
-    store
-        .enqueue_agent_command(&assignment.host_id, Some(&operation.operation_id), &command)
         .await?;
     store
         .append_audit_event(&audit_event(
@@ -7596,12 +7641,7 @@ async fn queue_managed_postgres_major_upgrade(
         ))
         .await?;
 
-    Ok(RequestPostgresMajorUpgradeApiResponse {
-        upgrade,
-        cluster,
-        command,
-        operation,
-    })
+    Ok(RequestPostgresMajorUpgradeApiResponse { upgrade, cluster })
 }
 
 pub async fn run_backup_scheduler_once(
@@ -9707,8 +9747,6 @@ pub struct ManagedPostgresMajorUpgradesQuery {
 pub struct RequestPostgresMajorUpgradeApiResponse {
     upgrade: ManagedPostgresMajorUpgrade,
     cluster: ManagedPostgresCluster,
-    command: NodeAgentCommand,
-    operation: OperationRecord,
 }
 
 #[derive(Debug, Serialize)]
@@ -11574,6 +11612,44 @@ predicate = \"owner_id = $user.id\"
         assert_eq!(
             standby_physical_slot_name("cluster_123_standby"),
             "cluster_123_standby_slot"
+        );
+    }
+
+    #[test]
+    fn redaction_statements_cover_each_method() {
+        let rules = vec![
+            CloneRedactionRule {
+                table_schema: "public".to_owned(),
+                table_name: "users".to_owned(),
+                column_name: "ssn".to_owned(),
+                method: CloneRedactionMethod::Null,
+                static_value: None,
+            },
+            CloneRedactionRule {
+                table_schema: "public".to_owned(),
+                table_name: "users".to_owned(),
+                column_name: "name".to_owned(),
+                method: CloneRedactionMethod::StaticValue,
+                static_value: Some("re'dacted".to_owned()),
+            },
+            CloneRedactionRule {
+                table_schema: "public".to_owned(),
+                table_name: "users".to_owned(),
+                column_name: "email".to_owned(),
+                method: CloneRedactionMethod::HashSha256,
+                static_value: None,
+            },
+        ];
+        let sql = redaction_statements(&rules);
+        assert_eq!(sql[0], "UPDATE \"public\".\"users\" SET \"ssn\" = NULL;");
+        // Single quotes in static values are doubled (SQL escaping).
+        assert_eq!(
+            sql[1],
+            "UPDATE \"public\".\"users\" SET \"name\" = 're''dacted';"
+        );
+        assert_eq!(
+            sql[2],
+            "UPDATE \"public\".\"users\" SET \"email\" = encode(sha256((\"email\")::text::bytea), 'hex');"
         );
     }
 

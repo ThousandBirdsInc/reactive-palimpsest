@@ -183,6 +183,42 @@ impl ClusterRuntime {
             .map_err(|err| RuntimeAdapterError(err.to_string()))
     }
 
+    /// Run a sequence of SQL statements against a database on the cluster's
+    /// primary (each as its own statement); no-op in dry-run. Used to apply a
+    /// clone redaction policy to a freshly recovered clone.
+    pub fn exec_statements(
+        &self,
+        cluster: &ManagedPostgresCluster,
+        database: &str,
+        statements: &[String],
+    ) -> Result<(), RuntimeAdapterError> {
+        if self.dry_run || statements.is_empty() {
+            return Ok(());
+        }
+        let (namespace, pod) = self.primary_pod(cluster)?;
+        for statement in statements {
+            self.applier
+                .exec(
+                    &namespace,
+                    &pod,
+                    "postgres",
+                    &[
+                        "psql",
+                        "-U",
+                        "postgres",
+                        "-d",
+                        database,
+                        "-v",
+                        "ON_ERROR_STOP=1",
+                        "-c",
+                        statement,
+                    ],
+                )
+                .map_err(|err| RuntimeAdapterError(err.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Create `target_db` as a copy of `source_db` inside the cluster's primary
     /// (`CREATE DATABASE ... TEMPLATE`); no-op in dry-run. Identifiers must be
     /// validated by the caller. Optionally terminates connections to the source
