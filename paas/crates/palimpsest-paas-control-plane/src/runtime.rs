@@ -148,6 +148,80 @@ impl ClusterRuntime {
             .map_err(|err| RuntimeAdapterError(err.to_string()))
     }
 
+    /// Create `target_db` as a copy of `source_db` inside the cluster's primary
+    /// (`CREATE DATABASE ... TEMPLATE`); no-op in dry-run. Identifiers must be
+    /// validated by the caller. Optionally terminates connections to the source
+    /// first (required for a template copy).
+    pub fn clone_database(
+        &self,
+        cluster: &ManagedPostgresCluster,
+        source_db: &str,
+        target_db: &str,
+        terminate_source_connections: bool,
+    ) -> Result<(), RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let (namespace, pod) = self.primary_pod(cluster)?;
+        if terminate_source_connections {
+            let terminate = format!(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                 WHERE datname = '{source_db}' AND pid <> pg_backend_pid();"
+            );
+            self.psql(&namespace, &pod, &terminate)?;
+        }
+        let create = format!("CREATE DATABASE \"{target_db}\" TEMPLATE \"{source_db}\";");
+        self.psql(&namespace, &pod, &create)
+    }
+
+    /// Drop a database from the cluster's primary (terminating connections);
+    /// no-op in dry-run. The identifier must be validated by the caller.
+    pub fn drop_database(
+        &self,
+        cluster: &ManagedPostgresCluster,
+        database: &str,
+    ) -> Result<(), RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let (namespace, pod) = self.primary_pod(cluster)?;
+        self.psql(
+            &namespace,
+            &pod,
+            &format!("DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE);"),
+        )
+    }
+
+    /// Resolve the namespace and primary pod name for a cluster.
+    fn primary_pod(
+        &self,
+        cluster: &ManagedPostgresCluster,
+    ) -> Result<(String, String), RuntimeAdapterError> {
+        let namespace = self.config.namespace_for(cluster);
+        let name = palimpsest_paas_runtime::resource_name(cluster);
+        let pod = self
+            .applier
+            .primary_pod(&namespace, &name)
+            .map_err(|err| RuntimeAdapterError(err.to_string()))?
+            .ok_or_else(|| {
+                RuntimeAdapterError(format!("cluster {} has no primary pod", cluster.cluster_id))
+            })?;
+        Ok((namespace, pod))
+    }
+
+    /// Run a single SQL statement on the primary as the postgres superuser.
+    fn psql(&self, namespace: &str, pod: &str, sql: &str) -> Result<(), RuntimeAdapterError> {
+        self.applier
+            .exec(
+                namespace,
+                pod,
+                "postgres",
+                &["psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-c", sql],
+            )
+            .map(|_| ())
+            .map_err(|err| RuntimeAdapterError(err.to_string()))
+    }
+
     /// Whether CloudNativePG reports the cluster's instances ready.
     ///
     /// In dry-run mode this is always `true` so local provisioning converges.

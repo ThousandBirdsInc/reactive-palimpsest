@@ -692,6 +692,43 @@ impl KubectlApplier {
         Ok((!trimmed.is_empty()).then(|| trimmed.to_owned()))
     }
 
+    /// Name of the primary pod for a CloudNativePG cluster, if any.
+    pub fn primary_pod(
+        &self,
+        namespace: &str,
+        cluster: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        let selector = format!("cnpg.io/cluster={cluster},cnpg.io/instanceRole=primary");
+        let stdout = self.run(
+            &[
+                "get",
+                "pods",
+                "-n",
+                namespace,
+                "-l",
+                &selector,
+                "-o",
+                "jsonpath={.items[0].metadata.name}",
+            ],
+            None,
+        )?;
+        let trimmed = stdout.trim();
+        Ok((!trimmed.is_empty()).then(|| trimmed.to_owned()))
+    }
+
+    /// Run a command inside a pod container (`kubectl exec`).
+    pub fn exec(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: &str,
+        command: &[&str],
+    ) -> Result<String, RuntimeError> {
+        let mut args = vec!["exec", pod, "-n", namespace, "-c", container, "--"];
+        args.extend_from_slice(command);
+        self.run(&args, None)
+    }
+
     fn run(&self, args: &[&str], stdin: Option<&str>) -> Result<String, RuntimeError> {
         let mut command = Command::new(&self.binary);
         if let Some(context) = &self.context {
