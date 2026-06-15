@@ -87,6 +87,26 @@ impl ClusterRuntime {
             .map_err(|err| RuntimeAdapterError(err.to_string()))
     }
 
+    /// Provision a cluster that recovers another cluster's object-store backups
+    /// (restore / clone / point-in-time branch); no-op in dry-run.
+    pub fn restore(
+        &self,
+        target: &ManagedPostgresCluster,
+        source: &palimpsest_paas_runtime::RestoreSource,
+    ) -> Result<(), RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let manifests = RenderedManifests::render_restore(target, source, None, &[], &self.config)
+            .map_err(|err| RuntimeAdapterError(err.to_string()))?;
+        let yaml = manifests
+            .to_yaml()
+            .map_err(|err| RuntimeAdapterError(err.to_string()))?;
+        self.applier
+            .apply(&yaml)
+            .map_err(|err| RuntimeAdapterError(err.to_string()))
+    }
+
     /// Create an on-demand CloudNativePG `Backup` for a cluster (no-op in
     /// dry-run). The cluster must have object-storage backups configured.
     pub fn create_backup(

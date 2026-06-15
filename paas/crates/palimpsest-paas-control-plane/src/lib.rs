@@ -6646,9 +6646,6 @@ async fn sql_api_request_managed_postgres_restore(
         .await?
         .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
     auth.require_scope(ResourceScope::from_cluster(&source))?;
-    let source_assignment = source.host_assignment.as_ref().ok_or_else(|| {
-        SqlApiError::BadRequest("source cluster has no host assignment".to_owned())
-    })?;
 
     let backup = if let Some(backup_id) = payload.backup_id.as_deref() {
         store
@@ -6703,17 +6700,22 @@ async fn sql_api_request_managed_postgres_restore(
             "cross-environment restore requires an active source clone redaction policy".to_owned(),
         ));
     }
+    // CloudNativePG recovery restores the source data verbatim; it cannot apply
+    // a clone redaction policy. Reject rather than silently restore unmasked
+    // data (which a cross-environment clone relies on being redacted).
+    if redaction_policy.is_some() {
+        return Err(SqlApiError::BadRequest(
+            "clone redaction policies are not yet supported on the Kubernetes runtime".to_owned(),
+        ));
+    }
 
     let restore_id = format!("restore_{}", monotonic_nanos());
     let target_cluster_id = payload
         .target_cluster_id
         .clone()
         .unwrap_or_else(|| format!("{}_{}", source.cluster_id, restore_id));
-    let target_data_dir =
-        sibling_cluster_data_dir(&source_assignment.data_dir, &target_cluster_id)?;
-    let target_port = store
-        .next_available_host_port(&source_assignment.host_id)
-        .await?;
+    // CloudNativePG owns instance placement; the target carries no host
+    // assignment and recovers the source's backups from object storage.
     let target = ManagedPostgresCluster {
         cluster_id: target_cluster_id.clone(),
         organization_id: source.organization_id.clone(),
@@ -6724,11 +6726,7 @@ async fn sql_api_request_managed_postgres_restore(
         tier: source.tier.clone(),
         storage_gib: source.storage_gib,
         lifecycle_state: ClusterLifecycleState::Restoring,
-        host_assignment: Some(HostAssignment {
-            host_id: source_assignment.host_id.clone(),
-            data_dir: target_data_dir.display().to_string(),
-            port: target_port,
-        }),
+        host_assignment: None,
     };
     let restore = ManagedPostgresRestore {
         restore_id: restore_id.clone(),
@@ -6737,42 +6735,22 @@ async fn sql_api_request_managed_postgres_restore(
         target_environment_id: target_environment_id.clone(),
         backup_id: backup.backup_id.clone(),
         status: RestoreLifecycleState::Running,
-        redaction_policy_id: redaction_policy
-            .as_ref()
-            .map(|policy| policy.policy_id.clone()),
+        redaction_policy_id: None,
         recovery_target_lsn: payload.recovery_target_lsn.clone(),
         error_message: None,
     };
-    let command = NodeAgentCommand {
-        command_id: format!("{target_cluster_id}:prepare-restore:{restore_id}"),
-        cluster_id: target_cluster_id.clone(),
-        action: NodeAgentAction::PrepareRestore {
-            backup_id: backup.backup_id.clone(),
-            backup_dir: backup.backup_dir.clone(),
-            data_dir: target_data_dir.display().to_string(),
-            target_port: Some(target_port),
-            database: Some("postgres".to_owned()),
-            restore_command: restore_command_for_data_dir(
-                &source_assignment.data_dir,
-                &source.cluster_id,
-            )?,
-            recovery_target_lsn: payload.recovery_target_lsn,
-            redaction_policy,
-        },
+
+    let restore_source = palimpsest_paas_runtime::RestoreSource {
+        source_cluster_id: source.cluster_id.clone(),
+        recovery_target_time: None,
+        recovery_target_lsn: payload.recovery_target_lsn.clone(),
     };
+    runtime::ClusterRuntime::from_env()
+        .restore(&target, &restore_source)
+        .map_err(runtime_error)?;
 
     store.insert_managed_postgres_cluster(&target).await?;
     store.insert_managed_postgres_restore(&restore).await?;
-    let operation =
-        operation_for_agent_command(OperationKind::RestoreCluster, &restore.restore_id, &command);
-    store.insert_operation(&operation).await?;
-    store
-        .enqueue_agent_command(
-            &source_assignment.host_id,
-            Some(&operation.operation_id),
-            &command,
-        )
-        .await?;
     store
         .append_audit_event(&audit_event(
             auth.actor_id(),
@@ -6784,8 +6762,6 @@ async fn sql_api_request_managed_postgres_restore(
     Ok(Json(RestoreApiResponse {
         restore,
         cluster: target,
-        command,
-        operation,
     }))
 }
 
@@ -10003,8 +9979,6 @@ pub struct WalArchiveApiResponse {
 pub struct RestoreApiResponse {
     restore: ManagedPostgresRestore,
     cluster: ManagedPostgresCluster,
-    command: NodeAgentCommand,
-    operation: OperationRecord,
 }
 
 #[derive(Debug, Serialize)]

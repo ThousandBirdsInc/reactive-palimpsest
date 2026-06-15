@@ -206,6 +206,9 @@ pub struct RestoreSource {
     /// RFC3339 timestamp for point-in-time recovery (branch); `None` recovers
     /// to the end of the available WAL.
     pub recovery_target_time: Option<String>,
+    /// Write-ahead log sequence number for point-in-time recovery. Takes
+    /// precedence is left to the operator when both are set.
+    pub recovery_target_lsn: Option<String>,
 }
 
 /// Render a CloudNativePG `Cluster` that bootstraps by recovering another
@@ -288,15 +291,20 @@ fn render_cluster_inner(
                     s3_credentials: s3_credentials(config),
                 },
             };
+            // A recovery target (time or LSN) pins point-in-time recovery for a
+            // branch; without one, recovery replays to the end of the WAL.
+            let recovery_target = (source.recovery_target_time.is_some()
+                || source.recovery_target_lsn.is_some())
+            .then(|| CnpgRecoveryTarget {
+                target_time: source.recovery_target_time.clone(),
+                target_lsn: source.recovery_target_lsn.clone(),
+            });
             (
                 CnpgBootstrap {
                     initdb: None,
                     recovery: Some(CnpgRecovery {
                         source: source_name,
-                        recovery_target: source
-                            .recovery_target_time
-                            .clone()
-                            .map(|target_time| CnpgRecoveryTarget { target_time }),
+                        recovery_target,
                     }),
                 },
                 Some(vec![external]),
@@ -797,8 +805,11 @@ pub struct CnpgRecovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CnpgRecoveryTarget {
     /// RFC3339 timestamp for point-in-time recovery.
-    #[serde(rename = "targetTime")]
-    pub target_time: String,
+    #[serde(rename = "targetTime", skip_serializing_if = "Option::is_none")]
+    pub target_time: Option<String>,
+    /// Write-ahead log sequence number for point-in-time recovery.
+    #[serde(rename = "targetLSN", skip_serializing_if = "Option::is_none")]
+    pub target_lsn: Option<String>,
 }
 
 /// An external cluster CloudNativePG can recover from via object storage.
@@ -1090,6 +1101,7 @@ mod tests {
         let source = RestoreSource {
             source_cluster_id: "source_db".to_owned(),
             recovery_target_time: Some("2026-06-15T00:00:00Z".to_owned()),
+            recovery_target_lsn: None,
         };
         let cluster = render_restore_cluster(&target, &source, None, &[], &config).unwrap();
 
@@ -1098,8 +1110,8 @@ mod tests {
         let recovery = cluster.spec.bootstrap.recovery.expect("recovery bootstrap");
         assert_eq!(recovery.source, "recovery-source");
         assert_eq!(
-            recovery.recovery_target.unwrap().target_time,
-            "2026-06-15T00:00:00Z"
+            recovery.recovery_target.unwrap().target_time.as_deref(),
+            Some("2026-06-15T00:00:00Z")
         );
         let external = cluster.spec.external_clusters.expect("external clusters");
         assert_eq!(external.len(), 1);
