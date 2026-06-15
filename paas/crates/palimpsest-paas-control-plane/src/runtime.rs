@@ -107,6 +107,41 @@ impl ClusterRuntime {
             .map_err(|err| RuntimeAdapterError(err.to_string()))
     }
 
+    /// Promote a replica (standby) cluster to a standalone primary by
+    /// re-applying it without the replica section, which CloudNativePG detects
+    /// as `replica.enabled` going false; no-op in dry-run.
+    pub fn promote(&self, cluster: &ManagedPostgresCluster) -> Result<(), RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let manifests = self.render(cluster, None, &[])?;
+        self.apply(&manifests)
+    }
+
+    /// Fence (or, with `false`, unfence) all instances of a cluster via the
+    /// CloudNativePG fencing annotation, stopping writes during a failover;
+    /// no-op in dry-run.
+    pub fn fence(
+        &self,
+        cluster: &ManagedPostgresCluster,
+        fenced: bool,
+    ) -> Result<(), RuntimeAdapterError> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let namespace = self.config.namespace_for(cluster);
+        let name = palimpsest_paas_runtime::resource_name(cluster);
+        self.applier
+            .annotate(
+                "clusters.postgresql.cnpg.io",
+                &name,
+                &namespace,
+                "cnpg.io/fencing",
+                fenced.then_some("*"),
+            )
+            .map_err(|err| RuntimeAdapterError(err.to_string()))
+    }
+
     /// Create an on-demand CloudNativePG `Backup` for a cluster (no-op in
     /// dry-run). The cluster must have object-storage backups configured.
     pub fn create_backup(

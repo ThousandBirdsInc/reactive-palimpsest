@@ -209,6 +209,10 @@ pub struct RestoreSource {
     /// Write-ahead log sequence number for point-in-time recovery. Takes
     /// precedence is left to the operator when both are set.
     pub recovery_target_lsn: Option<String>,
+    /// When true, render a replica cluster that continuously replays the
+    /// source's WAL (a hot standby) until promoted, rather than a one-shot
+    /// restore.
+    pub continuous_replica: bool,
 }
 
 /// Render a CloudNativePG `Cluster` that bootstraps by recovering another
@@ -351,6 +355,13 @@ fn render_cluster_inner(
         }),
         backup,
         external_clusters,
+        // A standby replays the source's WAL continuously until promoted.
+        replica: restore
+            .filter(|source| source.continuous_replica)
+            .map(|_| CnpgReplica {
+                enabled: true,
+                source: "recovery-source".to_owned(),
+            }),
     };
 
     Ok(CnpgCluster {
@@ -716,6 +727,34 @@ impl KubectlApplier {
         Ok((!trimmed.is_empty()).then(|| trimmed.to_owned()))
     }
 
+    /// Set (or, with `None`, remove) an annotation on a resource.
+    pub fn annotate(
+        &self,
+        resource: &str,
+        name: &str,
+        namespace: &str,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let mutation = match value {
+            Some(value) => format!("{key}={value}"),
+            None => format!("{key}-"),
+        };
+        self.run(
+            &[
+                "annotate",
+                resource,
+                name,
+                "-n",
+                namespace,
+                "--overwrite",
+                &mutation,
+            ],
+            None,
+        )
+        .map(|_| ())
+    }
+
     /// Run a command inside a pod container (`kubectl exec`).
     pub fn exec(
         &self,
@@ -802,6 +841,16 @@ pub struct CnpgClusterSpec {
     pub backup: Option<CnpgBackup>,
     #[serde(rename = "externalClusters", skip_serializing_if = "Option::is_none")]
     pub external_clusters: Option<Vec<CnpgExternalCluster>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replica: Option<CnpgReplica>,
+}
+
+/// Replica-cluster configuration: continuously replays the source's WAL until
+/// promoted (`enabled: false`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CnpgReplica {
+    pub enabled: bool,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1139,6 +1188,7 @@ mod tests {
             source_cluster_id: "source_db".to_owned(),
             recovery_target_time: Some("2026-06-15T00:00:00Z".to_owned()),
             recovery_target_lsn: None,
+            continuous_replica: false,
         };
         let cluster = render_restore_cluster(&target, &source, None, &[], &config).unwrap();
 
@@ -1162,6 +1212,33 @@ mod tests {
             external[0].barman_object_store.server_name.as_deref(),
             Some("source-db")
         );
+    }
+
+    #[test]
+    fn renders_replica_cluster_for_standby() {
+        let config = RuntimeConfig {
+            backup_object_store_base: Some("s3://backups".to_owned()),
+            ..RuntimeConfig::default()
+        };
+        let source = RestoreSource {
+            source_cluster_id: "primary".to_owned(),
+            recovery_target_time: None,
+            recovery_target_lsn: None,
+            continuous_replica: true,
+        };
+        let cluster =
+            render_restore_cluster(&sample_cluster("dev"), &source, None, &[], &config).unwrap();
+        let replica = cluster.spec.replica.expect("replica section");
+        assert!(replica.enabled);
+        assert_eq!(replica.source, "recovery-source");
+        // A one-shot restore (no replica) carries no replica section.
+        let restore = RestoreSource {
+            continuous_replica: false,
+            ..source
+        };
+        let restored =
+            render_restore_cluster(&sample_cluster("dev"), &restore, None, &[], &config).unwrap();
+        assert!(restored.spec.replica.is_none());
     }
 
     #[test]

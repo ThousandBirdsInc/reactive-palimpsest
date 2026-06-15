@@ -6221,12 +6221,6 @@ async fn sql_api_request_managed_postgres_failover(
             "failover target must belong to the same environment".to_owned(),
         ));
     }
-    let target_assignment = target.host_assignment.as_ref().ok_or_else(|| {
-        SqlApiError::BadRequest("target cluster has no host assignment".to_owned())
-    })?;
-    let source_assignment = source.host_assignment.as_ref().ok_or_else(|| {
-        SqlApiError::BadRequest("source cluster has no host assignment".to_owned())
-    })?;
     let failover = ManagedPostgresFailover {
         failover_id: format!("failover_{}", monotonic_nanos()),
         source_cluster_id: source.cluster_id.clone(),
@@ -6234,53 +6228,14 @@ async fn sql_api_request_managed_postgres_failover(
         status: FailoverLifecycleState::Running,
         error_message: None,
     };
-    let fence_command = NodeAgentCommand {
-        command_id: format!(
-            "{}:fence-postgres-primary:{}",
-            source.cluster_id, failover.failover_id
-        ),
-        cluster_id: source.cluster_id.clone(),
-        action: NodeAgentAction::FencePostgresPrimary {
-            data_dir: source_assignment.data_dir.clone(),
-        },
-    };
-    let command = NodeAgentCommand {
-        command_id: format!(
-            "{}:promote-postgres-standby:{}",
-            target.cluster_id, failover.failover_id
-        ),
-        cluster_id: target.cluster_id.clone(),
-        action: NodeAgentAction::PromotePostgresStandby {
-            data_dir: target_assignment.data_dir.clone(),
-        },
-    };
+
+    // Fence the old primary (CloudNativePG fencing annotation) to stop writes,
+    // then promote the standby by re-applying it without the replica section.
+    let runtime = runtime::ClusterRuntime::from_env();
+    runtime.fence(&source, true).map_err(runtime_error)?;
+    runtime.promote(&target).map_err(runtime_error)?;
+
     store.insert_managed_postgres_failover(&failover).await?;
-    let fence_operation = operation_for_agent_command(
-        OperationKind::FencePrimary,
-        &failover.failover_id,
-        &fence_command,
-    );
-    store.insert_operation(&fence_operation).await?;
-    let operation = operation_for_agent_command(
-        OperationKind::FailoverCluster,
-        &failover.failover_id,
-        &command,
-    );
-    store.insert_operation(&operation).await?;
-    store
-        .enqueue_agent_command(
-            &source_assignment.host_id,
-            Some(&fence_operation.operation_id),
-            &fence_command,
-        )
-        .await?;
-    store
-        .enqueue_agent_command(
-            &target_assignment.host_id,
-            Some(&operation.operation_id),
-            &command,
-        )
-        .await?;
     store
         .append_audit_event(&audit_event(
             auth.actor_id(),
@@ -6288,13 +6243,7 @@ async fn sql_api_request_managed_postgres_failover(
             &failover.failover_id,
         ))
         .await?;
-    Ok(Json(FailoverApiResponse {
-        failover,
-        fence_command,
-        fence_operation,
-        command,
-        operation,
-    }))
+    Ok(Json(FailoverApiResponse { failover }))
 }
 
 async fn sql_api_list_managed_postgres_failovers(
@@ -6351,9 +6300,6 @@ async fn sql_api_request_managed_postgres_standby(
         .await?
         .ok_or_else(|| SqlApiError::MissingResource(cluster_id.clone()))?;
     auth.require_scope(ResourceScope::from_cluster(&source))?;
-    let source_assignment = source.host_assignment.as_ref().ok_or_else(|| {
-        SqlApiError::BadRequest("source cluster has no host assignment".to_owned())
-    })?;
     let backup = if let Some(backup_id) = payload.backup_id.as_deref() {
         store
             .managed_postgres_backup(backup_id)
@@ -6375,11 +6321,8 @@ async fn sql_api_request_managed_postgres_standby(
         .target_cluster_id
         .clone()
         .unwrap_or_else(|| format!("{}_standby_{}", source.cluster_id, monotonic_nanos()));
-    let target_data_dir =
-        sibling_cluster_data_dir(&source_assignment.data_dir, &target_cluster_id)?;
-    let target_port = store
-        .next_available_host_port(&source_assignment.host_id)
-        .await?;
+    // CloudNativePG places the standby; it continuously replays the source's
+    // WAL from object storage until promoted (a replica cluster).
     let target = ManagedPostgresCluster {
         cluster_id: target_cluster_id.clone(),
         organization_id: source.organization_id.clone(),
@@ -6390,11 +6333,7 @@ async fn sql_api_request_managed_postgres_standby(
         tier: source.tier.clone(),
         storage_gib: source.storage_gib,
         lifecycle_state: ClusterLifecycleState::Restoring,
-        host_assignment: Some(HostAssignment {
-            host_id: source_assignment.host_id.clone(),
-            data_dir: target_data_dir.display().to_string(),
-            port: target_port,
-        }),
+        host_assignment: None,
     };
     let standby = ManagedPostgresStandby {
         standby_id: standby_id.clone(),
@@ -6404,49 +6343,18 @@ async fn sql_api_request_managed_postgres_standby(
         status: StandbyLifecycleState::Running,
         error_message: None,
     };
-    let replication_endpoint = store.managed_postgres_replication_endpoint(&source).await?;
-    let primary_conninfo = format!(
-        "host={} port={} user={} password={} dbname={} application_name={}",
-        postgres_conninfo_value(&replication_endpoint.host),
-        postgres_conninfo_value(&replication_endpoint.port.to_string()),
-        postgres_conninfo_value(&replication_endpoint.username),
-        postgres_conninfo_value(&replication_endpoint.password),
-        postgres_conninfo_value(&replication_endpoint.database),
-        postgres_conninfo_value(&sanitize_identifier_component(&target_cluster_id))
-    );
-    let primary_slot_name = standby_physical_slot_name(&target_cluster_id);
-    let command = NodeAgentCommand {
-        command_id: format!("{target_cluster_id}:prepare-postgres-standby:{standby_id}"),
-        cluster_id: target_cluster_id.clone(),
-        action: NodeAgentAction::PreparePostgresStandby {
-            backup_id: backup.backup_id.clone(),
-            backup_dir: backup.backup_dir.clone(),
-            data_dir: target_data_dir.display().to_string(),
-            target_port: Some(target_port),
-            primary_conninfo,
-            primary_slot_name,
-            source_data_dir: source_assignment.data_dir.clone(),
-            source_port: source_assignment.port,
-            database: "postgres".to_owned(),
-            restore_command: restore_command_for_data_dir(
-                &source_assignment.data_dir,
-                &source.cluster_id,
-            )?,
-        },
+    let replica_source = palimpsest_paas_runtime::RestoreSource {
+        source_cluster_id: source.cluster_id.clone(),
+        recovery_target_time: None,
+        recovery_target_lsn: None,
+        continuous_replica: true,
     };
+    runtime::ClusterRuntime::from_env()
+        .restore(&target, &replica_source)
+        .map_err(runtime_error)?;
 
     store.insert_managed_postgres_cluster(&target).await?;
     store.insert_managed_postgres_standby(&standby).await?;
-    let operation =
-        operation_for_agent_command(OperationKind::PrepareStandby, &standby.standby_id, &command);
-    store.insert_operation(&operation).await?;
-    store
-        .enqueue_agent_command(
-            &source_assignment.host_id,
-            Some(&operation.operation_id),
-            &command,
-        )
-        .await?;
     store
         .append_audit_event(&audit_event(
             auth.actor_id(),
@@ -6458,8 +6366,6 @@ async fn sql_api_request_managed_postgres_standby(
     Ok(Json(StandbyApiResponse {
         standby,
         cluster: target,
-        command,
-        operation,
     }))
 }
 
@@ -6744,6 +6650,7 @@ async fn sql_api_request_managed_postgres_restore(
         source_cluster_id: source.cluster_id.clone(),
         recovery_target_time: None,
         recovery_target_lsn: payload.recovery_target_lsn.clone(),
+        continuous_replica: false,
     };
     runtime::ClusterRuntime::from_env()
         .restore(&target, &restore_source)
@@ -7045,6 +6952,7 @@ async fn create_point_in_time_branch(
         source_cluster_id: source.cluster_id.clone(),
         recovery_target_time: None,
         recovery_target_lsn: Some(recovery_target_lsn.clone()),
+        continuous_replica: false,
     };
     runtime::ClusterRuntime::from_env()
         .restore(&target, &restore_source)
@@ -7427,11 +7335,6 @@ fn restore_command_for_data_dir(data_dir: &str, cluster_id: &str) -> Result<Stri
         runtime_root.display(),
         sanitize_identifier_component(cluster_id)
     ))
-}
-
-fn postgres_conninfo_value(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
-    format!("'{escaped}'")
 }
 
 async fn queue_managed_postgres_backup(
@@ -9993,10 +9896,6 @@ pub struct FailoverClusterRequest {
 #[derive(Debug, Serialize)]
 pub struct FailoverApiResponse {
     failover: ManagedPostgresFailover,
-    fence_command: NodeAgentCommand,
-    fence_operation: OperationRecord,
-    command: NodeAgentCommand,
-    operation: OperationRecord,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10009,8 +9908,6 @@ pub struct CreateStandbyRequest {
 pub struct StandbyApiResponse {
     standby: ManagedPostgresStandby,
     cluster: ManagedPostgresCluster,
-    command: NodeAgentCommand,
-    operation: OperationRecord,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -11677,14 +11574,6 @@ predicate = \"owner_id = $user.id\"
         assert_eq!(
             standby_physical_slot_name("cluster_123_standby"),
             "cluster_123_standby_slot"
-        );
-    }
-
-    #[test]
-    fn postgres_conninfo_value_quotes_and_escapes_libpq_values() {
-        assert_eq!(
-            postgres_conninfo_value("cluster 123's replication\\role"),
-            "'cluster 123\\'s replication\\\\role'"
         );
     }
 

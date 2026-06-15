@@ -61,6 +61,10 @@ fn run() -> Result<(), String> {
                 source_cluster_id: source_cluster_id.clone(),
                 recovery_target_time: std::env::var("PALIMPSEST_PAAS_RESTORE_TARGET_TIME").ok(),
                 recovery_target_lsn: std::env::var("PALIMPSEST_PAAS_RESTORE_TARGET_LSN").ok(),
+                continuous_replica: matches!(
+                    std::env::var("PALIMPSEST_PAAS_RESTORE_REPLICA").as_deref(),
+                    Ok("1" | "true" | "yes")
+                ),
             };
             let manifests =
                 RenderedManifests::render_restore(&cluster, &source, None, &[], &RuntimeConfig::from_env())
