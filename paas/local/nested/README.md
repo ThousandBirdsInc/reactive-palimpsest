@@ -17,6 +17,7 @@ PALIMPSEST_PAAS_KIND_NESTED=1 ./local/up.sh
 | File | Problem it solves |
 |------|-------------------|
 | `prepare.sh` (host `name=systemd`/`cpuset`/`hugetlb` mounts) | A private cgroup namespace can't *create* these v1 controllers under the sandbox, but it can *attach* to ones already mounted on the host. Without them the node's systemd / kubelet refuse to start. |
+| `prepare.sh` (`mkdir -p /lib/modules/$(uname -r)`) | kind bind-mounts `/lib/modules:ro` into every node, but the microVM ships no kernel modules so the directory is absent and podman aborts node creation with `statfs /lib/modules: no such file or directory`. An empty tree satisfies the mount; the modules kind needs are built into the sandbox kernel. |
 | `Dockerfile` + `kind-cgroupv1-shim` | The kubelet's cgroupfs driver needs `cpuset`/`hugetlb` slice paths that systemd doesn't delegate on cgroup v1; the shim pre-creates them as a kubelet `ExecStartPre`. |
 | `Dockerfile` (`SystemdCgroup = false`) + `kind-config.yaml` (`cgroupDriver: cgroupfs`) | Avoids the systemd cgroup driver, which can't manage `cpuset`/`hugetlb` on cgroup v1. |
 | `Dockerfile` (`restrict_oom_score_adj = true`) | The sandbox denies writing a negative `oom_score_adj`; without this, runc fails to start every pod sandbox (`can't get final child's PID from pipe: EOF`). |
@@ -25,7 +26,7 @@ PALIMPSEST_PAAS_KIND_NESTED=1 ./local/up.sh
 
 ## Caveat: not durable across idle
 
-The host cgroup mounts (`prepare.sh`) do not survive the microVM being
-reclaimed after inactivity, and the node container can wedge across long idle
-gaps. Re-running `PALIMPSEST_PAAS_KIND_NESTED=1 ./local/up.sh` re-establishes
-the mounts and recreates the cluster.
+The host cgroup mounts and `/lib/modules` tree (`prepare.sh`) do not survive the
+microVM being reclaimed after inactivity, and the node container can wedge
+across long idle gaps. Re-running `PALIMPSEST_PAAS_KIND_NESTED=1 ./local/up.sh`
+re-establishes them and recreates the cluster.

@@ -14,6 +14,15 @@ imagePullSecrets: []
 # installed cluster-wide.
 cloudnative-pg:
   enabled: true
+  # The subchart ships its CRDs as Helm templates, which are validated against
+  # the API server too late for the control-plane metadata `Cluster` (a
+  # postgresql.cnpg.io resource in this same release) — `helm install` fails
+  # with `no matches for kind "Cluster"`. We instead vendor the CRDs into this
+  # chart's crds/ directory, which Helm applies before rendering any template,
+  # so disable the subchart's copy to avoid a duplicate. See crds/ for how to
+  # regenerate them when bumping the subchart version.
+  crds:
+    create: false
 
 # -----------------------------------------------------------------------------
 # Control plane: the SQL-backed reconciliation + API service. It renders managed

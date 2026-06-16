@@ -28,6 +28,14 @@ for c in systemd cpuset hugetlb; do
   fi
 done
 
+# kind bind-mounts /lib/modules:ro from the host into every node. The microVM
+# ships no kernel modules, so the directory is absent and podman aborts node
+# creation with `statfs /lib/modules: no such file or directory`. An empty tree
+# satisfies the bind mount; the modules kind needs (overlay, br_netfilter, ...)
+# are built into the sandbox kernel, so nothing has to be loaded from it.
+echo ">> [nested] ensuring /lib/modules exists for the node bind mount"
+mkdir -p "/lib/modules/$(uname -r)"
+
 echo ">> [nested] building patched kind node image '$NESTED_IMAGE'"
 podman build --build-arg "NODE_IMAGE=$NODE_IMAGE_BASE" -t "$NESTED_IMAGE" "$HERE" >/dev/null
 
