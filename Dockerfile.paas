@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1.7
+# PaaS image: bundles the managed-Postgres control-plane, node-agent, gateway,
+# and the `palimpsest` sync engine into one image. Different deployments run
+# different entrypoints from the same image (see app-agent-builder's Helm
+# templates). Unlike the distroless `palimpsest` CLI image, this ships a Debian
+# runtime because the node-agent shells out to the `docker` CLI to launch
+# managed Postgres 18 containers.
+#
+# Build (from the reactive-palimpsest repo root):
+#   docker build -f Dockerfile.paas -t paas:dev .
+#
+# A workspace dependency requires edition2024, so the toolchain must be >= 1.85
+# (cargo-chef is intentionally not used — 0.1.68 can't parse an edition2024
+# recipe; a direct `cargo build` is slower but self-contained and reliable).
+
+ARG RUST_VERSION=1-bookworm
+
+FROM rust:${RUST_VERSION} AS builder
+# protoc is required by palimpsest-proto's build script.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY . .
+RUN cargo build --release \
+        --bin palimpsest \
+        --bin palimpsest-paas-control-plane \
+        --bin palimpsest-paas-node-agent \
+        --bin palimpsest-paas-gateway \
+    && strip target/release/palimpsest \
+             target/release/palimpsest-paas-control-plane \
+             target/release/palimpsest-paas-node-agent \
+             target/release/palimpsest-paas-gateway
+
+FROM debian:bookworm-slim AS runtime
+# ca-certificates: outbound TLS. curl: readiness scripts / debugging.
+# docker.io: the `docker` CLI the node-agent uses to run managed Postgres.
+# postgresql-client: psql/pg_isready for migration + DDL apply steps.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl docker.io postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /workspace/target/release/palimpsest /usr/local/bin/palimpsest
+COPY --from=builder /workspace/target/release/palimpsest-paas-control-plane /usr/local/bin/palimpsest-paas-control-plane
+COPY --from=builder /workspace/target/release/palimpsest-paas-node-agent /usr/local/bin/palimpsest-paas-node-agent
+COPY --from=builder /workspace/target/release/palimpsest-paas-gateway /usr/local/bin/palimpsest-paas-gateway
+# Control-plane Flyway migrations, shared into the migration Job via an
+# initContainer that copies them onto an emptyDir for the flyway image.
+COPY paas/control-plane/migrations /opt/paas/control-plane/migrations
+EXPOSE 8088 8089
