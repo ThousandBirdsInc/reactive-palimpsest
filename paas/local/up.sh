@@ -45,7 +45,12 @@ fi
 kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
 
 echo ">> building chart dependencies (CloudNativePG operator)"
-helm dependency build "$CHART_DIR"
+# `helm dependency build` is fragile here: the CloudNativePG dependency is
+# referenced by URL only (an "unmanaged" repo not added via `helm repo add`),
+# and once a Chart.lock exists, build refuses to fetch it ("no repository
+# definition"). `update` resolves URL-based repos directly and refreshes the
+# lock; the version is pinned exactly in Chart.yaml so it stays deterministic.
+helm dependency update "$CHART_DIR"
 
 echo ">> installing release '$RELEASE' into namespace '$NAMESPACE'"
 # Override image values via PALIMPSEST_PAAS_HELM_ARGS, e.g.:
