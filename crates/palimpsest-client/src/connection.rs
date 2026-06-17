@@ -231,7 +231,7 @@ impl ConnectionTask {
                 Err(OpenError::Auth(status)) => {
                     let reason = format!("auth failure: {}", status.message());
                     let _ = self.state_tx.send(ConnectionState::Closed { reason });
-                    self.fail_all(&ClientError::Grpc(Box::new(status)));
+                    self.fail_all(&ClientError::Grpc(status));
                     return RunOutcome::Shutdown;
                 }
                 Err(OpenError::Transient) => {
