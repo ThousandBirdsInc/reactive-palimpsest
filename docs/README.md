@@ -65,3 +65,5 @@ lives under [`../paas/`](../paas/):
 | [`../paas/PRODUCTION-READINESS-DESIGN.md`](../paas/PRODUCTION-READINESS-DESIGN.md) | Production-readiness checklist, control loops, readiness levels, and launch blockers. |
 | [`../paas/PAAS-UI-DESIGN.md`](../paas/PAAS-UI-DESIGN.md) | The routed multi-page operator console design. |
 | [`../paas/IMPLEMENTATION-PLAN.md`](../paas/IMPLEMENTATION-PLAN.md) | Incremental, phase-by-phase build plan with per-deliverable status annotations. |
+| [`PAAS-HOST-AGENT-REMOVAL.md`](PAAS-HOST-AGENT-REMOVAL.md) | Staged runbook for removing the obsolete host-agent / node-command subsystem left over after the CloudNativePG migration. |
+| [`PAAS-SYNC-DEPLOYMENT-DISPOSITION.md`](PAAS-SYNC-DEPLOYMENT-DISPOSITION.md) | Decision + runbook for the orphaned `palimpsest-paas-sync-wrapper` / SyncDeployment feature (keep-and-port vs. remove). |
