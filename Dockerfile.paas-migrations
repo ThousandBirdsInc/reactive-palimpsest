@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1.7
+# Control-plane Flyway migrations image, consumed by the Helm chart's
+# migrations Job (paas/deploy/helm/palimpsest-paas/templates/migrations-job.yaml),
+# which runs `flyway migrate` with FLYWAY_URL/USER/PASSWORD from the CloudNativePG
+# control-db secret. The migrations are baked at /flyway/sql (Flyway's default
+# location), so no volume/initContainer is needed.
+#
+# Build (from the repo root):
+#   docker build -f Dockerfile.paas-migrations -t paas-migrations:dev .
+
+FROM flyway/flyway:11
+COPY paas/control-plane/migrations /flyway/sql

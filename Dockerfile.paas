@@ -1,17 +1,18 @@
 # syntax=docker/dockerfile:1.7
-# PaaS image: bundles the managed-Postgres control-plane, node-agent, gateway,
-# and the `palimpsest` sync engine into one image. Different deployments run
-# different entrypoints from the same image (see app-agent-builder's Helm
-# templates). Unlike the distroless `palimpsest` CLI image, this ships a Debian
-# runtime because the node-agent shells out to the `docker` CLI to launch
-# managed Postgres 18 containers.
+# PaaS image for the Kubernetes/CloudNativePG runtime: the control-plane,
+# gateway, and db-proxy binaries + the `palimpsest` sync engine, on a Debian
+# runtime. The Helm chart (paas/deploy/helm/palimpsest-paas) runs different
+# entrypoints from this one image:
+#   - control-plane: overrides command to `palimpsest-paas-control-plane serve-sql-api`
+#   - gateway:       uses the image ENTRYPOINT (palimpsest-paas-gateway)
+#   - db-proxy:      overrides command to ["db_proxy"]  (the db-proxy binary,
+#                    installed as `db_proxy` to match values.dbProxy.command)
 #
-# Build (from the reactive-palimpsest repo root):
+# Build (from the repo root):
 #   docker build -f Dockerfile.paas -t paas:dev .
 #
-# A workspace dependency requires edition2024, so the toolchain must be >= 1.85
-# (cargo-chef is intentionally not used — 0.1.68 can't parse an edition2024
-# recipe; a direct `cargo build` is slower but self-contained and reliable).
+# Toolchain is `rust:1-bookworm` (>= 1.88, per transitive deps). cargo-chef is
+# intentionally not used (0.1.68 can't parse an edition2024 recipe).
 
 ARG RUST_VERSION=1-bookworm
 
@@ -25,26 +26,37 @@ COPY . .
 RUN cargo build --release \
         --bin palimpsest \
         --bin palimpsest-paas-control-plane \
-        --bin palimpsest-paas-node-agent \
         --bin palimpsest-paas-gateway \
-    && strip target/release/palimpsest \
-             target/release/palimpsest-paas-control-plane \
-             target/release/palimpsest-paas-node-agent \
-             target/release/palimpsest-paas-gateway
+        --bin palimpsest-paas-db-proxy \
+        --bin palimpsest-paas-sync-wrapper \
+    && strip \
+        target/release/palimpsest \
+        target/release/palimpsest-paas-control-plane \
+        target/release/palimpsest-paas-gateway \
+        target/release/palimpsest-paas-db-proxy \
+        target/release/palimpsest-paas-sync-wrapper
 
 FROM debian:bookworm-slim AS runtime
-# ca-certificates: outbound TLS. curl: readiness scripts / debugging.
-# docker.io: the `docker` CLI the node-agent uses to run managed Postgres.
-# postgresql-client: psql/pg_isready for migration + DDL apply steps.
+# ca-certificates: outbound TLS (k8s API, ACME). curl: probes/debugging.
+# postgresql-client: psql/pg_isready for DDL apply + diagnostics.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl docker.io postgresql-client \
+        ca-certificates curl postgresql-client \
     && rm -rf /var/lib/apt/lists/*
+# The control-plane's CloudNativePG runtime shells out to `kubectl` to apply
+# managed Cluster manifests (using the pod's in-cluster ServiceAccount).
+ARG KUBECTL_VERSION=v1.31.4
+ARG TARGETARCH=arm64
+RUN curl -fsSLo /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
+    && chmod 0755 /usr/local/bin/kubectl
 COPY --from=builder /workspace/target/release/palimpsest /usr/local/bin/palimpsest
 COPY --from=builder /workspace/target/release/palimpsest-paas-control-plane /usr/local/bin/palimpsest-paas-control-plane
-COPY --from=builder /workspace/target/release/palimpsest-paas-node-agent /usr/local/bin/palimpsest-paas-node-agent
 COPY --from=builder /workspace/target/release/palimpsest-paas-gateway /usr/local/bin/palimpsest-paas-gateway
-# Control-plane Flyway migrations, shared into the migration Job via an
-# initContainer that copies them onto an emptyDir for the flyway image.
-COPY paas/control-plane/migrations /opt/paas/control-plane/migrations
-EXPOSE 8088 8089
+# Installed as `db_proxy` to match the chart's values.dbProxy.command (["db_proxy"]).
+COPY --from=builder /workspace/target/release/palimpsest-paas-db-proxy /usr/local/bin/db_proxy
+COPY --from=builder /workspace/target/release/palimpsest-paas-sync-wrapper /usr/local/bin/palimpsest-paas-sync-wrapper
+# Runs non-root to match the chart's securityContext (runAsUser 65532).
+USER 65532:65532
+EXPOSE 8088 8080 5432
+ENTRYPOINT ["palimpsest-paas-gateway"]
