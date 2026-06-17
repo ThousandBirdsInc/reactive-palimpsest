@@ -12,6 +12,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Core (non-paas) workspace currently lands at ~67.3% line coverage with
+  # the paas crates excluded above. Floor set just under that; ratchet up as
+  # coverage improves. (Was an unenforced 70% default that the job never
+  # actually reached because coverage generation failed earlier.)
+  PALIMPSEST_COVERAGE_FLOOR: '66'
 
 jobs:
   llvm-cov:

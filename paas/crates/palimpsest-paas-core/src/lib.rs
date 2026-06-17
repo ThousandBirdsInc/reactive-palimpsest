@@ -1104,9 +1104,6 @@ pub enum NodeAgentAction {
     PromotePostgresStandby {
         data_dir: String,
     },
-    FencePostgresPrimary {
-        data_dir: String,
-    },
     ResizePostgresStorage {
         data_dir: String,
         storage_gib: u32,

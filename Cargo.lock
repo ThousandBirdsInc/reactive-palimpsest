@@ -1824,11 +1824,9 @@ dependencies = [
 name = "palimpsest-client"
 version = "0.1.1"
 dependencies = [
- "async-trait",
  "futures",
  "gloo-net",
  "gloo-timers",
- "http",
  "js-sys",
  "jsonwebtoken",
  "palimpsest-proto",
@@ -1890,7 +1888,6 @@ dependencies = [
  "mimalloc",
  "palimpsest-sql",
  "palimpsest-wal",
- "paste",
  "petgraph",
  "proptest",
  "rand 0.4.6",
@@ -1998,7 +1995,6 @@ version = "0.1.1"
 dependencies = [
  "insta",
  "palimpsest-sql",
- "petgraph",
  "proptest",
  "serde",
  "sqlparser",
@@ -2040,7 +2036,6 @@ version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
- "bincode",
  "criterion",
  "futures",
  "http",
@@ -2054,7 +2049,6 @@ dependencies = [
  "palimpsest-sql",
  "palimpsest-wal",
  "proptest",
- "prost",
  "serde",
  "serde_json",
  "smallvec",
@@ -2077,7 +2071,6 @@ dependencies = [
  "palimpsest-permissions",
  "palimpsest-server",
  "palimpsest-sql",
- "palimpsest-test-harness",
  "palimpsest-wal",
  "smallvec",
  "tokio",
