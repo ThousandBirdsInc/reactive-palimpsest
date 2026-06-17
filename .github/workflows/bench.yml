@@ -58,12 +58,12 @@ jobs:
         run: |
           git fetch origin ${{ github.base_ref }}
           git checkout origin/${{ github.base_ref }}
-          cargo bench --workspace --no-fail-fast -- --save-baseline main
+          cargo bench --workspace --benches --no-fail-fast -- --save-baseline main
 
       - name: Compare (PR head)
         run: |
           git checkout ${{ github.sha }}
-          cargo bench --workspace --no-fail-fast -- --baseline main
+          cargo bench --workspace --benches --no-fail-fast -- --baseline main
 
       - name: Enforce regression budget
         run: cargo run -p xtask -- check-bench-regression --threshold ${{ env.PALIMPSEST_BENCH_REGRESSION_PCT }}

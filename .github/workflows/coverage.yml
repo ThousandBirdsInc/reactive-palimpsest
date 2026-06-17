@@ -22,9 +22,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # Branch coverage (`cargo llvm-cov --branch`) lowers to
+        # `-Z coverage-options=branch`, which is nightly-only.
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: stable
+          toolchain: nightly
           components: llvm-tools-preview
 
       - name: Install protoc

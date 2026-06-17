@@ -231,7 +231,7 @@ impl ConnectionTask {
                 Err(OpenError::Auth(status)) => {
                     let reason = format!("auth failure: {}", status.message());
                     let _ = self.state_tx.send(ConnectionState::Closed { reason });
-                    self.fail_all(&ClientError::Grpc(status));
+                    self.fail_all(&ClientError::Grpc(Box::new(status)));
                     return RunOutcome::Shutdown;
                 }
                 Err(OpenError::Transient) => {
@@ -282,7 +282,7 @@ impl ConnectionTask {
                                 tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
                             ) {
                                 warn!(?status, "stream auth failure; shutting down");
-                                self.fail_all(&ClientError::Grpc(status));
+                                self.fail_all(&ClientError::Grpc(Box::new(status)));
                                 return RunOutcome::Shutdown;
                             }
                             warn!(?status, "stream error; reconnecting");
