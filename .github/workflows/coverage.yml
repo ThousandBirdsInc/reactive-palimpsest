@@ -55,6 +55,11 @@ jobs:
         run: |
           cargo llvm-cov --workspace \
             --exclude palimpsest-client-js \
+            --exclude palimpsest-paas-control-plane \
+            --exclude palimpsest-paas-core \
+            --exclude palimpsest-paas-gateway \
+            --exclude palimpsest-paas-runtime \
+            --exclude palimpsest-paas-sync-wrapper \
             --lcov --output-path lcov.info \
             --ignore-filename-regex 'crates/palimpsest-proto/src/generated'
 

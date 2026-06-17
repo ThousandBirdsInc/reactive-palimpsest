@@ -71,6 +71,11 @@ jobs:
         run: cargo insta test --unreferenced reject -p palimpsest-sql
 
       - name: Clippy
+        # Strict `-D warnings` only on stable. Nightly clippy's unstable
+        # lints churn (and some currently mis-fire on non-trait-impl async
+        # fns), which would break CI on toolchain rolls unrelated to our
+        # code. Nightly still builds + tests above.
+        if: matrix.toolchain == 'stable'
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   deny:
