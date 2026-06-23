@@ -1,4 +1,4 @@
-# `@palimpsest/client`
+# `@1kbirds/palimpsest-client`
 
 Type-safe TypeScript wrapper around
 [`palimpsest-client-js`](../../crates/palimpsest-client-js) (the
@@ -28,7 +28,7 @@ In a monorepo with the wasm crate built into a sibling directory:
 ```json
 {
   "dependencies": {
-    "@palimpsest/client": "file:../../packages/palimpsest-client-typescript",
+    "@1kbirds/palimpsest-client": "^0.1.0",
     "react": "^18.3.1"
   }
 }
@@ -40,7 +40,7 @@ is imported directly from your app.
 ## Quick start (vanilla TS)
 
 ```ts
-import { PalimpsestClient } from "@palimpsest/client";
+import { PalimpsestClient } from "@1kbirds/palimpsest-client";
 import * as wasm from "./pkg/palimpsest_client_js";
 
 interface Post {
@@ -87,7 +87,7 @@ import { useMemo } from "react";
 import {
   usePalimpsestClient,
   usePalimpsestSubscription,
-} from "@palimpsest/client/react";
+} from "@1kbirds/palimpsest-client/react";
 import * as wasm from "./pkg/palimpsest_client_js";
 
 interface Post {
@@ -155,6 +155,6 @@ a write — the hook supports this without any other code changes.
 
 ## Subpaths
 
-- `@palimpsest/client` — core (`PalimpsestClient`, `TypedSubscription`,
+- `@1kbirds/palimpsest-client` — core (`PalimpsestClient`, `TypedSubscription`,
   types). No React dependency.
-- `@palimpsest/client/react` — hooks. Pulls `react` as a peer.
+- `@1kbirds/palimpsest-client/react` — hooks. Pulls `react` as a peer.

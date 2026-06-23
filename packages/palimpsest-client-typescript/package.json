@@ -1,9 +1,16 @@
 {
-  "name": "@palimpsest/client",
+  "name": "@1kbirds/palimpsest-client",
   "version": "0.1.0",
-  "private": true,
   "description": "Type-safe TypeScript wrapper around palimpsest-client-js, with React hooks.",
   "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThousandBirdsInc/reactive-palimpsest.git",
+    "directory": "packages/palimpsest-client-typescript"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -1,5 +1,5 @@
-// Public entry point. Importing from "@palimpsest/client" gets you the
-// core (no React dependency); React hooks live in "@palimpsest/client/react".
+// Public entry point. Importing from "@1kbirds/palimpsest-client" gets you the
+// core (no React dependency); React hooks live in "@1kbirds/palimpsest-client/react".
 
 export { PalimpsestClient, TypedSubscription } from "./client.js";
 export type { ClientOptions } from "./client.js";

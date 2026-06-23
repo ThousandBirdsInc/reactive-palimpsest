@@ -1,4 +1,4 @@
-// React hook surface. Importing from "@palimpsest/client/react" pulls
+// React hook surface. Importing from "@1kbirds/palimpsest-client/react" pulls
 // in `react` as a peer dependency.
 
 export {
