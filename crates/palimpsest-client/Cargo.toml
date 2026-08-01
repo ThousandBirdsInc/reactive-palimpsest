@@ -12,9 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-async-trait.workspace = true
 futures.workspace = true
-http.workspace = true
 palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.1" }
 thiserror.workspace = true
 tracing.workspace = true

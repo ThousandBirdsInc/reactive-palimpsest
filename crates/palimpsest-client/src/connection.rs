@@ -282,7 +282,7 @@ impl ConnectionTask {
                                 tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
                             ) {
                                 warn!(?status, "stream auth failure; shutting down");
-                                self.fail_all(&ClientError::Grpc(status));
+                                self.fail_all(&ClientError::Grpc(Box::new(status)));
                                 return RunOutcome::Shutdown;
                             }
                             warn!(?status, "stream error; reconnecting");

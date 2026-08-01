@@ -53,8 +53,10 @@ pub(crate) enum OpenError {
     ///
     /// Only the native transport produces this today; the WS bridge
     /// currently accepts anonymous connections.
+    // Boxed: `tonic::Status` is ~176 bytes; keeping it inline would trip
+    // clippy's `result_large_err` on every `Result<_, OpenError>`.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    Auth(tonic::Status),
+    Auth(Box<tonic::Status>),
     /// Anything else — dial failure, transient gRPC error, WS handshake
     /// rejection, etc. The manager reconnects.
     Transient,
@@ -130,9 +132,9 @@ mod native {
         let mut request = Request::new(ReceiverStream::new(outbound_rx));
         if let Err(err) = auth.apply(request.metadata_mut()) {
             warn!(?err, "auth header rejected");
-            return Err(OpenError::Auth(tonic::Status::unauthenticated(
+            return Err(OpenError::Auth(Box::new(tonic::Status::unauthenticated(
                 err.to_string(),
-            )));
+            ))));
         }
 
         let mut stream = match client.subscribe(request).await {
@@ -142,7 +144,7 @@ mod native {
                     status.code(),
                     Code::Unauthenticated | Code::PermissionDenied
                 ) {
-                    return Err(OpenError::Auth(status));
+                    return Err(OpenError::Auth(Box::new(status)));
                 }
                 warn!(?status, "subscribe handshake failed");
                 return Err(OpenError::Transient);

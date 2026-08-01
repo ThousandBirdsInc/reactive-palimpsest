@@ -18,10 +18,13 @@ pub enum ClientError {
     /// which doesn't compile for `wasm32-unknown-unknown`.
     #[cfg(not(target_arch = "wasm32"))]
     #[error("transport: {0}")]
-    Transport(#[from] tonic::transport::Error),
+    Transport(Box<tonic::transport::Error>),
     /// gRPC stream returned a non-OK status.
+    ///
+    /// Boxed: `tonic::Status` is ~176 bytes, which would otherwise bloat
+    /// every `Result<_, ClientError>` and trip clippy's `result_large_err`.
     #[error("grpc status: {0}")]
-    Grpc(#[from] tonic::Status),
+    Grpc(Box<tonic::Status>),
     /// The connection is closing or has shut down.
     #[error("connection closed")]
     ConnectionClosed,
@@ -38,4 +41,20 @@ pub enum ClientError {
     /// User-supplied SQL or vars failed validation client-side.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+}
+
+// Manual `From` impls (instead of `#[from]`) so the `Box` is applied
+// transparently: `?` keeps working while these variants stay pointer-sized
+// rather than embedding ~176-byte tonic errors by value.
+impl From<tonic::Status> for ClientError {
+    fn from(status: tonic::Status) -> Self {
+        Self::Grpc(Box::new(status))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<tonic::transport::Error> for ClientError {
+    fn from(err: tonic::transport::Error) -> Self {
+        Self::Transport(Box::new(err))
+    }
 }

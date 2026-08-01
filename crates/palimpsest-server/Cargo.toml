@@ -22,7 +22,6 @@ otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", 
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
-bincode.workspace = true
 futures.workspace = true
 http.workspace = true
 jsonwebtoken.workspace = true
@@ -34,7 +33,6 @@ palimpsest-permissions = { path = "../palimpsest-permissions", version = "0.1.1"
 palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.1" }
 palimpsest-sql = { path = "../palimpsest-sql", version = "0.1.1" }
 palimpsest-wal = { path = "../palimpsest-wal", version = "0.1.1" }
-prost.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 smallvec.workspace = true

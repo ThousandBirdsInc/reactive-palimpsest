@@ -17,7 +17,6 @@ palimpsest-dataflow = { path = "../palimpsest-dataflow" }
 palimpsest-permissions = { path = "../palimpsest-permissions" }
 palimpsest-server = { path = "../palimpsest-server" }
 palimpsest-sql = { path = "../palimpsest-sql" }
-palimpsest-test-harness = { path = "../palimpsest-test-harness" }
 palimpsest-wal = { path = "../palimpsest-wal" }
 smallvec.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

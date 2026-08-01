@@ -8248,7 +8248,6 @@ const fn node_agent_action_step(action: &NodeAgentAction) -> &'static str {
         NodeAgentAction::PreparePostgresStandby { .. } => "prepare_postgres_standby",
         NodeAgentAction::ArchiveWalSegment { .. } => "archive_wal_segment",
         NodeAgentAction::PromotePostgresStandby { .. } => "promote_postgres_standby",
-        NodeAgentAction::FencePostgresPrimary { .. } => "fence_postgres_primary",
         NodeAgentAction::ResizePostgresStorage { .. } => "resize_postgres_storage",
         NodeAgentAction::UpdatePostgresMinor { .. } => "update_postgres_minor",
         NodeAgentAction::UpgradePostgresMajor { .. } => "upgrade_postgres_major",
