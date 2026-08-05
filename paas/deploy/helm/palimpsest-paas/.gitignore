@@ -1,5 +1,0 @@
-# Helm dependency artifacts, fetched at install time by `helm dependency update`
-# (see local/up.sh). The CloudNativePG operator subchart and its lock are
-# reproducible from Chart.yaml's pinned version, so they are not tracked.
-/charts/
-/Chart.lock
