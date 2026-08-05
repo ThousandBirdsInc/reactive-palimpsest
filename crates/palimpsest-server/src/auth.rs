@@ -167,8 +167,10 @@ fn json_to_user_value(claim: &str, value: &serde_json::Value) -> Result<UserValu
         ),
         serde_json::Value::String(s) => Ok(UserValue::Text(s.clone())),
         serde_json::Value::Null => Ok(UserValue::Null),
+        // Structured claims map onto `jsonb` user-context fields.
+        // Validation against the declared schema happens downstream.
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Err(AuthError::InvalidClaimShape(claim.to_owned()))
+            Ok(UserValue::Jsonb(value.clone()))
         }
     }
 }
@@ -248,6 +250,38 @@ mod tests {
             .unwrap();
         assert!(ctx.get("id").is_some());
         assert!(ctx.get("org_id").is_some());
+    }
+
+    #[tokio::test]
+    async fn jwt_lifts_structured_claims_as_jsonb() {
+        let secret = "topsecret";
+        let claims = serde_json::json!({
+            "sub": "user-1",
+            "prefs": {"theme": "dark", "tags": [1, 2]},
+            "exp": now_plus(60),
+        });
+        let token = token_with(&claims, secret);
+
+        let mut claim_to_field = BTreeMap::new();
+        claim_to_field.insert("prefs".to_owned(), "prefs".to_owned());
+
+        let auth = JwtAuthenticator::new(JwtAuthConfig {
+            secret: secret.to_owned(),
+            issuer: None,
+            audience: None,
+            claim_to_field,
+        });
+
+        let ctx = auth
+            .authenticate(&metadata_with_bearer(&token))
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.get("prefs"),
+            Some(&palimpsest_permissions::UserValue::Jsonb(
+                serde_json::json!({"theme": "dark", "tags": [1, 2]})
+            ))
+        );
     }
 
     #[tokio::test]

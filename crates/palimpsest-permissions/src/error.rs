@@ -87,6 +87,17 @@ pub enum PermissionError {
         limit: usize,
     },
 
+    /// `UserContext` value is the right type but malformed (e.g. a
+    /// `Uuid` value whose text does not parse as a UUID).
+    #[error("user-context field {field:?} has invalid value: {reason}")]
+    InvalidUserValue {
+        /// Offending field, or empty when the value was rejected before
+        /// it was bound to a field.
+        field: String,
+        /// Human-readable rejection reason.
+        reason: String,
+    },
+
     /// `UserContext` value disagrees with the declared schema type.
     #[error("user-context field {field} has type {actual:?}, expected {expected:?}")]
     UserValueTypeMismatch {

@@ -143,8 +143,13 @@ configuration. But you do attach a `UserContext` when you connect:
 client.connect()
     .with_user_field("org_id", UserValue::Int(42))
     .with_user_field("is_admin", UserValue::Bool(false))
+    .with_user_field("tenant_id", UserValue::uuid("67e55044-10b1-426f-9247-bb680e5fe0c8")?)
     .await?;
 ```
+
+Values may be `bool`, `int`, `float`, `text`, `timestamp`, `uuid`,
+`jsonb`, or `enum` — matching whichever type the operator declared for
+the field.
 
 The rule is applied as a row-visibility filter you cannot bypass; rows
 the rule excludes never appear in your subscription.

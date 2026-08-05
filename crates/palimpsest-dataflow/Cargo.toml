@@ -20,6 +20,7 @@ palimpsest-sql = { path = "../palimpsest-sql", version = "0.1.1" }
 palimpsest-wal = { path = "../palimpsest-wal", version = "0.1.1" }
 petgraph.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 smallvec.workspace = true
 sqlparser = { workspace = true, features = ["visitor"] }
 thiserror = { workspace = true }

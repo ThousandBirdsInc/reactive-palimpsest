@@ -43,7 +43,19 @@ predicate = "id = $user.id OR $user.is_admin"
 - **`[[user_context]]`** — declares the shape of the `UserContext`
   attached to each subscription. Every `$user.<name>` referenced from
   any rule must appear here, with the right type. Fields are typed as
-  `bool` / `int` / `float` / `text` / `timestamp`.
+  `bool` / `int` / `float` / `text` / `timestamp` / `uuid` / `jsonb` /
+  `enum`.
+
+  - `uuid` — an RFC 4122 UUID. Values are validated at subscribe time
+    and normalized to the lowercase hyphenated form (so canonical keys
+    match regardless of input casing). Plain strings are accepted where
+    a `uuid` field is declared, as long as they parse.
+  - `jsonb` — a JSON document, compared structurally against `jsonb`
+    columns. Only structured values are accepted — a raw JSON string is
+    rejected so a document is never confused with a text scalar.
+  - `enum` — a Postgres enum label, compared as text. The taxonomy is
+    coarse: all enum types collapse into one, and no per-type label
+    list is enforced.
 
 - **`[[rule]]`** — a row-visibility / subscribe-authorization predicate
   applied to a specific table.
@@ -92,10 +104,30 @@ posture, add `predicate = "false"` for tables you haven't reviewed.
 ### Per-tenant isolation
 
 ```toml
+[[user_context]]
+name = "tenant_id"
+type = "uuid"
+
 [[rule]]
 name = "tenant_isolation"
 table = "documents"
 predicate = "tenant_id = $user.tenant_id"
+```
+
+`tenant_id` here is a `uuid` field; the subscriber's value is validated
+and normalized before it is substituted into the filter.
+
+### Role gate on an enum column
+
+```toml
+[[user_context]]
+name = "role"
+type = "enum"
+
+[[rule]]
+name = "staff_only"
+table = "audit_log"
+predicate = "visibility = $user.role OR visibility = 'everyone'"
 ```
 
 ### Owner or admin

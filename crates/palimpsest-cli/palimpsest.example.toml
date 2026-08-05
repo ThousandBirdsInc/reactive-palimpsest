@@ -17,8 +17,10 @@ kind = "anonymous"
 # sub = "id"
 # org = "org_id"
 
+# Field types: bool, int, float, text, timestamp, uuid, jsonb, enum.
 [permissions.user_schema]
 # id = "int"
+# tenant_id = "uuid"
 
 # [[permissions.rules]]
 # name = "posts_owner"

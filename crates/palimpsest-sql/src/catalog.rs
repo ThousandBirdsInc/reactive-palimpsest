@@ -21,6 +21,13 @@ pub enum ColumnType {
     Text,
     /// Timestamp (with or without timezone).
     Timestamp,
+    /// RFC 4122 UUID.
+    Uuid,
+    /// Postgres `jsonb` (and `json`) document.
+    Jsonb,
+    /// Postgres enum label. The taxonomy is coarse on purpose: all enum
+    /// types collapse into one variant and labels are compared as text.
+    Enum,
     /// Type couldn't be inferred yet — treat as compatible with anything.
     Unknown,
 }
@@ -32,14 +39,30 @@ impl ColumnType {
         matches!(self, Self::Int | Self::Float)
     }
 
+    /// True for types whose values are written and compared as text.
+    /// Quoted SQL literals type as [`Self::Text`], so uuid and enum
+    /// columns must accept comparisons against text operands.
+    #[must_use]
+    pub const fn is_textual(self) -> bool {
+        matches!(self, Self::Text | Self::Uuid | Self::Enum)
+    }
+
     /// Whether two column types are interchangeable in a comparison or
     /// arithmetic context. `Unknown` is compatible with everything;
-    /// numerics promote to each other.
+    /// numerics promote to each other; textual types (text, uuid, enum)
+    /// compare with each other. `Jsonb` compares with itself and with
+    /// `Text`, because a jsonb constant can only be written as a quoted
+    /// literal (which types as `Text`).
     #[must_use]
     pub fn is_compatible_with(self, other: Self) -> bool {
         matches!((self, other), (Self::Unknown, _) | (_, Self::Unknown))
             || self == other
             || (self.is_numeric() && other.is_numeric())
+            || (self.is_textual() && other.is_textual())
+            || matches!(
+                (self, other),
+                (Self::Jsonb, Self::Text) | (Self::Text, Self::Jsonb)
+            )
     }
 }
 

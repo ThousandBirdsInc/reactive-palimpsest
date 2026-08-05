@@ -554,6 +554,50 @@ mod tests {
     }
 
     #[test]
+    fn materialize_substitutes_uuid_enum_and_jsonb_values() {
+        use palimpsest_sql::{ColumnSchema, TableSchema};
+
+        let catalog = Catalog::new([TableSchema::new(
+            "documents",
+            vec![
+                ColumnSchema::new("tenant_id", ColumnType::Uuid),
+                ColumnSchema::new("status", ColumnType::Enum),
+                ColumnSchema::new("meta", ColumnType::Jsonb),
+            ],
+        )]);
+        let schema = UserContextSchema::new([
+            ("tenant".to_owned(), ColumnType::Uuid),
+            ("role".to_owned(), ColumnType::Enum),
+            ("prefs".to_owned(), ColumnType::Jsonb),
+        ]);
+        let rule = PermissionRule::new(
+            "tenant_docs",
+            "documents",
+            "tenant_id = $user.tenant AND status = $user.role AND meta = $user.prefs",
+        );
+        let compiled = compile_rule(&rule, &catalog, &schema).unwrap();
+
+        let context = UserContext::new([
+            (
+                "tenant".to_owned(),
+                UserValue::uuid("67E55044-10B1-426F-9247-BB680E5FE0C8").unwrap(),
+            ),
+            ("role".to_owned(), UserValue::Enum("admin".to_owned())),
+            (
+                "prefs".to_owned(),
+                UserValue::Jsonb(serde_json::json!({"beta": true})),
+            ),
+        ]);
+        context.validate(&schema).expect("context validates");
+
+        let materialized = compiled.predicate.materialize(&context).unwrap();
+        assert!(materialized.contains("'67e55044-10b1-426f-9247-bb680e5fe0c8'"));
+        assert!(materialized.contains("'admin'"));
+        assert!(materialized.contains(r#"'{"beta":true}'"#));
+        assert!(!materialized.contains(super::USER_PLACEHOLDER_PREFIX));
+    }
+
+    #[test]
     fn rejects_excessively_deep_predicate() {
         let mut predicate = "id = 1".to_owned();
         for _ in 0..super::MAX_PREDICATE_DEPTH + 4 {

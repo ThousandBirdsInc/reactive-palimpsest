@@ -12,6 +12,11 @@
 //! name = "org_id"
 //! type = "int"
 //!
+//! # Also supported: "uuid", "jsonb", and "enum" fields.
+//! [[user_context]]
+//! name = "tenant_id"
+//! type = "uuid"
+//!
 //! [[rule]]
 //! name = "posts_in_org"
 //! table = "posts"
@@ -55,6 +60,12 @@ pub enum UserContextFieldType {
     Text,
     /// ISO-8601 timestamp.
     Timestamp,
+    /// RFC 4122 UUID.
+    Uuid,
+    /// JSON document (`jsonb`).
+    Jsonb,
+    /// Enum label, compared as text.
+    Enum,
 }
 
 impl UserContextFieldType {
@@ -67,6 +78,9 @@ impl UserContextFieldType {
             Self::Float => ColumnType::Float,
             Self::Text => ColumnType::Text,
             Self::Timestamp => ColumnType::Timestamp,
+            Self::Uuid => ColumnType::Uuid,
+            Self::Jsonb => ColumnType::Jsonb,
+            Self::Enum => ColumnType::Enum,
         }
     }
 }
@@ -192,6 +206,32 @@ mod tests {
         assert_eq!(config.rules.len(), 2);
         assert_eq!(config.rules[0].mode, Mode::Both);
         assert_eq!(config.rules[1].mode, Mode::RowVisibility);
+    }
+
+    #[test]
+    fn parses_uuid_jsonb_and_enum_field_types() {
+        use palimpsest_sql::ColumnType;
+
+        let config: Config = parse_config(
+            r#"
+            [[user_context]]
+            name = "tenant_id"
+            type = "uuid"
+
+            [[user_context]]
+            name = "prefs"
+            type = "jsonb"
+
+            [[user_context]]
+            name = "role"
+            type = "enum"
+        "#,
+        )
+        .expect("config parses");
+        let schema = config.user_context_schema();
+        assert_eq!(schema.field("tenant_id"), Some(ColumnType::Uuid));
+        assert_eq!(schema.field("prefs"), Some(ColumnType::Jsonb));
+        assert_eq!(schema.field("role"), Some(ColumnType::Enum));
     }
 
     #[test]

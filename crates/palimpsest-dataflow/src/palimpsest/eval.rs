@@ -319,7 +319,7 @@ fn unary_scalar(
 
 /// SQL equality with three-valued logic: NULL on either side → false.
 fn datum_eq(a: &Datum, b: &Datum) -> bool {
-    use Datum::{Bool, Null, Text, F32, F64, I16, I32, I64};
+    use Datum::{Bool, Json, Jsonb, Null, Text, Uuid, F32, F64, I16, I32, I64};
     match (a, b) {
         (Null, _) | (_, Null) => false,
         (Bool(x), Bool(y)) => x == y,
@@ -338,6 +338,31 @@ fn datum_eq(a: &Datum, b: &Datum) -> bool {
         (I32(x), I16(y)) => *x == i32::from(*y),
         (I16(x), I32(y)) => i32::from(*x) == *y,
         (Text(x), Text(y)) => x == y,
+        (Uuid(x), Uuid(y)) => x == y,
+        // Permission rewriting materializes uuid user values as quoted
+        // string literals, so uuid columns must compare against text.
+        (Uuid(u), Text(t)) | (Text(t), Uuid(u)) => parse_uuid_text(t) == Some(*u),
+        // jsonb equality is structural, both between documents and
+        // against a text literal carrying a JSON document.
+        (Jsonb(x) | Json(x), Jsonb(y) | Json(y)) => json_eq(x, y),
+        (Jsonb(x) | Json(x), Text(t)) | (Text(t), Jsonb(x) | Json(x)) => json_eq(x, t),
+        _ => false,
+    }
+}
+
+fn parse_uuid_text(raw: &[u8]) -> Option<palimpsest_wal::Uuid> {
+    std::str::from_utf8(raw)
+        .ok()
+        .and_then(palimpsest_wal::Uuid::parse_text)
+}
+
+/// Structural JSON equality; malformed input on either side → false.
+fn json_eq(a: &[u8], b: &[u8]) -> bool {
+    match (
+        serde_json::from_slice::<serde_json::Value>(a),
+        serde_json::from_slice::<serde_json::Value>(b),
+    ) {
+        (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
 }
@@ -348,7 +373,7 @@ where
     F: Fn(std::cmp::Ordering) -> bool,
 {
     use std::cmp::Ordering;
-    use Datum::{Null, Text, F64, I16, I32, I64};
+    use Datum::{Null, Text, Uuid, F64, I16, I32, I64};
     let ord = match (a, b) {
         (Null, _) | (_, Null) => return Datum::Bool(false),
         (I64(x), I64(y)) => x.cmp(y),
@@ -360,6 +385,16 @@ where
         (I64(x), I32(y)) => x.cmp(&i64::from(*y)),
         (I32(x), I64(y)) => i64::from(*x).cmp(y),
         (Text(x), Text(y)) => x.cmp(y),
+        // Bytewise, matching Postgres uuid ordering.
+        (Uuid(x), Uuid(y)) => x.as_bytes().cmp(&y.as_bytes()),
+        (Uuid(u), Text(t)) => match parse_uuid_text(t) {
+            Some(parsed) => u.as_bytes().cmp(&parsed.as_bytes()),
+            None => return Datum::Bool(false),
+        },
+        (Text(t), Uuid(u)) => match parse_uuid_text(t) {
+            Some(parsed) => parsed.as_bytes().cmp(&u.as_bytes()),
+            None => return Datum::Bool(false),
+        },
         _ => return Datum::Bool(false),
     };
     Datum::Bool(pick(ord))
@@ -439,6 +474,57 @@ mod tests {
         let large: Row = smallvec![Datum::I64(7), text(""), Datum::Bool(true)];
         assert!(p(&small));
         assert!(!p(&large));
+    }
+
+    #[test]
+    fn uuid_column_compares_against_text_literal() {
+        // This is the exact shape a materialized `$user.tenant_id`
+        // permission filter takes: uuid column vs quoted literal.
+        let schema = ScalarSchema::from_pairs([
+            ("id".to_owned(), ColumnType::Int),
+            ("tenant_id".to_owned(), ColumnType::Uuid),
+        ]);
+        let tenant = palimpsest_wal::Uuid::parse_text("67e55044-10b1-426f-9247-bb680e5fe0c8")
+            .expect("valid uuid");
+        let p = compile_predicate(
+            "tenant_id = '67e55044-10b1-426f-9247-bb680e5fe0c8'",
+            &schema,
+        )
+        .unwrap();
+        let matching: Row = smallvec![Datum::I64(1), Datum::Uuid(tenant)];
+        let other = palimpsest_wal::Uuid::from_bytes([9; 16]);
+        let non_matching: Row = smallvec![Datum::I64(2), Datum::Uuid(other)];
+        assert!(p(&matching));
+        assert!(!p(&non_matching));
+    }
+
+    #[test]
+    fn jsonb_column_compares_structurally_against_text_literal() {
+        let schema = ScalarSchema::from_pairs([
+            ("id".to_owned(), ColumnType::Int),
+            ("prefs".to_owned(), ColumnType::Jsonb),
+        ]);
+        let p = compile_predicate(r#"prefs = '{"a":1,"b":2}'"#, &schema).unwrap();
+        // Key order and whitespace in the stored document don't matter.
+        let stored = Datum::Jsonb(br#"{ "b": 2, "a": 1 }"#.to_vec().into());
+        let matching: Row = smallvec![Datum::I64(1), stored];
+        let non_matching: Row =
+            smallvec![Datum::I64(2), Datum::Jsonb(br#"{"a":1}"#.to_vec().into())];
+        assert!(p(&matching));
+        assert!(!p(&non_matching));
+    }
+
+    #[test]
+    fn enum_labels_travel_as_text_and_compare_against_literals() {
+        let schema = ScalarSchema::from_pairs([
+            ("id".to_owned(), ColumnType::Int),
+            ("role".to_owned(), ColumnType::Enum),
+        ]);
+        let p = compile_predicate("role = 'admin'", &schema).unwrap();
+        let admin: Row = smallvec![Datum::I64(1), text("admin")];
+        let viewer: Row = smallvec![Datum::I64(2), text("viewer")];
+        assert!(p(&admin));
+        assert!(!p(&viewer));
     }
 
     #[test]
