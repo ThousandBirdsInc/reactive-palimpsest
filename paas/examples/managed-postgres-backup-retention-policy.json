@@ -1,7 +1,0 @@
-{
-  "cluster_id": "cluster_123",
-  "retention_days": 14,
-  "keep_min_successful_backups": 2,
-  "enabled": true,
-  "updated_at": "2026-05-18 03:00:00+00"
-}

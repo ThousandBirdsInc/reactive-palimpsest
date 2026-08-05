@@ -23,9 +23,6 @@ ignore = [
     # `paste` (proc-macro) archived by its author. Transitive via
     # columnation -> timely (dataflow). No drop-in replacement adopted upstream.
     "RUSTSEC-2024-0436",
-    # `rustls-pemfile` archived; upstream points to rustls-pki-types. Pulled in
-    # transitively through the TLS stack used by the PaaS crates.
-    "RUSTSEC-2025-0134",
     # `bincode` 1.x unmaintained advisory. Transitive only.
     "RUSTSEC-2025-0141",
     # `memmap` unmaintained. Transitive via the dataflow/timely stack.

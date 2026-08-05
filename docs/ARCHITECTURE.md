@@ -163,6 +163,5 @@ are documented in
   update.
 - [PERMISSIONS.md](PERMISSIONS.md) — rule DSL.
 - [WASM-CLIENT.md](WASM-CLIENT.md) — browser quickstart.
-- [PAAS-DESIGN.md](PAAS-DESIGN.md) — managed platform design.
 - [DESIGN.md](../DESIGN.md) — full design with phasing, open
   questions, and implementation TODOs.

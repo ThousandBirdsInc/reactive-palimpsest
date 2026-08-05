@@ -1,9 +1,0 @@
-{
-  "command_id": "cluster_123:delete-backup-data:backup_001",
-  "cluster_id": "cluster_123",
-  "action": {
-    "kind": "delete_backup_data",
-    "backup_id": "backup_001",
-    "backup_dir": "/var/lib/palimpsest/backups/cluster_123/backup_001"
-  }
-}

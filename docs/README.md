@@ -51,19 +51,8 @@ guides or deep-dives that assume that bigger picture.
 | [`EVALUATION-OF-PERMISSIONS.md`](EVALUATION-OF-PERMISSIONS.md) | Draft design for formally evaluating/verifying permission rules beyond the existing rewriter. |
 | [`WALRUS-SCALEOUT.md`](WALRUS-SCALEOUT.md) | Execution plan for horizontal server-side scaling via query-shard scale-out (no Kafka). |
 
-## Managed platform (PaaS)
-
-[`PAAS-DESIGN.md`](PAAS-DESIGN.md) is the product and systems design for the
-managed platform built around the sync engine. The remaining PaaS design set
-lives under [`../paas/`](../paas/):
+## Repository history
 
 | Doc | What it covers |
 |---|---|
-| [`PAAS-DESIGN.md`](PAAS-DESIGN.md) | Top-level product/systems design for managed Postgres + live sync. |
-| [`../paas/README.md`](../paas/README.md) | Entry point and current state of the PaaS implementation. |
-| [`../paas/MANAGED-POSTGRES-DESIGN.md`](../paas/MANAGED-POSTGRES-DESIGN.md) | PostgreSQL 18+ lifecycle management: the owned Rust control plane, node agents, and host scheduler. |
-| [`../paas/PRODUCTION-READINESS-DESIGN.md`](../paas/PRODUCTION-READINESS-DESIGN.md) | Production-readiness checklist, control loops, readiness levels, and launch blockers. |
-| [`../paas/PAAS-UI-DESIGN.md`](../paas/PAAS-UI-DESIGN.md) | The routed multi-page operator console design. |
-| [`../paas/IMPLEMENTATION-PLAN.md`](../paas/IMPLEMENTATION-PLAN.md) | Incremental, phase-by-phase build plan with per-deliverable status annotations. |
-| [`PAAS-HOST-AGENT-REMOVAL.md`](PAAS-HOST-AGENT-REMOVAL.md) | Staged runbook for removing the obsolete host-agent / node-command subsystem left over after the CloudNativePG migration. |
-| [`PAAS-SYNC-DEPLOYMENT-DISPOSITION.md`](PAAS-SYNC-DEPLOYMENT-DISPOSITION.md) | Decision + runbook for the orphaned `palimpsest-paas-sync-wrapper` / SyncDeployment feature (keep-and-port vs. remove). |
+| [`PAAS-EXTRACTION.md`](PAAS-EXTRACTION.md) | The managed-platform (PaaS) code was removed from this repo. Records the commit it last existed at and how to recover it for a standalone repository. |

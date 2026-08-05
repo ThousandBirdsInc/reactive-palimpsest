@@ -11,7 +11,6 @@ PACKAGES=(
   palimpsest-proto
   palimpsest-dataflow
   palimpsest-server
-  palimpsest-paas-core
   palimpsest-cli
 )
 PUBLISH_RETRY_SLEEP_SECONDS="${PUBLISH_RETRY_SLEEP_SECONDS:-90}"

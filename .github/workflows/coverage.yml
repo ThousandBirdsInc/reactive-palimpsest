@@ -12,10 +12,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Core (non-paas) workspace currently lands at ~67.3% line coverage with
-  # the paas crates excluded above. Floor set just under that; ratchet up as
-  # coverage improves. (Was an unenforced 70% default that the job never
-  # actually reached because coverage generation failed earlier.)
+  # The workspace currently lands at ~67.3% line coverage. Floor set just
+  # under that; ratchet up as coverage improves. (Was an unenforced 70%
+  # default that the job never actually reached because coverage generation
+  # failed earlier.)
   PALIMPSEST_COVERAGE_FLOOR: '66'
 
 jobs:
@@ -60,11 +60,6 @@ jobs:
         run: |
           cargo llvm-cov --workspace \
             --exclude palimpsest-client-js \
-            --exclude palimpsest-paas-control-plane \
-            --exclude palimpsest-paas-core \
-            --exclude palimpsest-paas-gateway \
-            --exclude palimpsest-paas-runtime \
-            --exclude palimpsest-paas-sync-wrapper \
             --lcov --output-path lcov.info \
             --ignore-filename-regex 'crates/palimpsest-proto/src/generated'
 
