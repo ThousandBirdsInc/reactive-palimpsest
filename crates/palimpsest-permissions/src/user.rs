@@ -29,11 +29,39 @@ pub enum UserValue {
     Text(String),
     /// ISO-8601 timestamp, opaque to the rewriter (compared as text).
     Timestamp(String),
+    /// RFC 4122 UUID, stored as its string form. Prefer the
+    /// [`UserValue::uuid`] constructor, which validates and normalizes;
+    /// values built directly are validated by [`UserContext::validate`].
+    Uuid(String),
+    /// JSON document bound to a `jsonb` field. Rendered as a compact,
+    /// key-sorted literal so equal documents share canonical keys.
+    Jsonb(serde_json::Value),
+    /// Enum label, compared as text. All Postgres enum types collapse
+    /// into this one variant — the label carries no enum-type name.
+    Enum(String),
     /// SQL `NULL`. Always validates against any declared field type.
     Null,
 }
 
 impl UserValue {
+    /// Builds a [`UserValue::Uuid`] after validating and normalizing
+    /// `value` (lowercase, hyphenated `8-4-4-4-12` form). Accepts the
+    /// hyphenated form, the plain 32-hex-digit form, and an optional
+    /// surrounding `{...}` brace pair.
+    ///
+    /// # Errors
+    /// Returns [`PermissionError::InvalidUserValue`] when `value` is not
+    /// a well-formed UUID.
+    pub fn uuid(value: impl AsRef<str>) -> Result<Self, PermissionError> {
+        let raw = value.as_ref();
+        normalized_uuid(raw)
+            .map(Self::Uuid)
+            .ok_or_else(|| PermissionError::InvalidUserValue {
+                field: String::new(),
+                reason: format!("'{raw}' is not a valid UUID"),
+            })
+    }
+
     /// Returns the catalog type that this value satisfies.
     #[must_use]
     pub const fn column_type(&self) -> ColumnType {
@@ -43,6 +71,9 @@ impl UserValue {
             Self::Float(_) => ColumnType::Float,
             Self::Text(_) => ColumnType::Text,
             Self::Timestamp(_) => ColumnType::Timestamp,
+            Self::Uuid(_) => ColumnType::Uuid,
+            Self::Jsonb(_) => ColumnType::Jsonb,
+            Self::Enum(_) => ColumnType::Enum,
             Self::Null => ColumnType::Unknown,
         }
     }
@@ -55,9 +86,11 @@ impl UserValue {
             Self::Bool(value) => value.to_string(),
             Self::Int(value) => value.to_string(),
             Self::Float(value) => format!("{value}"),
-            Self::Text(value) | Self::Timestamp(value) => {
+            Self::Text(value) | Self::Timestamp(value) | Self::Enum(value) => {
                 format!("'{}'", value.replace('\'', "''"))
             }
+            Self::Uuid(value) => format!("'{}'", normalize_or_raw(value).replace('\'', "''")),
+            Self::Jsonb(value) => format!("'{}'", value.to_string().replace('\'', "''")),
             Self::Null => "NULL".to_owned(),
         }
     }
@@ -73,9 +106,56 @@ impl UserValue {
             Self::Float(value) => format!("float:{value}"),
             Self::Text(value) => format!("text:{value}"),
             Self::Timestamp(value) => format!("ts:{value}"),
+            Self::Uuid(value) => format!("uuid:{}", normalize_or_raw(value)),
+            // `serde_json::Value` objects are backed by a sorted map, so
+            // `to_string` is deterministic for structurally equal docs.
+            Self::Jsonb(value) => format!("jsonb:{value}"),
+            Self::Enum(value) => format!("enum:{value}"),
             Self::Null => "null".to_owned(),
         }
     }
+}
+
+/// Validates `raw` as an RFC 4122 UUID and returns the normalized
+/// lowercase hyphenated form. Accepts `8-4-4-4-12` hex, plain 32 hex
+/// digits, and an optional surrounding `{...}` pair.
+fn normalized_uuid(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let trimmed = trimmed
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap_or(trimmed);
+
+    let hex: Vec<char> = match trimmed.len() {
+        36 => {
+            let bytes = trimmed.as_bytes();
+            if bytes[8] != b'-' || bytes[13] != b'-' || bytes[18] != b'-' || bytes[23] != b'-' {
+                return None;
+            }
+            trimmed.chars().filter(|ch| *ch != '-').collect()
+        }
+        32 => trimmed.chars().collect(),
+        _ => return None,
+    };
+    if hex.len() != 32 || !hex.iter().all(char::is_ascii_hexdigit) {
+        return None;
+    }
+
+    let lower: String = hex.iter().collect::<String>().to_ascii_lowercase();
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &lower[0..8],
+        &lower[8..12],
+        &lower[12..16],
+        &lower[16..20],
+        &lower[20..32],
+    ))
+}
+
+/// Normalizes a UUID string, falling back to the raw text when it does
+/// not parse (rendering must stay total; `validate` reports the error).
+fn normalize_or_raw(raw: &str) -> String {
+    normalized_uuid(raw).unwrap_or_else(|| raw.to_owned())
 }
 
 /// Declared shape of a `UserContext`: ordered field name → type.
@@ -175,9 +255,20 @@ impl UserContext {
     }
 
     /// Validates each value against the schema's declared type. `Null` is
-    /// permitted regardless of the declared type.
+    /// permitted regardless of the declared type. Beyond the coarse type
+    /// check, UUID values (and text bound to a declared `uuid` field)
+    /// must parse as well-formed UUIDs, and a declared `jsonb` field
+    /// only accepts [`UserValue::Jsonb`].
     pub fn validate(&self, schema: &UserContextSchema) -> Result<(), PermissionError> {
         for (field, value) in &self.values {
+            if let UserValue::Uuid(raw) = value {
+                if normalized_uuid(raw).is_none() {
+                    return Err(PermissionError::InvalidUserValue {
+                        field: field.clone(),
+                        reason: format!("'{raw}' is not a valid UUID"),
+                    });
+                }
+            }
             let Some(expected) = schema.field(field) else {
                 continue;
             };
@@ -185,12 +276,24 @@ impl UserContext {
             if matches!(value, UserValue::Null) {
                 continue;
             }
-            if !expected.is_compatible_with(actual) {
+            if !expected.is_compatible_with(actual)
+                || (expected == ColumnType::Jsonb && !matches!(value, UserValue::Jsonb(_)))
+            {
                 return Err(PermissionError::UserValueTypeMismatch {
                     field: field.clone(),
                     expected,
                     actual,
                 });
+            }
+            if expected == ColumnType::Uuid {
+                if let UserValue::Text(raw) = value {
+                    if normalized_uuid(raw).is_none() {
+                        return Err(PermissionError::InvalidUserValue {
+                            field: field.clone(),
+                            reason: format!("'{raw}' is not a valid UUID"),
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -251,6 +354,157 @@ mod tests {
         assert_ne!(
             UserValue::Bool(false).canonical_repr(),
             UserValue::Int(0).canonical_repr(),
+        );
+        assert_ne!(
+            UserValue::Text("admin".to_owned()).canonical_repr(),
+            UserValue::Enum("admin".to_owned()).canonical_repr(),
+        );
+    }
+
+    #[test]
+    fn uuid_constructor_normalizes_all_accepted_forms() {
+        let canonical = "67e55044-10b1-426f-9247-bb680e5fe0c8";
+        for raw in [
+            "67e55044-10b1-426f-9247-bb680e5fe0c8",
+            "67E55044-10B1-426F-9247-BB680E5FE0C8",
+            "67e5504410b1426f9247bb680e5fe0c8",
+            "{67e55044-10b1-426f-9247-bb680e5fe0c8}",
+        ] {
+            assert_eq!(
+                UserValue::uuid(raw).expect("valid uuid"),
+                UserValue::Uuid(canonical.to_owned()),
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_constructor_rejects_malformed_input() {
+        for raw in [
+            "",
+            "not-a-uuid",
+            "67e55044-10b1-426f-9247-bb680e5fe0c", // one digit short
+            "67e55044x10b1x426fx9247xbb680e5fe0c8", // wrong separators
+            "67e55044-10b1-426f-9247-bb680e5fe0c8ff", // too long
+        ] {
+            assert!(UserValue::uuid(raw).is_err(), "accepted {raw:?}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_uuid_jsonb_and_enum_fields() {
+        let schema = UserContextSchema::new([
+            ("tenant_id".to_owned(), ColumnType::Uuid),
+            ("prefs".to_owned(), ColumnType::Jsonb),
+            ("role".to_owned(), ColumnType::Enum),
+        ]);
+        let context = UserContext::new([
+            (
+                "tenant_id".to_owned(),
+                UserValue::uuid("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap(),
+            ),
+            (
+                "prefs".to_owned(),
+                UserValue::Jsonb(serde_json::json!({"theme": "dark"})),
+            ),
+            ("role".to_owned(), UserValue::Enum("admin".to_owned())),
+        ]);
+        context.validate(&schema).expect("all fields validate");
+    }
+
+    #[test]
+    fn validate_accepts_text_for_uuid_and_enum_fields() {
+        // JWT claims arrive as plain strings; textual values satisfy
+        // uuid (when well-formed) and enum declarations.
+        let schema = UserContextSchema::new([
+            ("tenant_id".to_owned(), ColumnType::Uuid),
+            ("role".to_owned(), ColumnType::Enum),
+        ]);
+        let context = UserContext::new([
+            (
+                "tenant_id".to_owned(),
+                UserValue::Text("67e55044-10b1-426f-9247-bb680e5fe0c8".to_owned()),
+            ),
+            ("role".to_owned(), UserValue::Text("admin".to_owned())),
+        ]);
+        context.validate(&schema).expect("textual values validate");
+    }
+
+    #[test]
+    fn validate_rejects_malformed_uuid_text() {
+        let schema = UserContextSchema::new([("tenant_id".to_owned(), ColumnType::Uuid)]);
+        let context = UserContext::new([(
+            "tenant_id".to_owned(),
+            UserValue::Text("not-a-uuid".to_owned()),
+        )]);
+        let err = context.validate(&schema).unwrap_err();
+        assert!(err.to_string().contains("not a valid UUID"));
+    }
+
+    #[test]
+    fn validate_rejects_malformed_uuid_value_even_without_declaration() {
+        let context =
+            UserContext::new([("anything".to_owned(), UserValue::Uuid("garbage".to_owned()))]);
+        let err = context.validate(&UserContextSchema::default()).unwrap_err();
+        assert!(err.to_string().contains("not a valid UUID"));
+    }
+
+    #[test]
+    fn validate_rejects_text_for_jsonb_field() {
+        let schema = UserContextSchema::new([("prefs".to_owned(), ColumnType::Jsonb)]);
+        let context = UserContext::new([(
+            "prefs".to_owned(),
+            UserValue::Text("{\"theme\":\"dark\"}".to_owned()),
+        )]);
+        let err = context.validate(&schema).unwrap_err();
+        assert!(err.to_string().contains("prefs"));
+    }
+
+    #[test]
+    fn uuid_sql_literal_and_canonical_repr_are_normalized() {
+        let value = UserValue::Uuid("67E55044-10B1-426F-9247-BB680E5FE0C8".to_owned());
+        assert_eq!(
+            value.to_sql_literal(),
+            "'67e55044-10b1-426f-9247-bb680e5fe0c8'"
+        );
+        assert_eq!(
+            value.canonical_repr(),
+            "uuid:67e55044-10b1-426f-9247-bb680e5fe0c8"
+        );
+    }
+
+    #[test]
+    fn jsonb_sql_literal_is_compact_and_escaped() {
+        let value = UserValue::Jsonb(serde_json::json!({"note": "o'brien", "level": 3}));
+        // serde_json's map is key-sorted, so rendering is deterministic.
+        assert_eq!(value.to_sql_literal(), r#"'{"level":3,"note":"o''brien"}'"#);
+        assert_eq!(
+            value.canonical_repr(),
+            r#"jsonb:{"level":3,"note":"o'brien"}"#
+        );
+    }
+
+    #[test]
+    fn enum_sql_literal_escapes_quotes() {
+        assert_eq!(
+            UserValue::Enum("it's-a-label".to_owned()).to_sql_literal(),
+            "'it''s-a-label'"
+        );
+    }
+
+    #[test]
+    fn serde_round_trips_new_variants() {
+        for value in [
+            UserValue::uuid("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap(),
+            UserValue::Jsonb(serde_json::json!({"a": [1, 2, {"b": null}]})),
+            UserValue::Enum("admin".to_owned()),
+        ] {
+            let encoded = serde_json::to_string(&value).expect("serializes");
+            let decoded: UserValue = serde_json::from_str(&encoded).expect("deserializes");
+            assert_eq!(decoded, value);
+        }
+        assert_eq!(
+            serde_json::to_string(&UserValue::Enum("admin".to_owned())).unwrap(),
+            r#"{"type":"enum","value":"admin"}"#
         );
     }
 }

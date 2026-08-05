@@ -104,6 +104,9 @@ kind = "anonymous"       # or "jwt" (see below)
 [permissions.user_schema]
 # id = "int"
 # org_id = "int"
+# tenant_id = "uuid"
+# prefs = "jsonb"
+# role = "enum"
 
 # [[permissions.rules]]
 # name = "posts_owner"
@@ -131,9 +134,10 @@ for the field shape.
 ### `[permissions]`
 
 `user_schema` declares the typed shape of `$user.*` references that
-permission predicates can use. `rules` are compiled at startup; bad
-predicates fail `validate-config` (and `serve`) with a precise
-diagnostic.
+permission predicates can use. Field types are `bool`, `int`, `float`,
+`text`, `timestamp`, `uuid`, `jsonb` (alias `json`), and `enum`.
+`rules` are compiled at startup; bad predicates fail `validate-config`
+(and `serve`) with a precise diagnostic.
 
 ### `[upstream]`
 

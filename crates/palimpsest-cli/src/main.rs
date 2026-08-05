@@ -250,6 +250,9 @@ fn parse_column_type(value: &str) -> Result<ColumnType, String> {
         "float" | "double" => Ok(ColumnType::Float),
         "text" | "string" => Ok(ColumnType::Text),
         "timestamp" => Ok(ColumnType::Timestamp),
+        "uuid" => Ok(ColumnType::Uuid),
+        "jsonb" | "json" => Ok(ColumnType::Jsonb),
+        "enum" => Ok(ColumnType::Enum),
         other => Err(format!("unknown column type '{other}'")),
     }
 }
@@ -261,6 +264,9 @@ const fn column_type_label(ty: ColumnType) -> &'static str {
         ColumnType::Float => "float",
         ColumnType::Text => "text",
         ColumnType::Timestamp => "timestamp",
+        ColumnType::Uuid => "uuid",
+        ColumnType::Jsonb => "jsonb",
+        ColumnType::Enum => "enum",
         ColumnType::Unknown => "unknown",
     }
 }
@@ -514,6 +520,9 @@ fn user_value_label(value: &UserValue) -> String {
         UserValue::Float(value) => format!("float:{value}"),
         UserValue::Text(value) => format!("text:{value:?}"),
         UserValue::Timestamp(value) => format!("timestamp:{value:?}"),
+        UserValue::Uuid(value) => format!("uuid:{value}"),
+        UserValue::Jsonb(value) => format!("jsonb:{value}"),
+        UserValue::Enum(value) => format!("enum:{value:?}"),
         UserValue::Null => "null".to_owned(),
     }
 }
@@ -678,6 +687,17 @@ fn parse_json_user_value(
             .as_str()
             .map(|value| UserValue::Timestamp(value.to_owned()))
             .ok_or_else(|| user_value_type_error(field, "string timestamp", value)),
+        ColumnType::Uuid => value
+            .as_str()
+            .ok_or_else(|| user_value_type_error(field, "string uuid", value))
+            .and_then(|raw| {
+                UserValue::uuid(raw).map_err(|_| user_value_type_error(field, "uuid", value))
+            }),
+        ColumnType::Jsonb => Ok(UserValue::Jsonb(value.clone())),
+        ColumnType::Enum => value
+            .as_str()
+            .map(|value| UserValue::Enum(value.to_owned()))
+            .ok_or_else(|| user_value_type_error(field, "string enum label", value)),
         ColumnType::Unknown => Err(CliError::EvalPermissions(format!(
             "unknown user-context type for field '{field}'"
         ))),
@@ -719,6 +739,19 @@ fn parse_user_value(
         }),
         ColumnType::Text => Ok(UserValue::Text(raw_value.to_owned())),
         ColumnType::Timestamp => Ok(UserValue::Timestamp(raw_value.to_owned())),
+        ColumnType::Uuid => UserValue::uuid(raw_value).map_err(|_| {
+            CliError::EvalPermissions(format!(
+                "user field '{field}' expects a uuid, got '{raw_value}'"
+            ))
+        }),
+        ColumnType::Jsonb => serde_json::from_str(raw_value)
+            .map(UserValue::Jsonb)
+            .map_err(|_| {
+                CliError::EvalPermissions(format!(
+                    "user field '{field}' expects a JSON document, got '{raw_value}'"
+                ))
+            }),
+        ColumnType::Enum => Ok(UserValue::Enum(raw_value.to_owned())),
         ColumnType::Unknown => Err(CliError::EvalPermissions(format!(
             "unknown user-context type for field '{field}'"
         ))),
@@ -1221,6 +1254,48 @@ mod tests {
         assert_eq!(values.get("id"), Some(&UserValue::Int(42)));
         assert_eq!(values.get("is_admin"), Some(&UserValue::Bool(false)));
         assert_eq!(values.get("name"), Some(&UserValue::Text("Ada".to_owned())));
+    }
+
+    #[test]
+    fn permissions_eval_parses_uuid_jsonb_and_enum_user_values() {
+        let schema = BTreeMap::from([
+            ("tenant_id".to_owned(), "uuid".to_owned()),
+            ("prefs".to_owned(), "jsonb".to_owned()),
+            ("role".to_owned(), "enum".to_owned()),
+        ]);
+        let mut values = BTreeMap::new();
+
+        parse_user_assignment(
+            "tenant_id=67E55044-10B1-426F-9247-BB680E5FE0C8",
+            &schema,
+            &mut values,
+        )
+        .expect("uuid should parse");
+        parse_user_assignment("role=admin", &schema, &mut values).expect("enum should parse");
+        parse_user_json(r#"{"prefs":{"theme":"dark"}}"#, &schema, &mut values)
+            .expect("jsonb should parse");
+
+        assert_eq!(
+            values.get("tenant_id"),
+            Some(&UserValue::Uuid(
+                "67e55044-10b1-426f-9247-bb680e5fe0c8".to_owned()
+            ))
+        );
+        assert_eq!(
+            values.get("role"),
+            Some(&UserValue::Enum("admin".to_owned()))
+        );
+        assert_eq!(
+            values.get("prefs"),
+            Some(&UserValue::Jsonb(serde_json::json!({"theme": "dark"})))
+        );
+    }
+
+    #[test]
+    fn permissions_eval_rejects_malformed_uuid_assignment() {
+        let schema = BTreeMap::from([("tenant_id".to_owned(), "uuid".to_owned())]);
+        let mut values = BTreeMap::new();
+        assert!(parse_user_assignment("tenant_id=not-a-uuid", &schema, &mut values).is_err());
     }
 
     #[test]

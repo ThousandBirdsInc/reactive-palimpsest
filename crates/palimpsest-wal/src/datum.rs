@@ -132,6 +132,61 @@ impl Uuid {
     pub const fn as_bytes(self) -> [u8; 16] {
         self.0
     }
+
+    /// Parses the textual UUID forms Postgres accepts: hyphenated
+    /// `8-4-4-4-12`, plain 32 hex digits, either optionally wrapped in
+    /// braces. Returns `None` on malformed input.
+    #[must_use]
+    pub fn parse_text(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        let trimmed = trimmed
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))
+            .unwrap_or(trimmed);
+        let bytes = trimmed.as_bytes();
+        match bytes.len() {
+            36 => {
+                if bytes[8] != b'-' || bytes[13] != b'-' || bytes[18] != b'-' || bytes[23] != b'-' {
+                    return None;
+                }
+            }
+            32 => {}
+            _ => return None,
+        }
+
+        let mut out = [0_u8; 16];
+        let mut nibbles = bytes.iter().filter(|byte| **byte != b'-');
+        for slot in &mut out {
+            let hi = hex_nibble(*nibbles.next()?)?;
+            let lo = hex_nibble(*nibbles.next()?)?;
+            *slot = (hi << 4) | lo;
+        }
+        if nibbles.next().is_some() {
+            return None;
+        }
+        Some(Self(out))
+    }
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+impl std::fmt::Display for Uuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, byte) in self.0.iter().enumerate() {
+            if matches!(index, 4 | 6 | 8 | 10) {
+                write!(f, "-")?;
+            }
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(

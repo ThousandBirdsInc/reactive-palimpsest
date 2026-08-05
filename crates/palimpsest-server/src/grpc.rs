@@ -1105,6 +1105,11 @@ const fn column_type_to_datum_type(ty: ColumnType) -> DatumType {
         ColumnType::Float => DatumType::F64,
         ColumnType::Text => DatumType::Text,
         ColumnType::Timestamp => DatumType::Timestamp,
+        ColumnType::Uuid => DatumType::Uuid,
+        ColumnType::Jsonb => DatumType::Jsonb,
+        // Enum labels travel as text on the wire (matching Postgres
+        // logical decoding, which emits enum values as their labels).
+        ColumnType::Enum => DatumType::Text,
         // `Unknown` is the catalog's "couldn't infer" type — picking
         // Text is a defensive default that won't crash decoders that
         // probe the schema.
