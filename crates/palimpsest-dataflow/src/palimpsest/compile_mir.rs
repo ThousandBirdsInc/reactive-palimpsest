@@ -22,10 +22,11 @@
 //! Coverage today: `BaseTable`, `Filter` (boolean predicates),
 //! `Project` (column rename / reorder), `Aggregate` (group-by with
 //! `COUNT` / `SUM` / `MIN` / `MAX` / `AVG`), `TopK` (single-column
-//! sort), and `CteRef`. `Join`, `Distinct`, `Union`, `Except`,
-//! `Intersect`, and `Leaf` return
-//! [`CompileError::Unsupported`]. The walker is structured so each of
-//! those reduces to a single `match` arm + recipe variant when wired.
+//! sort), and `CteRef`. `Join`, `Distinct`, `DistinctOn`, `Union`,
+//! `Except`, `Intersect`, `Fixpoint`, `RecursiveRef`, and `Leaf`
+//! return [`CompileError::Unsupported`]. The walker is structured so
+//! each of those reduces to a single `match` arm + recipe variant
+//! when wired.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -254,9 +255,14 @@ fn compile_node<L: TableSchemaLookup>(
         MirNodeKind::CteRef { cte } => compile_cte_ref(graph, node, cte, state),
         MirNodeKind::Join { .. } => Err(CompileError::Unsupported("Join".to_owned())),
         MirNodeKind::Distinct => Err(CompileError::Unsupported("Distinct".to_owned())),
+        MirNodeKind::DistinctOn { .. } => Err(CompileError::Unsupported("DistinctOn".to_owned())),
         MirNodeKind::Union { .. } => Err(CompileError::Unsupported("Union".to_owned())),
         MirNodeKind::Except { .. } => Err(CompileError::Unsupported("Except".to_owned())),
         MirNodeKind::Intersect { .. } => Err(CompileError::Unsupported("Intersect".to_owned())),
+        MirNodeKind::Fixpoint { .. } => Err(CompileError::Unsupported("Fixpoint".to_owned())),
+        MirNodeKind::RecursiveRef { .. } => {
+            Err(CompileError::Unsupported("RecursiveRef".to_owned()))
+        }
         MirNodeKind::Leaf { .. } => Err(CompileError::Unsupported("Leaf".to_owned())),
     }
 }

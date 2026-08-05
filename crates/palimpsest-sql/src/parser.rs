@@ -7,8 +7,8 @@ use core::ops::ControlFlow;
 
 use sqlparser::{
     ast::{
-        BinaryOperator, Expr, JoinConstraint, JoinOperator, Query, Select, SetExpr, Statement,
-        TableFactor, TableWithJoins, Visit, Visitor,
+        visit_relations, BinaryOperator, Cte, Expr, JoinConstraint, JoinOperator, Query, Select,
+        SetExpr, SetOperator, Statement, TableFactor, TableWithJoins, Value, Visit, Visitor,
     },
     dialect::PostgreSqlDialect,
     parser::Parser,
@@ -51,18 +51,20 @@ pub fn parse_select_with_limits(sql: &str, limits: QueryLimits) -> Result<Statem
 }
 
 /// Walks a parsed query tree and rejects features outside the v1
-/// supported surface (recursive CTEs, ORDER BY without LIMIT, etc).
+/// supported surface (window functions, scalar subqueries, RIGHT/FULL
+/// joins, etc), and enforces shape rules for `WITH RECURSIVE` CTEs.
 ///
 /// # Errors
 /// Returns [`SqlError::UnsupportedFeature`] (or related variants) on
 /// the first construct that lies outside the supported surface.
 pub fn validate_query(query: &Query) -> Result<(), SqlError> {
     if let Some(with) = &query.with {
-        if with.recursive {
-            return Err(SqlError::UnsupportedFeature("recursive CTEs"));
-        }
-
         for cte in &with.cte_tables {
+            if with.recursive
+                && count_relation_references(cte.query.as_ref(), &cte.alias.name.value) > 0
+            {
+                validate_recursive_cte(cte)?;
+            }
             validate_query(&cte.query)?;
         }
     }
@@ -144,6 +146,10 @@ fn validate_join_constraint(constraint: &JoinConstraint) -> Result<(), SqlError>
 
 fn is_equi_join_predicate(expr: &Expr) -> bool {
     match expr {
+        // `ON TRUE` — the idiomatic constraint for correlated
+        // `JOIN LATERAL` sources, where the real join keys live in the
+        // subquery's WHERE clause.
+        Expr::Value(Value::Boolean(true)) => true,
         Expr::BinaryOp { left, op, right } if *op == BinaryOperator::Eq => {
             matches!(
                 left.as_ref(),
@@ -166,25 +172,79 @@ fn validate_expression_surface(query: &Query) -> Result<(), SqlError> {
     let mut visitor = UnsupportedExprVisitor;
     match query.visit(&mut visitor) {
         ControlFlow::Continue(()) => Ok(()),
-        ControlFlow::Break(feature) => Err(SqlError::UnsupportedFeature(feature)),
+        ControlFlow::Break(error) => Err(error),
     }
 }
 
 struct UnsupportedExprVisitor;
 
 impl Visitor for UnsupportedExprVisitor {
-    type Break = &'static str;
+    type Break = SqlError;
 
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
         match expr {
             Expr::Function(function) if function.over.is_some() => {
-                ControlFlow::Break("window functions")
+                ControlFlow::Break(SqlError::UnsupportedFeature("window functions"))
             }
-            Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::Subquery(_) => {
-                ControlFlow::Break("scalar subqueries with unbounded result")
-            }
+            // EXISTS subqueries are boolean (bounded) — supported, but
+            // their relational structure gets the same validation as
+            // the outer query.
+            Expr::Exists { subquery, .. } => match validate_query(subquery) {
+                Ok(()) => ControlFlow::Continue(()),
+                Err(error) => ControlFlow::Break(error),
+            },
+            Expr::InSubquery { .. } | Expr::Subquery(_) => ControlFlow::Break(
+                SqlError::UnsupportedFeature("scalar subqueries with unbounded result"),
+            ),
             _ => ControlFlow::Continue(()),
         }
+    }
+}
+
+/// Counts `FROM`-position references to a relation named `name`
+/// anywhere inside `node` (including nested subqueries).
+pub(crate) fn count_relation_references<V: Visit>(node: &V, name: &str) -> usize {
+    let mut count = 0_usize;
+    let _: ControlFlow<()> = visit_relations(node, |relation| {
+        if relation.0.last().is_some_and(|part| part.value == name) {
+            count += 1;
+        }
+        ControlFlow::Continue(())
+    });
+    count
+}
+
+/// Enforces the Postgres shape rules for a self-referential CTE in a
+/// `WITH RECURSIVE` list: the body must be `base UNION [ALL] step`,
+/// the base term must not reference the CTE, and the step term must
+/// reference it exactly once (linear recursion).
+fn validate_recursive_cte(cte: &Cte) -> Result<(), SqlError> {
+    let name = &cte.alias.name.value;
+    let SetExpr::SetOperation {
+        op: SetOperator::Union,
+        left,
+        right,
+        ..
+    } = &*cte.query.body
+    else {
+        return Err(SqlError::InvalidQuery(format!(
+            "recursive CTE {name} must have the form 'base term UNION [ALL] recursive term'"
+        )));
+    };
+
+    if count_relation_references(left.as_ref(), name) > 0 {
+        return Err(SqlError::InvalidQuery(format!(
+            "recursive CTE {name} must not reference itself in the base (non-recursive) term"
+        )));
+    }
+    match count_relation_references(right.as_ref(), name) {
+        1 => Ok(()),
+        0 => Err(SqlError::InvalidQuery(format!(
+            "recursive CTE {name} must reference itself in the recursive term"
+        ))),
+        _ => Err(SqlError::InvalidQuery(format!(
+            "recursive CTE {name} may reference itself only once (non-linear recursion)"
+        ))),
     }
 }
 
@@ -204,16 +264,106 @@ mod tests {
     }
 
     #[test]
-    fn rejects_recursive_cte() {
-        let err = parse_select(
+    fn parses_recursive_cte() {
+        parse_select(
             "WITH RECURSIVE nums(n) AS (
                 SELECT 1 UNION ALL SELECT n + 1 FROM nums WHERE n < 10
              )
              SELECT n FROM nums",
         )
-        .expect_err("recursive CTEs are out of scope for v1");
+        .expect("well-formed recursive CTE should parse");
+    }
 
-        assert!(err.to_string().contains("recursive CTEs"));
+    #[test]
+    fn rejects_recursive_cte_without_union() {
+        let err = parse_select(
+            "WITH RECURSIVE nums(n) AS (
+                SELECT n + 1 FROM nums WHERE n < 10
+             )
+             SELECT n FROM nums",
+        )
+        .expect_err("recursive CTE must be base UNION step");
+
+        assert!(err.to_string().contains("UNION"));
+    }
+
+    #[test]
+    fn rejects_recursive_reference_in_base_term() {
+        let err = parse_select(
+            "WITH RECURSIVE nums(n) AS (
+                SELECT n FROM nums UNION ALL SELECT n + 1 FROM nums WHERE n < 10
+             )
+             SELECT n FROM nums",
+        )
+        .expect_err("self-reference in the base term is invalid");
+
+        assert!(err.to_string().contains("base"));
+    }
+
+    #[test]
+    fn rejects_nonlinear_recursion() {
+        let err = parse_select(
+            "WITH RECURSIVE nums(n) AS (
+                SELECT 1
+                UNION ALL
+                SELECT a.n + b.n FROM nums AS a JOIN nums AS b ON a.n = b.n
+             )
+             SELECT n FROM nums",
+        )
+        .expect_err("two self-references are non-linear recursion");
+
+        assert!(err.to_string().contains("only once"));
+    }
+
+    #[test]
+    fn parses_correlated_exists() {
+        parse_select(
+            "SELECT id FROM posts
+             WHERE EXISTS (
+                SELECT 1 FROM comments WHERE comments.post_id = posts.id
+             )",
+        )
+        .expect("correlated EXISTS should parse");
+    }
+
+    #[test]
+    fn exists_subquery_gets_relational_validation() {
+        let err = parse_select(
+            "SELECT id FROM posts
+             WHERE EXISTS (
+                SELECT 1 FROM comments RIGHT JOIN authors ON comments.author_id = authors.id
+                WHERE comments.post_id = posts.id
+             )",
+        )
+        .expect_err("RIGHT JOIN inside EXISTS is still rejected");
+
+        assert!(err.to_string().contains("RIGHT JOIN"));
+    }
+
+    #[test]
+    fn parses_any_over_array() {
+        parse_select("SELECT id FROM posts WHERE id = ANY('{1,2,3}')")
+            .expect("ANY over an array literal should parse");
+    }
+
+    #[test]
+    fn rejects_any_over_subquery() {
+        let err = parse_select("SELECT id FROM posts WHERE id = ANY(SELECT id FROM posts)")
+            .expect_err("ANY over a subquery is out of scope for v1");
+
+        assert!(err.to_string().contains("subqueries"));
+    }
+
+    #[test]
+    fn parses_casts() {
+        parse_select("SELECT CAST(id AS TEXT) FROM posts WHERE id::text = title")
+            .expect("CAST and :: casts should parse");
+    }
+
+    #[test]
+    fn parses_join_on_true() {
+        parse_select("SELECT posts.id FROM posts JOIN authors ON TRUE")
+            .expect("ON TRUE join constraint should parse");
     }
 
     #[test]

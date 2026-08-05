@@ -14,11 +14,12 @@ frontier features Palimpsest rejects early, and requires exactly one statement.
 | --- | --- | --- |
 | Single `SELECT` query | Supported | Non-query statements and multi-statement inputs are rejected. |
 | `WITH name AS (...)` | Supported | Non-recursive CTEs lower to `CteRef` placeholders plus expansion edges. |
-| `WITH RECURSIVE` | Rejected | Recursive CTEs are outside the v1 subset. |
+| `WITH RECURSIVE` | Supported | Self-referential CTEs must be `base UNION [ALL] step` with exactly one self-reference in the step term (linear recursion); they lower to a `Fixpoint` MIR node whose step reads a `RecursiveRef` leaf. |
 | Projection expressions | Supported | Projection names are stored as expression strings or explicit aliases. |
 | `*` and `relation.*` | Parsed and lowered | Wildcards are preserved as projection strings; expansion against catalog metadata is not implemented yet. |
 | `FROM table` | Supported | Table names lower to `BaseTable` MIR nodes. |
-| Derived tables | Supported | Non-lateral subqueries in `FROM (...) AS alias` lower through the nested query path. |
+| Derived tables | Supported | Subqueries in `FROM (...) AS alias` lower through the nested query path. |
+| `JOIN LATERAL (...) ON TRUE`, `CROSS JOIN LATERAL` | Supported | Correlated equality predicates in the subquery's `WHERE` are decorrelated into equi-join keys; `LIMIT`/`OFFSET` inside a lateral subquery is rejected (per-row limits have no MIR encoding). |
 | Multiple comma-separated `FROM` items | Rejected during lowering | Joins must be expressed with explicit join syntax. |
 | Table functions and special table factors | Rejected | Includes unsupported table-factor forms from `sqlparser-rs`. |
 | `INNER JOIN ... ON` | Supported | Join predicates must be equi-joins between column references. |
@@ -28,10 +29,14 @@ frontier features Palimpsest rejects early, and requires exactly one statement.
 | `CROSS JOIN` | Rejected during lowering | Cross products are not in the Phase 1 MIR subset. |
 | Theta joins | Rejected | Join predicates must be equality predicates over column references. |
 | `WHERE` | Supported | Predicates are retained as canonicalized strings for the current MIR scaffold. |
-| Scalar, `EXISTS`, and `IN` subqueries | Rejected | Subquery expressions are rejected as unbounded scalar subqueries. |
+| `[NOT] EXISTS (...)` | Supported | Correlated `EXISTS` conjuncts in `WHERE` lower to semi/anti joins on the correlation columns; uncorrelated `EXISTS` and `EXISTS` under `OR` are rejected. |
+| Scalar and `IN` subqueries | Rejected | Subquery expressions are rejected as unbounded scalar subqueries. |
 | Window functions | Rejected | Any function with an `OVER` clause is rejected. |
+| `CAST(expr AS type)` / `expr::type` | Supported | Cast targets map onto the coarse column-type taxonomy for validation; `TRY_CAST`/`SAFE_CAST` and `CAST ... FORMAT` are rejected. |
+| `expr = ANY(array)` | Supported | `ANY`/`SOME` with a comparison operator over an array expression; `ANY(subquery)` is rejected. |
+| `cardinality(array)` | Supported | Validated for arity and typed as integer. |
 | `SELECT DISTINCT` | Supported | Lowers to a `Distinct` MIR node. |
-| `DISTINCT ON` | Rejected during lowering | Only whole-row `SELECT DISTINCT` is supported. |
+| `DISTINCT ON (exprs)` | Supported | Lowers to a `DistinctOn` MIR node; with an `ORDER BY`, the Postgres rule applies (`DISTINCT ON` expressions must match the initial `ORDER BY` expressions) and the order keys pick the surviving row per group. |
 | Plain `GROUP BY` | Supported | Grouping expressions must be column references. |
 | `GROUP BY ALL`, grouping sets, rollup, cube | Rejected | Group-by modifiers are outside the Phase 1 subset. |
 | Aggregates | Supported | `count`, `sum`, `min`, `max`, and `avg` are recognized in projections. |

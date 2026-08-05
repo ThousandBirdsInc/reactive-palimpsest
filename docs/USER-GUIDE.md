@@ -35,10 +35,12 @@ The full surface — what's supported, rejected, or deferred — is in
 | Single `SELECT` | ✅ |
 | `WHERE`, equi-join `INNER`/`LEFT JOIN ... ON` | ✅ |
 | `GROUP BY` + `count` / `sum` / `min` / `max` / `avg` | ✅ |
-| `SELECT DISTINCT` | ✅ |
-| Non-recursive CTEs (`WITH name AS …`) | ✅ |
+| `SELECT DISTINCT`, `DISTINCT ON (…)` | ✅ |
+| CTEs (`WITH name AS …`), `WITH RECURSIVE` | ✅ |
 | `LIMIT` with explicit `ORDER BY` | ✅ |
-| Window functions, recursive CTEs, scalar subqueries | ❌ |
+| Correlated `[NOT] EXISTS`, `JOIN LATERAL` | ✅ |
+| `CAST` / `::` casts, `= ANY(array)`, `cardinality()` | ✅ |
+| Window functions, scalar subqueries | ❌ |
 | `CROSS JOIN`, `RIGHT/FULL JOIN`, theta joins | ❌ |
 | `INSERT` / `UPDATE` / `DELETE` | ❌ (read-only) |
 

@@ -89,7 +89,11 @@ fn rebuild_node(
     }
 
     let rebuilt_node = rebuilt.add_node(source.graph()[node_index].clone());
-    for (edge, child, _) in inputs {
+    // petgraph iterates incoming edges in reverse insertion order, so
+    // re-insert in reverse of the collected order to preserve the
+    // original traversal order for order-sensitive nodes (Join,
+    // Except, Fixpoint base-vs-step).
+    for (edge, child, _) in inputs.into_iter().rev() {
         rebuilt.add_edge(child, rebuilt_node, edge);
     }
     interned.insert(signature.clone(), rebuilt_node);
@@ -153,6 +157,9 @@ fn canonical_node_kind(node: &MirNodeKind) -> String {
             )
         }
         MirNodeKind::Distinct => "distinct".to_owned(),
+        MirNodeKind::DistinctOn { on, order_by } => {
+            format!("distinct-on:{}:{}", on.join(","), canonical_debug(order_by))
+        }
         MirNodeKind::Union { quantifier } => format!("union:{quantifier:?}"),
         MirNodeKind::Except { quantifier } => format!("except:{quantifier:?}"),
         MirNodeKind::Intersect { quantifier } => format!("intersect:{quantifier:?}"),
@@ -162,6 +169,13 @@ fn canonical_node_kind(node: &MirNodeKind) -> String {
             offset,
         } => format!("topk:{}:{limit}:{offset}", canonical_debug(order_by)),
         MirNodeKind::CteRef { .. } => "cte-ref".to_owned(),
+        // Recursive nodes keep the CTE name: a `RecursiveRef` has no
+        // input edges, so without the name two distinct recursive CTEs
+        // would produce byte-identical signatures and
+        // `collapse_reused_subgraphs` would wrongly merge their
+        // self-references.
+        MirNodeKind::Fixpoint { cte, union_all } => format!("fixpoint:{cte}:{union_all}"),
+        MirNodeKind::RecursiveRef { cte } => format!("recursive-ref:{cte}"),
         MirNodeKind::Leaf { name } => format!("leaf:{name}"),
     }
 }
@@ -237,6 +251,48 @@ mod tests {
         .expect("query should lower");
 
         assert_eq!(canonical_key(&left), canonical_key(&right));
+    }
+
+    #[test]
+    fn recursive_ctes_canonicalize_without_cycles() {
+        let sql = "WITH RECURSIVE reach AS (
+                SELECT id, post_id FROM comments WHERE post_id = 1
+                UNION
+                SELECT comments.id, comments.post_id
+                FROM comments JOIN reach ON comments.post_id = reach.id
+             )
+             SELECT id FROM reach";
+        let graph = parse_and_lower(sql).expect("recursive CTE should lower");
+        let other = parse_and_lower(
+            "WITH RECURSIVE reach AS (
+                SELECT id, post_id FROM comments WHERE post_id = 2
+                UNION
+                SELECT comments.id, comments.post_id
+                FROM comments JOIN reach ON comments.post_id = reach.id
+             )
+             SELECT id FROM reach",
+        )
+        .expect("recursive CTE should lower");
+
+        // Canonicalization terminates (the fixpoint graph is acyclic)
+        // and distinguishes different recursions.
+        assert_eq!(canonical_key(&graph), canonical_key(&graph));
+        assert_ne!(canonical_key(&graph), canonical_key(&other));
+
+        let collapsed = collapse_reused_subgraphs(&graph);
+        assert_eq!(canonical_key(&graph), canonical_key(&collapsed));
+    }
+
+    #[test]
+    fn distinct_on_keys_participate_in_canonical_form() {
+        let by_author = parse_and_lower(
+            "SELECT DISTINCT ON (author_id) id, author_id FROM posts ORDER BY author_id",
+        )
+        .expect("DISTINCT ON should lower");
+        let by_id = parse_and_lower("SELECT DISTINCT ON (id) id, author_id FROM posts ORDER BY id")
+            .expect("DISTINCT ON should lower");
+
+        assert_ne!(canonical_key(&by_author), canonical_key(&by_id));
     }
 
     #[test]
