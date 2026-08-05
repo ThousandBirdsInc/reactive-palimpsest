@@ -49,6 +49,7 @@ guides or deep-dives that assume that bigger picture.
 | [`DATABASE-MIGRATION-RESILIENCE.md`](DATABASE-MIGRATION-RESILIENCE.md) | How DDL and large data migrations are handled against compiled subscriptions and WAL volume. |
 | [`TRANSACTIONAL-CLIENT-UPDATES.md`](TRANSACTIONAL-CLIENT-UPDATES.md) | Pushing each upstream Postgres transaction as one atomic, coherent client-visible update. |
 | [`EVALUATION-OF-PERMISSIONS.md`](EVALUATION-OF-PERMISSIONS.md) | Draft design for formally evaluating/verifying permission rules beyond the existing rewriter. |
+| [`EXTERNAL-AUTHORIZATION.md`](EXTERNAL-AUTHORIZATION.md) | Draft design for delegating data-access decisions to an external authorizer (SpiceDB), while keeping enforcement deterministic, live, and simulatable. |
 | [`WALRUS-SCALEOUT.md`](WALRUS-SCALEOUT.md) | Execution plan for horizontal server-side scaling via query-shard scale-out (no Kafka). |
 
 ## Repository history
