@@ -1,9 +1,10 @@
 ---
 source: crates/palimpsest-sql/tests/snapshots.rs
+assertion_line: 51
 expression: "format!(\"canonical_form:\\n{}\\n\\ncollapsed_mir:\\n{canonicalized:#?}\",\ncanonical_form(&canonicalized))"
 ---
 canonical_form:
-topk:[OrderKey { expression: "post_id", descending: false }]:10:0[input:project:post_id,authors.name[input:join:Inner:[(ColumnRef { relation: Some("recent_posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input:cte-ref[cte:project:id,author_id,created_at[input:filter:author_id IN (42, 7) AND created_at IS NOT NULL[input:base:posts:[][]]]],input:base:authors:[][]]]]
+topk:[OrderKey { expression: "post_id", descending: false }]:10:0[input:project:post_id,authors.name[input:join:Inner:[(ColumnRef { relation: Some("recent_posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input:base:authors:[][],input:cte-ref[cte:project:id,author_id,created_at[input:filter:author_id IN (42, 7) AND created_at IS NOT NULL[input:base:posts:[][]]]]]]]
 
 collapsed_mir:
 MirGraph {
@@ -11,7 +12,7 @@ MirGraph {
         Ty: "Directed",
         node_count: 8,
         edge_count: 7,
-        edges: (1, 2), (2, 3), (3, 4), (0, 5), (4, 5), (5, 6), (6, 7),
+        edges: (1, 2), (2, 3), (3, 4), (4, 5), (0, 5), (5, 6), (6, 7),
         node weights: {
             0: BaseTable {
                 table: "authors",

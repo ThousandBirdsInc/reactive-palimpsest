@@ -19,6 +19,13 @@ pub enum SqlError {
     #[error("unsupported SQL feature: {0}")]
     UnsupportedFeature(&'static str),
 
+    /// The query is inside the supported surface but structurally
+    /// invalid (mirrors a Postgres-side error), e.g. a recursive CTE
+    /// that is not `base UNION [ALL] step`, or `DISTINCT ON`
+    /// expressions that do not match the initial `ORDER BY` keys.
+    #[error("invalid query: {0}")]
+    InvalidQuery(String),
+
     /// Referenced table is not in the catalog.
     #[error("unknown table: {0}")]
     UnknownTable(String),

@@ -3,17 +3,20 @@
 
 //! Lowering from sqlparser AST into [`MirGraph`].
 
-use std::collections::HashMap;
+use core::ops::ControlFlow;
+use std::collections::{HashMap, HashSet};
 
 use sqlparser::ast::{
-    BinaryOperator, Distinct, DuplicateTreatment, Expr, Function, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, Join, JoinConstraint, JoinOperator, Query, Select, SelectItem,
-    SetExpr, SetOperator, SetQuantifier, Statement, TableFactor, TableWithJoins, Value,
+    BinaryOperator, Cte, Distinct, DuplicateTreatment, Expr, Function, FunctionArgExpr,
+    FunctionArguments, GroupByExpr, Ident, Join, JoinConstraint, JoinOperator, Query, Select,
+    SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableFactor, TableWithJoins, Value,
+    Visit, Visitor,
 };
 
 use crate::{
     limits::{enforce_graph_size, QueryLimits},
     mir::{AggExpr, ColumnRef, JoinKind, MirGraph, MirNodeKind, OrderKey, SetQuantifierKind},
+    parser::count_relation_references,
     SqlError,
 };
 
@@ -61,58 +64,143 @@ fn lower_query(query: &Query) -> Result<MirGraph, SqlError> {
 
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
-            let graph = lower_query_with_context(&cte.query, &context)?;
-            context.ctes.insert(cte.alias.name.value.clone(), graph);
+            let name = cte.alias.name.value.clone();
+            let graph =
+                if with.recursive && count_relation_references(cte.query.as_ref(), &name) > 0 {
+                    lower_recursive_cte(cte, &context)?
+                } else {
+                    lower_query_with_context(&cte.query, &context)?
+                };
+            context.ctes.insert(name, graph);
         }
     }
 
     lower_query_with_context(query, &context)
 }
 
+/// Lowers a self-referential CTE from a `WITH RECURSIVE` list into a
+/// `Fixpoint` node whose first input is the base term and second input
+/// the recursive step; self-references inside the step become
+/// [`MirNodeKind::RecursiveRef`] leaves.
+fn lower_recursive_cte(cte: &Cte, context: &LowerContext) -> Result<MirGraph, SqlError> {
+    let name = cte.alias.name.value.clone();
+    let SetExpr::SetOperation {
+        op: SetOperator::Union,
+        set_quantifier,
+        left,
+        right,
+    } = &*cte.query.body
+    else {
+        return Err(SqlError::InvalidQuery(format!(
+            "recursive CTE {name} must have the form 'base term UNION [ALL] recursive term'"
+        )));
+    };
+    let union_all = lower_set_quantifier(*set_quantifier)? == SetQuantifierKind::All;
+
+    let mut graph = lower_set_expr(left, context)?;
+
+    let mut step_context = LowerContext {
+        ctes: context.ctes.clone(),
+        recursive: context.recursive.clone(),
+    };
+    step_context.recursive.insert(name.clone());
+    let step = lower_set_expr(right, &step_context)?;
+
+    let base_root = graph.root();
+    let step_root = graph.append_graph(&step);
+    let fixpoint = graph.add_node(MirNodeKind::Fixpoint {
+        cte: name,
+        union_all,
+    });
+    graph.add_input(base_root, fixpoint);
+    graph.add_input(step_root, fixpoint);
+    graph.set_root(fixpoint);
+
+    apply_order_limit(&mut graph, cte.query.as_ref())?;
+    Ok(graph)
+}
+
 fn lower_query_with_context(query: &Query, context: &LowerContext) -> Result<MirGraph, SqlError> {
     let mut graph = lower_set_expr(&query.body, context)?;
+    apply_order_limit(&mut graph, query)?;
+    Ok(graph)
+}
 
-    if let Some(order_by) = &query.order_by {
-        // ORDER BY without LIMIT plans as a sort over the whole input —
-        // represented in the MIR as `TopK` with `usize::MAX` so we
-        // don't need a separate node kind. Downstream operators see
-        // "ordered, unbounded" and can pick the right physical plan.
-        let limit = query
-            .limit
-            .as_ref()
-            .map(literal_usize)
-            .transpose()?
-            .unwrap_or(usize::MAX);
-        let offset = query
-            .offset
-            .as_ref()
-            .map(|offset| literal_usize(&offset.value))
-            .transpose()?
-            .unwrap_or(0);
-        let order_by = order_by
-            .exprs
-            .iter()
-            .map(|expr| OrderKey {
-                expression: expr.expr.to_string(),
-                descending: expr.asc == Some(false),
-            })
-            .collect();
-        push_unary(
-            &mut graph,
-            MirNodeKind::TopK {
-                order_by,
-                limit,
-                offset,
-            },
-        );
+/// Applies `query`-level ORDER BY / LIMIT / OFFSET on top of `graph`.
+///
+/// Also finishes `SELECT DISTINCT ON` lowering: when the graph root is
+/// a `DistinctOn` node (pushed by [`lower_select_body`] with no order
+/// keys yet), the query's ORDER BY keys are validated against the
+/// Postgres prefix rule and copied into the node so executors know
+/// which row per group survives.
+fn apply_order_limit(graph: &mut MirGraph, query: &Query) -> Result<(), SqlError> {
+    let Some(order_by) = &query.order_by else {
+        return Ok(());
+    };
+
+    // ORDER BY without LIMIT plans as a sort over the whole input —
+    // represented in the MIR as `TopK` with `usize::MAX` so we
+    // don't need a separate node kind. Downstream operators see
+    // "ordered, unbounded" and can pick the right physical plan.
+    let limit = query
+        .limit
+        .as_ref()
+        .map(literal_usize)
+        .transpose()?
+        .unwrap_or(usize::MAX);
+    let offset = query
+        .offset
+        .as_ref()
+        .map(|offset| literal_usize(&offset.value))
+        .transpose()?
+        .unwrap_or(0);
+    let order_by: Vec<OrderKey> = order_by
+        .exprs
+        .iter()
+        .map(|expr| OrderKey {
+            expression: expr.expr.to_string(),
+            descending: expr.asc == Some(false),
+        })
+        .collect();
+
+    let root = graph.root();
+    if let MirNodeKind::DistinctOn {
+        on,
+        order_by: distinct_order,
+    } = graph.node_kind_mut(root)
+    {
+        // Postgres: "SELECT DISTINCT ON expressions must match initial
+        // ORDER BY expressions" — every leading ORDER BY key (up to
+        // the DISTINCT ON arity) must be one of the ON expressions.
+        for key in order_by.iter().take(on.len()) {
+            if !on.contains(&key.expression) {
+                return Err(SqlError::InvalidQuery(
+                    "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+                        .to_owned(),
+                ));
+            }
+        }
+        distinct_order.clone_from(&order_by);
     }
 
-    Ok(graph)
+    push_unary(
+        graph,
+        MirNodeKind::TopK {
+            order_by,
+            limit,
+            offset,
+        },
+    );
+    Ok(())
 }
 
 #[derive(Debug, Default)]
 struct LowerContext {
     ctes: HashMap<String, MirGraph>,
+    /// Names of `WITH RECURSIVE` CTEs currently being lowered: a
+    /// `FROM` reference to one of these is the self-reference inside
+    /// its own recursive step and lowers to a `RecursiveRef` leaf.
+    recursive: HashSet<String>,
 }
 
 fn lower_set_expr(expr: &SetExpr, context: &LowerContext) -> Result<MirGraph, SqlError> {
@@ -171,13 +259,39 @@ fn lower_select_body(select: &Select, context: &LowerContext) -> Result<MirGraph
 
     let mut graph = lower_from(select, context)?;
 
-    if let Some(predicate) = &select.selection {
-        push_unary(
-            &mut graph,
-            MirNodeKind::Filter {
-                predicate: canonical_predicate(predicate),
-            },
-        );
+    let exists_terms = if let Some(selection) = &select.selection {
+        let (exists_terms, scalar) = split_exists_terms(selection);
+        if let Some(scalar) = &scalar {
+            if contains_exists(scalar) {
+                return Err(SqlError::UnsupportedFeature(
+                    "EXISTS outside top-level AND conjuncts",
+                ));
+            }
+            push_unary(
+                &mut graph,
+                MirNodeKind::Filter {
+                    predicate: canonical_predicate(scalar),
+                },
+            );
+        }
+        exists_terms
+    } else {
+        Vec::new()
+    };
+
+    for term in exists_terms {
+        let (subgraph, on) = lower_exists_subquery(term.subquery, context)?;
+        let left = graph.root();
+        let right = graph.append_graph(&subgraph);
+        let kind = if term.negated {
+            JoinKind::Anti
+        } else {
+            JoinKind::Semi
+        };
+        let join = graph.add_node(MirNodeKind::Join { kind, on });
+        graph.add_input(left, join);
+        graph.add_input(right, join);
+        graph.set_root(join);
     }
 
     let group_by = group_by_columns(&select.group_by)?;
@@ -193,8 +307,20 @@ fn lower_select_body(select: &Select, context: &LowerContext) -> Result<MirGraph
         },
     );
 
-    if matches!(select.distinct, Some(Distinct::Distinct)) {
-        push_unary(&mut graph, MirNodeKind::Distinct);
+    match &select.distinct {
+        Some(Distinct::Distinct) => push_unary(&mut graph, MirNodeKind::Distinct),
+        Some(Distinct::On(exprs)) => push_unary(
+            &mut graph,
+            // Order keys are filled in by `apply_order_limit` when
+            // this select is the top of a query with an ORDER BY;
+            // otherwise the surviving row per group is arbitrary,
+            // matching Postgres.
+            MirNodeKind::DistinctOn {
+                on: exprs.iter().map(ToString::to_string).collect(),
+                order_by: Vec::new(),
+            },
+        ),
+        None => {}
     }
 
     Ok(graph)
@@ -206,9 +332,6 @@ fn reject_select_features_not_lowered(select: &Select) -> Result<(), SqlError> {
     }
     if has_group_by_modifiers(&select.group_by) {
         return Err(SqlError::UnsupportedFeature("GROUP BY modifiers"));
-    }
-    if select.distinct.is_some() && !matches!(select.distinct, Some(Distinct::Distinct)) {
-        return Err(SqlError::UnsupportedFeature("DISTINCT ON"));
     }
     if select.top.is_some() {
         return Err(SqlError::UnsupportedFeature("TOP"));
@@ -256,15 +379,25 @@ fn lower_table_with_joins(
 }
 
 fn lower_join(graph: &mut MirGraph, join: &Join, context: &LowerContext) -> Result<(), SqlError> {
-    let right_graph = lower_table_factor(&join.relation, context)?;
+    let lateral = matches!(&join.relation, TableFactor::Derived { lateral: true, .. });
+    let (right_graph, correlation) = if let TableFactor::Derived {
+        lateral: true,
+        subquery,
+        ..
+    } = &join.relation
+    {
+        lower_lateral_subquery(subquery, context)?
+    } else {
+        (lower_table_factor(&join.relation, context)?, Vec::new())
+    };
     let right = graph.append_graph(&right_graph);
 
-    let (kind, on) = match &join.join_operator {
+    let (kind, mut on) = match &join.join_operator {
         JoinOperator::Inner(JoinConstraint::On(predicate)) => {
-            (JoinKind::Inner, equi_join_columns(predicate)?)
+            (JoinKind::Inner, join_predicate_columns(predicate, lateral)?)
         }
         JoinOperator::LeftOuter(JoinConstraint::On(predicate)) => {
-            (JoinKind::Left, equi_join_columns(predicate)?)
+            (JoinKind::Left, join_predicate_columns(predicate, lateral)?)
         }
         JoinOperator::Inner(
             JoinConstraint::Using(_) | JoinConstraint::Natural | JoinConstraint::None,
@@ -276,11 +409,23 @@ fn lower_join(graph: &mut MirGraph, join: &Join, context: &LowerContext) -> Resu
                 "MIR lowering for non-ON joins",
             ));
         }
+        // A correlated LATERAL source turns a cross join into an
+        // equi-join on the correlation columns.
+        JoinOperator::CrossJoin if lateral && !correlation.is_empty() => {
+            (JoinKind::Inner, Vec::new())
+        }
         JoinOperator::CrossJoin => {
             return Err(SqlError::UnsupportedFeature("MIR lowering for cross joins"));
         }
         _ => return Err(SqlError::UnsupportedFeature("non-standard joins")),
     };
+
+    on.extend(correlation);
+    if on.is_empty() {
+        return Err(SqlError::UnsupportedFeature(
+            "LATERAL join without correlation or equi-join keys",
+        ));
+    }
 
     let left = graph.root();
     let join = graph.add_node(MirNodeKind::Join { kind, on });
@@ -290,11 +435,26 @@ fn lower_join(graph: &mut MirGraph, join: &Join, context: &LowerContext) -> Resu
     Ok(())
 }
 
+/// Equi-join keys from an ON constraint. `ON TRUE` contributes no
+/// keys, which is only meaningful for lateral sources (their keys come
+/// from the correlated WHERE predicates instead).
+fn join_predicate_columns(
+    predicate: &Expr,
+    lateral: bool,
+) -> Result<Vec<(ColumnRef, ColumnRef)>, SqlError> {
+    if lateral && matches!(predicate, Expr::Value(Value::Boolean(true))) {
+        return Ok(Vec::new());
+    }
+    equi_join_columns(predicate)
+}
+
 fn lower_table_factor(table: &TableFactor, context: &LowerContext) -> Result<MirGraph, SqlError> {
     match table {
         TableFactor::Table { name, .. } => {
             let name = name.to_string();
-            if let Some(cte) = context.ctes.get(&name) {
+            if context.recursive.contains(&name) {
+                Ok(MirGraph::new(MirNodeKind::RecursiveRef { cte: name }))
+            } else if let Some(cte) = context.ctes.get(&name) {
                 let mut graph = MirGraph::new(MirNodeKind::CteRef { cte: name });
                 let cte_root = graph.append_graph(cte);
                 graph.add_cte_expansion(cte_root, graph.root());
@@ -306,18 +466,318 @@ fn lower_table_factor(table: &TableFactor, context: &LowerContext) -> Result<Mir
                 }))
             }
         }
-        TableFactor::Derived {
-            lateral: false,
-            subquery,
-            ..
-        } => lower_query_with_context(subquery, context),
-        TableFactor::Derived { lateral: true, .. } => {
-            Err(SqlError::UnsupportedFeature("LATERAL derived tables"))
-        }
+        // A LATERAL subquery as the *first* FROM item has nothing to
+        // its left to correlate with, so it lowers like a plain
+        // derived table. Correlated lateral sources sit in join
+        // position and are handled by `lower_join`.
+        TableFactor::Derived { subquery, .. } => lower_query_with_context(subquery, context),
         _ => Err(SqlError::UnsupportedFeature(
             "table functions or special table factors",
         )),
     }
+}
+
+/// A `[NOT] EXISTS (...)` conjunct found in a WHERE clause.
+struct ExistsTerm<'a> {
+    subquery: &'a Query,
+    negated: bool,
+}
+
+/// Splits a WHERE expression into its top-level `[NOT] EXISTS`
+/// conjuncts and the remaining scalar predicate.
+fn split_exists_terms(expr: &Expr) -> (Vec<ExistsTerm<'_>>, Option<Expr>) {
+    fn collect<'a>(expr: &'a Expr, terms: &mut Vec<ExistsTerm<'a>>, rest: &mut Vec<Expr>) {
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::And,
+                right,
+            } => {
+                collect(left, terms, rest);
+                collect(right, terms, rest);
+            }
+            Expr::Exists { subquery, negated } => terms.push(ExistsTerm {
+                subquery,
+                negated: *negated,
+            }),
+            Expr::Nested(inner) if matches!(inner.as_ref(), Expr::Exists { .. }) => {
+                collect(inner, terms, rest);
+            }
+            Expr::UnaryOp {
+                op: sqlparser::ast::UnaryOperator::Not,
+                expr: inner,
+            } => {
+                let unwrapped = match inner.as_ref() {
+                    Expr::Nested(nested) => nested.as_ref(),
+                    other => other,
+                };
+                if let Expr::Exists { subquery, negated } = unwrapped {
+                    terms.push(ExistsTerm {
+                        subquery,
+                        negated: !*negated,
+                    });
+                } else {
+                    rest.push(expr.clone());
+                }
+            }
+            _ => rest.push(expr.clone()),
+        }
+    }
+
+    let mut terms = Vec::new();
+    let mut rest = Vec::new();
+    collect(expr, &mut terms, &mut rest);
+    let scalar = rest.into_iter().reduce(|left, right| Expr::BinaryOp {
+        left: Box::new(left),
+        op: BinaryOperator::And,
+        right: Box::new(right),
+    });
+    (terms, scalar)
+}
+
+fn contains_exists(expr: &Expr) -> bool {
+    struct ExistsFinder;
+    impl Visitor for ExistsFinder {
+        type Break = ();
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            if matches!(expr, Expr::Exists { .. }) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        }
+    }
+    expr.visit(&mut ExistsFinder).is_break()
+}
+
+/// Lowers a correlated `EXISTS` subquery into a graph suitable as the
+/// right input of a semi/anti join, returning the `(outer, inner)`
+/// correlation columns extracted from the subquery's WHERE clause.
+///
+/// The subquery's SELECT list is irrelevant to EXISTS semantics, so no
+/// projection is emitted — the right side keeps its full width, which
+/// keeps the correlation columns visible to the join.
+fn lower_exists_subquery(
+    query: &Query,
+    context: &LowerContext,
+) -> Result<(MirGraph, Vec<(ColumnRef, ColumnRef)>), SqlError> {
+    if query.with.is_some() {
+        return Err(SqlError::UnsupportedFeature(
+            "WITH inside EXISTS subqueries",
+        ));
+    }
+    if query.limit.is_some() || query.offset.is_some() {
+        return Err(SqlError::UnsupportedFeature(
+            "LIMIT/OFFSET inside EXISTS subqueries",
+        ));
+    }
+    let SetExpr::Select(select) = &*query.body else {
+        return Err(SqlError::UnsupportedFeature(
+            "set operations inside EXISTS subqueries",
+        ));
+    };
+    match &select.group_by {
+        GroupByExpr::Expressions(exprs, modifiers) if exprs.is_empty() && modifiers.is_empty() => {}
+        _ => {
+            return Err(SqlError::UnsupportedFeature(
+                "GROUP BY inside EXISTS subqueries",
+            ));
+        }
+    }
+
+    let inner_names = relation_names(select);
+    let mut select = (**select).clone();
+    let (pairs, remaining) = split_correlated_predicates(select.selection.take(), &inner_names);
+    if pairs.is_empty() {
+        return Err(SqlError::UnsupportedFeature(
+            "uncorrelated EXISTS subqueries",
+        ));
+    }
+
+    let mut graph = lower_from(&select, context)?;
+    if let Some(predicate) = remaining {
+        if contains_exists(&predicate) {
+            return Err(SqlError::UnsupportedFeature(
+                "EXISTS nested inside EXISTS subqueries",
+            ));
+        }
+        push_unary(
+            &mut graph,
+            MirNodeKind::Filter {
+                predicate: canonical_predicate(&predicate),
+            },
+        );
+    }
+    Ok((graph, pairs))
+}
+
+/// Lowers a `LATERAL (subquery)` join source, splitting correlated
+/// equality predicates out of its WHERE clause into `(outer, inner)`
+/// join keys. Inner correlation columns are appended to the
+/// subquery's projection (when missing) so the join keys survive it.
+fn lower_lateral_subquery(
+    query: &Query,
+    context: &LowerContext,
+) -> Result<(MirGraph, Vec<(ColumnRef, ColumnRef)>), SqlError> {
+    if query.with.is_some() {
+        return Err(SqlError::UnsupportedFeature(
+            "WITH inside LATERAL subqueries",
+        ));
+    }
+    // A per-outer-row LIMIT ("top N per group") has no MIR encoding
+    // after decorrelation, so reject rather than silently change
+    // semantics to a global limit.
+    if query.limit.is_some() || query.offset.is_some() {
+        return Err(SqlError::UnsupportedFeature(
+            "LIMIT/OFFSET inside LATERAL subqueries",
+        ));
+    }
+    let SetExpr::Select(select) = &*query.body else {
+        return Err(SqlError::UnsupportedFeature(
+            "set operations inside LATERAL subqueries",
+        ));
+    };
+
+    let inner_names = relation_names(select);
+    let mut query = query.clone();
+    let SetExpr::Select(select_mut) = &mut *query.body else {
+        unreachable!("checked above");
+    };
+    let (pairs, remaining) = split_correlated_predicates(select_mut.selection.take(), &inner_names);
+    select_mut.selection = remaining;
+
+    for (_, inner) in &pairs {
+        let inner_expr = column_ref_expr(inner);
+        let already_projected = select_mut.projection.iter().any(|item| match item {
+            SelectItem::UnnamedExpr(expr) => expr == &inner_expr,
+            _ => false,
+        });
+        if !already_projected {
+            select_mut
+                .projection
+                .push(SelectItem::UnnamedExpr(inner_expr));
+        }
+    }
+
+    let graph = lower_query_with_context(&query, context)?;
+    Ok((graph, pairs))
+}
+
+/// Relation qualifiers bound by a select's own FROM clause (table
+/// names or aliases). Used to tell inner column references apart from
+/// correlated (outer) ones.
+fn relation_names(select: &Select) -> HashSet<String> {
+    fn factor_name(factor: &TableFactor, names: &mut HashSet<String>) {
+        match factor {
+            TableFactor::Table { name, alias, .. } => {
+                let name = alias.as_ref().map_or_else(
+                    || {
+                        name.0
+                            .last()
+                            .map_or_else(|| name.to_string(), |part| part.value.clone())
+                    },
+                    |alias| alias.name.value.clone(),
+                );
+                names.insert(name);
+            }
+            TableFactor::Derived {
+                alias: Some(alias), ..
+            } => {
+                names.insert(alias.name.value.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let mut names = HashSet::new();
+    for table in &select.from {
+        factor_name(&table.relation, &mut names);
+        for join in &table.joins {
+            factor_name(&join.relation, &mut names);
+        }
+    }
+    names
+}
+
+/// Partitions a WHERE expression's top-level conjuncts into correlated
+/// equality pairs (`outer.col = inner.col`, returned as
+/// `(outer, inner)`) and the remaining local predicate. Only
+/// qualified column references can correlate; unqualified names are
+/// treated as inner.
+fn split_correlated_predicates(
+    selection: Option<Expr>,
+    inner_names: &HashSet<String>,
+) -> (Vec<(ColumnRef, ColumnRef)>, Option<Expr>) {
+    fn collect(
+        expr: Expr,
+        inner_names: &HashSet<String>,
+        pairs: &mut Vec<(ColumnRef, ColumnRef)>,
+        rest: &mut Vec<Expr>,
+    ) {
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::And,
+                right,
+            } => {
+                collect(*left, inner_names, pairs, rest);
+                collect(*right, inner_names, pairs, rest);
+            }
+            Expr::BinaryOp {
+                ref left,
+                op: BinaryOperator::Eq,
+                ref right,
+            } => {
+                if let (Ok(left_ref), Ok(right_ref)) = (column_ref(left), column_ref(right)) {
+                    let left_inner = left_ref
+                        .relation
+                        .as_ref()
+                        .is_none_or(|relation| inner_names.contains(relation));
+                    let right_inner = right_ref
+                        .relation
+                        .as_ref()
+                        .is_none_or(|relation| inner_names.contains(relation));
+                    match (left_inner, right_inner) {
+                        (false, true) => {
+                            pairs.push((left_ref, right_ref));
+                            return;
+                        }
+                        (true, false) => {
+                            pairs.push((right_ref, left_ref));
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                rest.push(expr);
+            }
+            other => rest.push(other),
+        }
+    }
+
+    let mut pairs = Vec::new();
+    let mut rest = Vec::new();
+    if let Some(expr) = selection {
+        collect(expr, inner_names, &mut pairs, &mut rest);
+    }
+    let remaining = rest.into_iter().reduce(|left, right| Expr::BinaryOp {
+        left: Box::new(left),
+        op: BinaryOperator::And,
+        right: Box::new(right),
+    });
+    (pairs, remaining)
+}
+
+fn column_ref_expr(column: &ColumnRef) -> Expr {
+    column.relation.as_ref().map_or_else(
+        || Expr::Identifier(Ident::new(column.name.clone())),
+        |relation| {
+            Expr::CompoundIdentifier(vec![
+                Ident::new(relation.clone()),
+                Ident::new(column.name.clone()),
+            ])
+        },
+    )
 }
 
 fn equi_join_columns(predicate: &Expr) -> Result<Vec<(ColumnRef, ColumnRef)>, SqlError> {
@@ -798,6 +1258,270 @@ mod tests {
             .graph()
             .edge_weights()
             .any(|edge| *edge == MirEdgeKind::CteExpansion));
+    }
+
+    #[test]
+    fn lowers_correlated_exists_to_semi_join() {
+        let graph = parse_and_lower(
+            "SELECT id FROM posts
+             WHERE author_id = 42
+               AND EXISTS (
+                 SELECT 1 FROM comments
+                 WHERE comments.post_id = posts.id AND comments.author_id = 7
+               )",
+        )
+        .expect("correlated EXISTS should lower");
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Join {
+                kind: JoinKind::Semi,
+                on,
+            } if on == &vec![(
+                ColumnRef {
+                    relation: Some("posts".to_owned()),
+                    name: "id".to_owned(),
+                },
+                ColumnRef {
+                    relation: Some("comments".to_owned()),
+                    name: "post_id".to_owned(),
+                },
+            )]
+        )));
+        // The outer scalar predicate and the subquery-local predicate
+        // land in separate filters.
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Filter { predicate } if predicate == "author_id = 42"
+        )));
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Filter { predicate } if predicate == "comments.author_id = 7"
+        )));
+    }
+
+    #[test]
+    fn lowers_not_exists_to_anti_join() {
+        let graph = parse_and_lower(
+            "SELECT id FROM posts
+             WHERE NOT EXISTS (SELECT 1 FROM comments WHERE comments.post_id = posts.id)",
+        )
+        .expect("NOT EXISTS should lower");
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Join {
+                kind: JoinKind::Anti,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn rejects_uncorrelated_exists() {
+        let err = parse_and_lower(
+            "SELECT id FROM posts WHERE EXISTS (SELECT 1 FROM comments WHERE comments.id = 5)",
+        )
+        .expect_err("uncorrelated EXISTS is out of scope");
+
+        assert!(err.to_string().contains("uncorrelated EXISTS"));
+    }
+
+    #[test]
+    fn rejects_exists_under_or() {
+        let err = parse_and_lower(
+            "SELECT id FROM posts
+             WHERE author_id = 42
+                OR EXISTS (SELECT 1 FROM comments WHERE comments.post_id = posts.id)",
+        )
+        .expect_err("EXISTS under OR is out of scope");
+
+        assert!(err.to_string().contains("top-level AND"));
+    }
+
+    #[test]
+    fn lowers_distinct_on_with_order_keys() {
+        let graph = parse_and_lower(
+            "SELECT DISTINCT ON (author_id) id, author_id
+             FROM posts
+             ORDER BY author_id, created_at DESC
+             LIMIT 5",
+        )
+        .expect("DISTINCT ON should lower");
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::DistinctOn { on, order_by }
+                if on == &vec!["author_id".to_owned()]
+                    && order_by == &vec![
+                        OrderKey {
+                            expression: "author_id".to_owned(),
+                            descending: false,
+                        },
+                        OrderKey {
+                            expression: "created_at".to_owned(),
+                            descending: true,
+                        },
+                    ]
+        )));
+        assert!(matches!(
+            graph.root_kind(),
+            MirNodeKind::TopK { limit: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_distinct_on_not_matching_initial_order_by() {
+        let err = parse_and_lower(
+            "SELECT DISTINCT ON (author_id) id, author_id
+             FROM posts
+             ORDER BY created_at DESC",
+        )
+        .expect_err("DISTINCT ON must match initial ORDER BY expressions");
+
+        assert!(err.to_string().contains("initial ORDER BY"));
+    }
+
+    #[test]
+    fn lowers_distinct_on_without_order_by() {
+        let graph = parse_and_lower("SELECT DISTINCT ON (author_id) id, author_id FROM posts")
+            .expect("DISTINCT ON without ORDER BY picks an arbitrary row, like Postgres");
+
+        assert!(matches!(
+            graph.root_kind(),
+            MirNodeKind::DistinctOn { on, order_by }
+                if on == &vec!["author_id".to_owned()] && order_by.is_empty()
+        ));
+    }
+
+    #[test]
+    fn lowers_correlated_lateral_join() {
+        let graph = parse_and_lower(
+            "SELECT posts.id
+             FROM posts
+             JOIN LATERAL (
+                SELECT comments.body FROM comments WHERE comments.post_id = posts.id
+             ) AS c ON TRUE",
+        )
+        .expect("correlated LATERAL join should lower");
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Join {
+                kind: JoinKind::Inner,
+                on,
+            } if on == &vec![(
+                ColumnRef {
+                    relation: Some("posts".to_owned()),
+                    name: "id".to_owned(),
+                },
+                ColumnRef {
+                    relation: Some("comments".to_owned()),
+                    name: "post_id".to_owned(),
+                },
+            )]
+        )));
+        // The correlation column is appended to the subquery's
+        // projection so the join key survives it.
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Project { columns }
+                if columns == &vec!["comments.body".to_owned(), "comments.post_id".to_owned()]
+        )));
+    }
+
+    #[test]
+    fn lowers_cross_join_lateral_with_correlation() {
+        let graph = parse_and_lower(
+            "SELECT posts.id
+             FROM posts
+             CROSS JOIN LATERAL (
+                SELECT comments.body FROM comments WHERE comments.post_id = posts.id
+             ) AS c",
+        )
+        .expect("correlated CROSS JOIN LATERAL should lower to an inner join");
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Join {
+                kind: JoinKind::Inner,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn rejects_lateral_with_limit() {
+        let err = parse_and_lower(
+            "SELECT posts.id
+             FROM posts
+             JOIN LATERAL (
+                SELECT comments.body FROM comments
+                WHERE comments.post_id = posts.id
+                ORDER BY comments.id LIMIT 1
+             ) AS c ON TRUE",
+        )
+        .expect_err("per-row LIMIT inside LATERAL has no MIR encoding");
+
+        assert!(err.to_string().contains("LIMIT/OFFSET inside LATERAL"));
+    }
+
+    #[test]
+    fn lowers_recursive_cte_to_fixpoint() {
+        let graph = parse_and_lower(
+            "WITH RECURSIVE reach AS (
+                SELECT id, post_id FROM comments WHERE post_id = 1
+                UNION
+                SELECT comments.id, comments.post_id
+                FROM comments JOIN reach ON comments.post_id = reach.id
+             )
+             SELECT id FROM reach",
+        )
+        .expect("recursive CTE should lower");
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Fixpoint {
+                cte,
+                union_all: false,
+            } if cte == "reach"
+        )));
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::RecursiveRef { cte } if cte == "reach"
+        )));
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::CteRef { cte } if cte == "reach"
+        )));
+    }
+
+    #[test]
+    fn lowers_cast_and_any_predicates() {
+        let cast = parse_and_lower("SELECT id FROM posts WHERE id::text = 'x'")
+            .expect("cast predicate should lower");
+        assert!(cast.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Filter { predicate } if predicate.contains("id::TEXT")
+        )));
+
+        let any = parse_and_lower("SELECT id FROM posts WHERE id = ANY('{1,2,3}')")
+            .expect("ANY predicate should lower");
+        assert!(any.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Filter { predicate } if predicate == "id = ANY('{1,2,3}')"
+        )));
+    }
+
+    #[test]
+    fn lowers_cardinality_projection() {
+        let graph = parse_and_lower("SELECT cardinality(title) FROM posts")
+            .expect("cardinality projection should lower");
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Project { columns } if columns == &vec!["cardinality(title)".to_owned()]
+        )));
     }
 
     #[test]

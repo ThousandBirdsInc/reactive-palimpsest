@@ -13,7 +13,7 @@ use std::{
 };
 
 use palimpsest_sql::mir::{
-    AggExpr, ColumnRef, JoinKind, MirEdgeKind, MirGraph, MirNodeKind, SetQuantifierKind,
+    AggExpr, ColumnRef, JoinKind, MirEdgeKind, MirGraph, MirNodeKind, OrderKey, SetQuantifierKind,
 };
 use petgraph::{graph::NodeIndex, visit::EdgeRef, Direction};
 
@@ -114,43 +114,61 @@ impl ReferenceExecutor {
 
     #[must_use]
     pub fn execute(&self, graph: &MirGraph) -> Vec<Row> {
-        self.execute_records(graph, graph.root())
+        self.execute_records(graph, graph.root(), &RecursiveEnv::new())
             .into_iter()
             .map(|record| record.values)
             .collect()
     }
 
-    fn execute_records(&self, graph: &MirGraph, node: NodeIndex) -> Vec<Record> {
+    fn execute_records(
+        &self,
+        graph: &MirGraph,
+        node: NodeIndex,
+        env: &RecursiveEnv,
+    ) -> Vec<Record> {
         match &graph.graph()[node] {
             MirNodeKind::BaseTable { table, .. } => self.scan_table(table),
             MirNodeKind::Filter { predicate } => self
-                .single_input(graph, node)
+                .single_input(graph, node, env)
                 .into_iter()
                 .filter(|record| eval_predicate(predicate, record) == Truth::True)
                 .collect(),
             MirNodeKind::Project { columns } => self
-                .single_input(graph, node)
+                .single_input(graph, node, env)
                 .into_iter()
                 .map(|record| project_record(&record, columns))
                 .collect(),
             MirNodeKind::Join { kind, on } => {
-                let [left, right] = self.two_inputs(graph, node);
+                let [left, right] = self.two_inputs(graph, node, env);
                 join_records(left, &right, *kind, on)
             }
             MirNodeKind::Aggregate { group_by, aggs } => {
-                aggregate_records(self.single_input(graph, node), group_by, aggs)
+                aggregate_records(self.single_input(graph, node, env), group_by, aggs)
             }
-            MirNodeKind::Distinct => distinct_records(self.single_input(graph, node)),
+            MirNodeKind::Distinct => distinct_records(self.single_input(graph, node, env)),
+            MirNodeKind::DistinctOn { on, order_by } => {
+                let mut records = self.single_input(graph, node, env);
+                sort_records(&mut records, order_by);
+                let mut seen = std::collections::BTreeSet::new();
+                records
+                    .into_iter()
+                    .filter(|record| {
+                        let key: Vec<Option<String>> =
+                            on.iter().map(|expr| value_for_expr(record, expr)).collect();
+                        seen.insert(key)
+                    })
+                    .collect()
+            }
             MirNodeKind::Union { quantifier } => {
-                let [left, right] = self.two_inputs(graph, node);
+                let [left, right] = self.two_inputs(graph, node, env);
                 union_records(left, &right, *quantifier)
             }
             MirNodeKind::Except { quantifier } => {
-                let [left, right] = self.two_inputs(graph, node);
+                let [left, right] = self.two_inputs(graph, node, env);
                 except_records(left, &right, *quantifier)
             }
             MirNodeKind::Intersect { quantifier } => {
-                let [left, right] = self.two_inputs(graph, node);
+                let [left, right] = self.two_inputs(graph, node, env);
                 intersect_records(left, &right, *quantifier)
             }
             MirNodeKind::TopK {
@@ -158,31 +176,65 @@ impl ReferenceExecutor {
                 limit,
                 offset,
             } => {
-                let mut records = self.single_input(graph, node);
-                records.sort_by(|left, right| {
-                    order_by
-                        .iter()
-                        .map(|key| {
-                            let ordering = cmp_values(
-                                value_for_expr(left, &key.expression).as_deref(),
-                                value_for_expr(right, &key.expression).as_deref(),
-                            );
-                            if key.descending {
-                                ordering.reverse()
-                            } else {
-                                ordering
-                            }
-                        })
-                        .find(|ordering| *ordering != Ordering::Equal)
-                        .unwrap_or(Ordering::Equal)
-                });
+                let mut records = self.single_input(graph, node, env);
+                sort_records(&mut records, order_by);
                 records.into_iter().skip(*offset).take(*limit).collect()
             }
             MirNodeKind::CteRef { .. } => {
-                self.single_input_by_edge(graph, node, MirEdgeKind::CteExpansion)
+                self.single_input_by_edge(graph, node, MirEdgeKind::CteExpansion, env)
             }
+            MirNodeKind::Fixpoint { cte, union_all } => {
+                let inputs = input_nodes(graph, node, MirEdgeKind::Input);
+                let [base, step] = inputs.as_slice() else {
+                    return Vec::new();
+                };
+                self.execute_fixpoint(graph, *base, *step, cte, *union_all, env)
+            }
+            MirNodeKind::RecursiveRef { cte } => env.get(cte).cloned().unwrap_or_default(),
             MirNodeKind::Leaf { .. } => Vec::new(),
         }
+    }
+
+    /// Semi-naive evaluation of a `WITH RECURSIVE` fixpoint: seed with
+    /// the base term, then repeatedly run the step term over the
+    /// previous iteration's rows until it produces nothing new (or a
+    /// safety cap trips for non-terminating `UNION ALL` recursions).
+    fn execute_fixpoint(
+        &self,
+        graph: &MirGraph,
+        base: NodeIndex,
+        step: NodeIndex,
+        cte: &str,
+        union_all: bool,
+        env: &RecursiveEnv,
+    ) -> Vec<Record> {
+        const MAX_ITERATIONS: usize = 4096;
+
+        let mut working = self.execute_records(graph, base, env);
+        if !union_all {
+            working = distinct_records(working);
+        }
+        let mut seen = multiset_records(&working)
+            .into_keys()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut output = working.clone();
+
+        for _ in 0..MAX_ITERATIONS {
+            if working.is_empty() {
+                break;
+            }
+            let mut step_env = env.clone();
+            step_env.insert(cte.to_owned(), working);
+            let mut produced = self.execute_records(graph, step, &step_env);
+            if !union_all {
+                produced = distinct_records(produced);
+                produced.retain(|record| seen.insert(record.values.clone()));
+            }
+            output.extend(produced.clone());
+            working = produced;
+        }
+
+        output
     }
 
     fn scan_table(&self, table_name: &str) -> Vec<Record> {
@@ -208,12 +260,12 @@ impl ReferenceExecutor {
             .collect()
     }
 
-    fn single_input(&self, graph: &MirGraph, node: NodeIndex) -> Vec<Record> {
+    fn single_input(&self, graph: &MirGraph, node: NodeIndex, env: &RecursiveEnv) -> Vec<Record> {
         let inputs = input_nodes(graph, node, MirEdgeKind::Input);
         let [input] = inputs.as_slice() else {
             return Vec::new();
         };
-        self.execute_records(graph, *input)
+        self.execute_records(graph, *input, env)
     }
 
     fn single_input_by_edge(
@@ -221,24 +273,54 @@ impl ReferenceExecutor {
         graph: &MirGraph,
         node: NodeIndex,
         edge: MirEdgeKind,
+        env: &RecursiveEnv,
     ) -> Vec<Record> {
         let inputs = input_nodes(graph, node, edge);
         let [input] = inputs.as_slice() else {
             return Vec::new();
         };
-        self.execute_records(graph, *input)
+        self.execute_records(graph, *input, env)
     }
 
-    fn two_inputs(&self, graph: &MirGraph, node: NodeIndex) -> [Vec<Record>; 2] {
+    fn two_inputs(
+        &self,
+        graph: &MirGraph,
+        node: NodeIndex,
+        env: &RecursiveEnv,
+    ) -> [Vec<Record>; 2] {
         let inputs = input_nodes(graph, node, MirEdgeKind::Input);
         let [left, right] = inputs.as_slice() else {
             return [Vec::new(), Vec::new()];
         };
         [
-            self.execute_records(graph, *left),
-            self.execute_records(graph, *right),
+            self.execute_records(graph, *left, env),
+            self.execute_records(graph, *right, env),
         ]
     }
+}
+
+/// Working-table bindings for in-flight `Fixpoint` evaluations, keyed
+/// by CTE name. `RecursiveRef` nodes resolve against this.
+type RecursiveEnv = BTreeMap<String, Vec<Record>>;
+
+fn sort_records(records: &mut [Record], order_by: &[OrderKey]) {
+    records.sort_by(|left, right| {
+        order_by
+            .iter()
+            .map(|key| {
+                let ordering = cmp_values(
+                    value_for_expr(left, &key.expression).as_deref(),
+                    value_for_expr(right, &key.expression).as_deref(),
+                );
+                if key.descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
+            })
+            .find(|ordering| *ordering != Ordering::Equal)
+            .unwrap_or(Ordering::Equal)
+    });
 }
 
 fn primary_key(row: &Row) -> PrimaryKey {
@@ -320,11 +402,19 @@ fn project_record(record: &Record, columns: &[String]) -> Record {
         .iter()
         .map(|column| value_for_expr(record, column).unwrap_or_default())
         .collect::<Vec<_>>();
-    let attrs = columns
-        .iter()
-        .cloned()
-        .zip(values.iter().cloned().map(Some))
-        .collect();
+    let mut attrs = BTreeMap::new();
+    for (column, value) in columns.iter().zip(&values) {
+        // A projection starts a fresh (anonymous) relation: a
+        // projected `relation.column` is addressable downstream only
+        // by its output name (the trailing segment), matching SQL.
+        // Keeping source-qualified keys would leak stale bindings into
+        // later joins against the same base relation (e.g. recursive
+        // steps).
+        let name = column
+            .rsplit_once('.')
+            .map_or(column.as_str(), |(_, bare)| bare);
+        attrs.insert(name.to_owned(), Some(value.clone()));
+    }
     Record { values, attrs }
 }
 
@@ -350,11 +440,19 @@ fn join_records(
                 .all(|(left_key, right_key)| eval_join_key(&merged, left_key, right_key))
             {
                 matched = true;
-                joined.push(merged);
+                match kind {
+                    JoinKind::Inner | JoinKind::Left => joined.push(merged),
+                    // Semi/anti joins emit at most one copy of the
+                    // left record, untouched by right-side columns.
+                    JoinKind::Semi | JoinKind::Anti => break,
+                }
             }
         }
-        if !matched && kind == JoinKind::Left {
-            joined.push(merge_records(&left_record, &null_right));
+        match kind {
+            JoinKind::Left if !matched => joined.push(merge_records(&left_record, &null_right)),
+            JoinKind::Semi if matched => joined.push(left_record),
+            JoinKind::Anti if !matched => joined.push(left_record),
+            _ => {}
         }
     }
 
@@ -540,11 +638,16 @@ impl From<bool> for Truth {
 }
 
 fn value_for_column(record: &Record, column: &ColumnRef) -> Option<String> {
-    let key = column.relation.as_ref().map_or_else(
-        || column.name.clone(),
-        |relation| format!("{relation}.{}", column.name),
-    );
-    record.attrs.get(&key).cloned().flatten()
+    if let Some(relation) = &column.relation {
+        let key = format!("{relation}.{}", column.name);
+        if let Some(value) = record.attrs.get(&key) {
+            return value.clone();
+        }
+    }
+    // Fall back to the bare column name: rows that flowed through a
+    // `Project` (CTE outputs, derived tables, recursive working
+    // tables) only carry unqualified attributes.
+    record.attrs.get(&column.name).cloned().flatten()
 }
 
 fn value_for_expr(record: &Record, expr: &str) -> Option<String> {
@@ -560,6 +663,15 @@ fn value_for_expr(record: &Record, expr: &str) -> Option<String> {
         .and_then(|value| value.strip_suffix('\''))
     {
         return Some(value.replace("''", "'"));
+    }
+    // `alias.column` where the record only carries the bare output
+    // name (e.g. rows that flowed through a Project).
+    if let Some((qualifier, bare)) = expr.rsplit_once('.') {
+        if !qualifier.is_empty() {
+            if let Some(value) = record.attrs.get(bare) {
+                return value.clone();
+            }
+        }
     }
     Some(expr.to_owned()).filter(|value| !value.is_empty())
 }
@@ -865,6 +977,191 @@ mod tests {
 
         let union = set_graph("posts", SetQuantifierKind::Distinct);
         assert_eq!(executor.execute(&union), [vec!["1".to_owned()]]);
+    }
+
+    #[test]
+    fn executes_semi_and_anti_joins_from_exists_lowering() {
+        let posts = TableId::new(7);
+        let comments = TableId::new(8);
+        let executor = ReferenceExecutor::with_tables(
+            Arc::new(Catalog::with_tables([
+                table(posts, "posts", &["id", "author_id"]),
+                table(comments, "comments", &["id", "post_id"]),
+            ])),
+            [
+                (posts, rows([["1", "42"].as_slice(), ["2", "7"].as_slice()])),
+                (
+                    comments,
+                    rows([["10", "1"].as_slice(), ["11", "1"].as_slice()]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let semi = palimpsest_sql::lower::parse_and_lower(
+            "SELECT id FROM posts
+             WHERE EXISTS (SELECT 1 FROM comments WHERE comments.post_id = posts.id)",
+        )
+        .expect("correlated EXISTS should lower");
+        // Post 1 has two matching comments but a semi-join emits it once.
+        assert_eq!(executor.execute(&semi), [vec!["1".to_owned()]]);
+
+        let anti = palimpsest_sql::lower::parse_and_lower(
+            "SELECT id FROM posts
+             WHERE NOT EXISTS (SELECT 1 FROM comments WHERE comments.post_id = posts.id)",
+        )
+        .expect("correlated NOT EXISTS should lower");
+        assert_eq!(executor.execute(&anti), [vec!["2".to_owned()]]);
+    }
+
+    #[test]
+    fn executes_distinct_on_keeping_first_row_per_group() {
+        let posts = TableId::new(7);
+        let executor = ReferenceExecutor::with_tables(
+            Arc::new(Catalog::with_tables([table(
+                posts,
+                "posts",
+                &["id", "author_id"],
+            )])),
+            std::iter::once((
+                posts,
+                rows([
+                    ["1", "42"].as_slice(),
+                    ["2", "42"].as_slice(),
+                    ["3", "7"].as_slice(),
+                ]),
+            ))
+            .collect(),
+        );
+
+        let graph = palimpsest_sql::lower::parse_and_lower(
+            "SELECT DISTINCT ON (author_id) id, author_id FROM posts
+             ORDER BY author_id, id DESC",
+        )
+        .expect("DISTINCT ON should lower");
+
+        // Per author the row with the highest id wins; the final sort
+        // is by author_id ascending.
+        assert_eq!(
+            executor.execute(&graph),
+            [
+                vec!["3".to_owned(), "7".to_owned()],
+                vec!["2".to_owned(), "42".to_owned()],
+            ]
+        );
+    }
+
+    #[test]
+    fn executes_recursive_cte_to_fixpoint() {
+        let edges = TableId::new(9);
+        let executor = ReferenceExecutor::with_tables(
+            Arc::new(Catalog::with_tables([table(
+                edges,
+                "edges",
+                &["id", "parent"],
+            )])),
+            std::iter::once((
+                edges,
+                rows([
+                    ["2", "1"].as_slice(),
+                    ["3", "2"].as_slice(),
+                    ["4", "3"].as_slice(),
+                    ["9", "8"].as_slice(),
+                ]),
+            ))
+            .collect(),
+        );
+
+        let graph = palimpsest_sql::lower::parse_and_lower(
+            "WITH RECURSIVE reach AS (
+                SELECT id, parent FROM edges WHERE parent = 1
+                UNION
+                SELECT edges.id, edges.parent FROM edges JOIN reach ON edges.parent = reach.id
+             )
+             SELECT id FROM reach ORDER BY id",
+        )
+        .expect("recursive CTE should lower");
+
+        assert_eq!(
+            executor.execute(&graph),
+            [
+                vec!["2".to_owned()],
+                vec!["3".to_owned()],
+                vec!["4".to_owned()],
+            ]
+        );
+    }
+
+    #[test]
+    fn recursive_union_all_terminates_when_step_drains() {
+        let edges = TableId::new(9);
+        let executor = ReferenceExecutor::with_tables(
+            Arc::new(Catalog::with_tables([table(
+                edges,
+                "edges",
+                &["id", "parent"],
+            )])),
+            std::iter::once((edges, rows([["2", "1"].as_slice(), ["3", "2"].as_slice()])))
+                .collect(),
+        );
+
+        let graph = palimpsest_sql::lower::parse_and_lower(
+            "WITH RECURSIVE reach AS (
+                SELECT id, parent FROM edges WHERE parent = 1
+                UNION ALL
+                SELECT edges.id, edges.parent FROM edges JOIN reach ON edges.parent = reach.id
+             )
+             SELECT id FROM reach ORDER BY id",
+        )
+        .expect("recursive CTE should lower");
+
+        assert_eq!(
+            executor.execute(&graph),
+            [vec!["2".to_owned()], vec!["3".to_owned()]]
+        );
+    }
+
+    #[test]
+    fn executes_correlated_lateral_join() {
+        let posts = TableId::new(7);
+        let comments = TableId::new(8);
+        let executor = ReferenceExecutor::with_tables(
+            Arc::new(Catalog::with_tables([
+                table(posts, "posts", &["id", "author_id"]),
+                table(comments, "comments", &["id", "post_id", "body"]),
+            ])),
+            [
+                (posts, rows([["1", "42"].as_slice(), ["2", "7"].as_slice()])),
+                (
+                    comments,
+                    rows([
+                        ["10", "1", "first"].as_slice(),
+                        ["11", "2", "second"].as_slice(),
+                    ]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let graph = palimpsest_sql::lower::parse_and_lower(
+            "SELECT posts.id, c.body
+             FROM posts
+             JOIN LATERAL (
+                SELECT body, comments.post_id FROM comments WHERE comments.post_id = posts.id
+             ) AS c ON TRUE",
+        )
+        .expect("correlated LATERAL join should lower");
+
+        assert_set_eq(
+            &executor.execute(&graph),
+            &[
+                vec!["1".to_owned(), "first".to_owned()],
+                vec!["2".to_owned(), "second".to_owned()],
+            ],
+        )
+        .expect("lateral join rows should match");
     }
 
     #[test]

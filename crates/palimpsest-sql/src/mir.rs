@@ -18,6 +18,12 @@ use petgraph::{graph::NodeIndex, visit::EdgeRef, Direction, Graph};
 pub enum JoinKind {
     Inner,
     Left,
+    /// Left semi-join: emits each left row once if at least one right
+    /// row matches. Produced by decorrelated `EXISTS` subqueries.
+    Semi,
+    /// Left anti-join: emits each left row once if no right row
+    /// matches. Produced by decorrelated `NOT EXISTS` subqueries.
+    Anti,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +72,14 @@ pub enum MirNodeKind {
         aggs: Vec<AggExpr>,
     },
     Distinct,
+    /// Postgres `SELECT DISTINCT ON (exprs) ...`: keeps the first row
+    /// of each `on`-group. When `order_by` is non-empty rows are
+    /// ranked by those keys before picking; otherwise the surviving
+    /// row per group is arbitrary (matching Postgres).
+    DistinctOn {
+        on: Vec<String>,
+        order_by: Vec<OrderKey>,
+    },
     Union {
         quantifier: SetQuantifierKind,
     },
@@ -81,6 +95,22 @@ pub enum MirNodeKind {
         offset: usize,
     },
     CteRef {
+        cte: String,
+    },
+    /// Fixpoint for a `WITH RECURSIVE` CTE. Takes exactly two `Input`
+    /// edges: the base (non-recursive) term first, then the recursive
+    /// step term. The step subgraph reads the previous iteration's
+    /// rows through a [`MirNodeKind::RecursiveRef`] naming the same
+    /// CTE. `union_all` distinguishes `UNION ALL` (bag semantics)
+    /// from `UNION` (rows deduplicated across iterations).
+    Fixpoint {
+        cte: String,
+        union_all: bool,
+    },
+    /// Reference to the enclosing [`MirNodeKind::Fixpoint`]'s working
+    /// table. Has no input edges — executors resolve it by CTE name
+    /// against the innermost fixpoint being evaluated.
+    RecursiveRef {
         cte: String,
     },
     Leaf {
@@ -218,5 +248,10 @@ impl MirGraph {
     #[must_use]
     pub fn node_kind(&self, index: NodeIndex) -> &MirNodeKind {
         &self.graph[index]
+    }
+
+    /// Mutable access to the kind stored at `index`.
+    pub fn node_kind_mut(&mut self, index: NodeIndex) -> &mut MirNodeKind {
+        &mut self.graph[index]
     }
 }

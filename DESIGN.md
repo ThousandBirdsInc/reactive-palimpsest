@@ -29,7 +29,8 @@ sharing, ordered exactly-once delivery, and server-side permission filtering.
    small transactions.
 2. Support a useful subset of read-only SQL: `SELECT`, joins, filters,
    projections, aggregations, `GROUP BY`, `ORDER BY` + `LIMIT`, `DISTINCT`,
-   `UNION ALL`, and **non-recursive CTEs**.
+   `UNION ALL`, CTEs (including `WITH RECURSIVE`), `DISTINCT ON`,
+   correlated `EXISTS`, and `LATERAL` subqueries.
 3. Bounded memory: per-subscription state size grows with the result set the
    client cares about, *not* with the size of the underlying tables.
 4. Configurable row-level authorization without forcing developers to fork
@@ -714,8 +715,8 @@ Standard `#[cfg(test)]` coverage. Targets per crate:
   TOAST "unchanged" expansion; replica-identity edge cases; LSN
   feedback math.
 - `palimpsest-sql`: parser → MIR for a corpus of fixture queries;
-  rejection of unsupported features (recursive CTEs, theta joins,
-  unbounded `ORDER BY`); canonicalization-key equality on
+  rejection of unsupported features (theta joins, window
+  functions, scalar subqueries); canonicalization-key equality on
   alpha-equivalent queries.
 - `palimpsest-dataflow`: each operator in isolation against
   hand-built input/output sequences.
