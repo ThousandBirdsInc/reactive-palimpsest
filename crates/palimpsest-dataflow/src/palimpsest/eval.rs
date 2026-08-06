@@ -209,7 +209,146 @@ fn compile_inner(expr: &Expr, schema: &ScalarSchema) -> Result<ScalarFn, EvalErr
                 Datum::Bool(matches!(target(row), Datum::Bool(false)))
             }))
         }
+        Expr::AnyOp {
+            left,
+            compare_op,
+            right,
+            ..
+        } => any_scalar(left, compare_op, right, schema),
+        Expr::Function(function) => function_scalar(function, schema),
         other => Err(EvalError::Unsupported(format!("{other:?}"))),
+    }
+}
+
+/// `expr <op> ANY(array)` — true when the comparison holds for at least
+/// one array element. This is the shape materialized permission
+/// predicates take for list-valued user context
+/// (`team_id = ANY(ARRAY[1, 2])`), as well as user queries using
+/// `ANY`/`SOME` over an array literal.
+fn any_scalar(
+    left: &Expr,
+    compare_op: &BinaryOperator,
+    right: &Expr,
+    schema: &ScalarSchema,
+) -> Result<ScalarFn, EvalError> {
+    let l = compile_inner(left, schema)?;
+    let elements: Vec<ScalarFn> = match right {
+        Expr::Array(array) => array
+            .elem
+            .iter()
+            .map(|element| compile_inner(element, schema))
+            .collect::<Result<_, _>>()?,
+        other => {
+            return Err(EvalError::Unsupported(format!(
+                "ANY over non-array expression {other:?}"
+            )))
+        }
+    };
+    let op = compare_op.clone();
+    // Validate the operator once at compile time.
+    compare_datums(&op, &Datum::Null, &Datum::Null)
+        .ok_or_else(|| EvalError::Unsupported(format!("ANY with operator {op:?}")))?;
+    Ok(Box::new(move |row| {
+        let lv = l(row);
+        let hit = elements
+            .iter()
+            .any(|element| compare_datums(&op, &lv, &element(row)) == Some(true));
+        Datum::Bool(hit)
+    }))
+}
+
+/// Scalar function calls. The SQL frontend rejects functions outside
+/// this set at parse time (`SqlError::UnsupportedFunction`); the match
+/// here is the evaluation half of that same allowlist.
+fn function_scalar(
+    function: &sqlparser::ast::Function,
+    schema: &ScalarSchema,
+) -> Result<ScalarFn, EvalError> {
+    use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+
+    let name = function.name.to_string().to_ascii_lowercase();
+    let args: Vec<&Expr> = match &function.args {
+        FunctionArguments::None => Vec::new(),
+        FunctionArguments::Subquery(_) => {
+            return Err(EvalError::Unsupported(
+                "subquery as function argument".to_owned(),
+            ))
+        }
+        FunctionArguments::List(list) => list
+            .args
+            .iter()
+            .map(|arg| match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr),
+                other => Err(EvalError::Unsupported(format!(
+                    "function argument {other:?}"
+                ))),
+            })
+            .collect::<Result<_, _>>()?,
+    };
+
+    match name.as_str() {
+        "coalesce" => {
+            let compiled: Vec<ScalarFn> = args
+                .iter()
+                .map(|arg| compile_inner(arg, schema))
+                .collect::<Result<_, _>>()?;
+            Ok(Box::new(move |row| {
+                for arg in &compiled {
+                    let value = arg(row);
+                    if !matches!(value, Datum::Null) {
+                        return value;
+                    }
+                }
+                Datum::Null
+            }))
+        }
+        "cardinality" => {
+            let [arg] = args.as_slice() else {
+                return Err(EvalError::Unsupported(format!(
+                    "cardinality expects 1 argument, got {}",
+                    args.len()
+                )));
+            };
+            let compiled = compile_inner(arg, schema)?;
+            Ok(Box::new(move |row| match compiled(row) {
+                Datum::Array(items) => Datum::I64(i64::try_from(items.len()).unwrap_or(i64::MAX)),
+                _ => Datum::Null,
+            }))
+        }
+        other => Err(EvalError::Unsupported(format!("function {other}"))),
+    }
+}
+
+/// Applies a comparison operator with the module's three-valued
+/// semantics. `None` means the operator itself is unsupported.
+fn compare_datums(op: &BinaryOperator, a: &Datum, b: &Datum) -> Option<bool> {
+    match op {
+        BinaryOperator::Eq => Some(datum_eq(a, b)),
+        BinaryOperator::NotEq => {
+            // NULL on either side never matches, mirroring `datum_eq`.
+            if matches!(a, Datum::Null) || matches!(b, Datum::Null) {
+                Some(false)
+            } else {
+                Some(!datum_eq(a, b))
+            }
+        }
+        BinaryOperator::Lt => Some(matches!(
+            datum_cmp_bool(a, b, |o| o.is_lt()),
+            Datum::Bool(true)
+        )),
+        BinaryOperator::LtEq => Some(matches!(
+            datum_cmp_bool(a, b, |o| o.is_le()),
+            Datum::Bool(true)
+        )),
+        BinaryOperator::Gt => Some(matches!(
+            datum_cmp_bool(a, b, |o| o.is_gt()),
+            Datum::Bool(true)
+        )),
+        BinaryOperator::GtEq => Some(matches!(
+            datum_cmp_bool(a, b, |o| o.is_ge()),
+            Datum::Bool(true)
+        )),
+        _ => None,
     }
 }
 
@@ -525,6 +664,72 @@ mod tests {
         let viewer: Row = smallvec![Datum::I64(2), text("viewer")];
         assert!(p(&admin));
         assert!(!p(&viewer));
+    }
+
+    #[test]
+    fn any_over_array_literal_tests_membership() {
+        // Materialized form of `team_id = ANY($user.team_ids)` with
+        // `team_ids = [1, 3]`.
+        let schema = ScalarSchema::from_pairs([
+            ("id".to_owned(), ColumnType::Int),
+            ("team_id".to_owned(), ColumnType::Int),
+        ]);
+        let p = compile_predicate("team_id = ANY(ARRAY[1, 3])", &schema).unwrap();
+        let team1: Row = smallvec![Datum::I64(10), Datum::I64(1)];
+        let team2: Row = smallvec![Datum::I64(11), Datum::I64(2)];
+        let team3: Row = smallvec![Datum::I64(12), Datum::I64(3)];
+        assert!(p(&team1));
+        assert!(!p(&team2));
+        assert!(p(&team3));
+    }
+
+    #[test]
+    fn any_over_empty_array_matches_nothing() {
+        let schema = posts_schema();
+        let p = compile_predicate("id = ANY(ARRAY[])", &schema).unwrap();
+        let r: Row = smallvec![Datum::I64(1), text(""), Datum::Bool(true)];
+        assert!(!p(&r));
+    }
+
+    #[test]
+    fn any_with_ordering_operator() {
+        let schema = posts_schema();
+        let p = compile_predicate("id < ANY(ARRAY[5, 2])", &schema).unwrap();
+        let three: Row = smallvec![Datum::I64(3), text(""), Datum::Bool(true)];
+        let nine: Row = smallvec![Datum::I64(9), text(""), Datum::Bool(true)];
+        assert!(p(&three));
+        assert!(!p(&nine));
+    }
+
+    #[test]
+    fn any_over_text_array() {
+        let schema = ScalarSchema::from_pairs([("role".to_owned(), ColumnType::Text)]);
+        let p = compile_predicate("role = ANY(ARRAY['admin', 'editor'])", &schema).unwrap();
+        let admin: Row = smallvec![text("admin")];
+        let viewer: Row = smallvec![text("viewer")];
+        assert!(p(&admin));
+        assert!(!p(&viewer));
+    }
+
+    #[test]
+    fn coalesce_returns_first_non_null() {
+        let schema = posts_schema();
+        let f = compile_scalar("coalesce(title, 'fallback')", &schema).unwrap();
+        let named: Row = smallvec![Datum::I64(1), text("hello"), Datum::Bool(true)];
+        let unnamed: Row = smallvec![Datum::I64(2), Datum::Null, Datum::Bool(true)];
+        assert_eq!(f(&named), text("hello"));
+        assert_eq!(f(&unnamed), text("fallback"));
+        let all_null = compile_scalar("coalesce(NULL, NULL)", &schema).unwrap();
+        assert_eq!(all_null(&named), Datum::Null);
+    }
+
+    #[test]
+    fn unsupported_function_rejected_at_compile_time() {
+        let schema = posts_schema();
+        let Err(err) = compile_scalar("upper(title)", &schema) else {
+            panic!("expected compile failure on unsupported function");
+        };
+        assert!(matches!(err, EvalError::Unsupported(_)));
     }
 
     #[test]

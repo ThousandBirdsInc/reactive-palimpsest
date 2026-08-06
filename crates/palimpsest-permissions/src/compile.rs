@@ -338,7 +338,19 @@ fn validate_columns(
         }
         if matches!(
             token.to_ascii_lowercase().as_str(),
-            "true" | "false" | "null" | "and" | "or" | "not" | "is" | "in" | "between" | "like"
+            "true"
+                | "false"
+                | "null"
+                | "and"
+                | "or"
+                | "not"
+                | "is"
+                | "in"
+                | "between"
+                | "like"
+                | "any"
+                | "some"
+                | "array"
         ) {
             continue;
         }

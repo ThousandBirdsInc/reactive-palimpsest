@@ -39,6 +39,13 @@ pub enum UserValue {
     /// Enum label, compared as text. All Postgres enum types collapse
     /// into this one variant — the label carries no enum-type name.
     Enum(String),
+    /// List of scalar values, referenced from predicates via
+    /// `column = ANY($user.field)`. Elements must all be scalars of the
+    /// field's declared type (nested lists are rejected by
+    /// [`UserContext::validate`]). Materializes as an `ARRAY[...]`
+    /// literal; the canonical representation sorts and dedupes
+    /// elements, so `[2, 1, 1]` and `[1, 2]` share dataflows.
+    List(Vec<Self>),
     /// SQL `NULL`. Always validates against any declared field type.
     Null,
 }
@@ -62,9 +69,12 @@ impl UserValue {
             })
     }
 
-    /// Returns the catalog type that this value satisfies.
+    /// Returns the catalog type that this value satisfies. A list
+    /// reports its element type (the declared field type is the
+    /// *element* type; list-ness is a property of the value), or
+    /// [`ColumnType::Unknown`] when empty.
     #[must_use]
-    pub const fn column_type(&self) -> ColumnType {
+    pub fn column_type(&self) -> ColumnType {
         match self {
             Self::Bool(_) => ColumnType::Bool,
             Self::Int(_) => ColumnType::Int,
@@ -74,6 +84,7 @@ impl UserValue {
             Self::Uuid(_) => ColumnType::Uuid,
             Self::Jsonb(_) => ColumnType::Jsonb,
             Self::Enum(_) => ColumnType::Enum,
+            Self::List(items) => items.first().map_or(ColumnType::Unknown, Self::column_type),
             Self::Null => ColumnType::Unknown,
         }
     }
@@ -91,6 +102,10 @@ impl UserValue {
             }
             Self::Uuid(value) => format!("'{}'", normalize_or_raw(value).replace('\'', "''")),
             Self::Jsonb(value) => format!("'{}'", value.to_string().replace('\'', "''")),
+            Self::List(items) => {
+                let rendered: Vec<String> = items.iter().map(Self::to_sql_literal).collect();
+                format!("ARRAY[{}]", rendered.join(", "))
+            }
             Self::Null => "NULL".to_owned(),
         }
     }
@@ -111,6 +126,16 @@ impl UserValue {
             // `to_string` is deterministic for structurally equal docs.
             Self::Jsonb(value) => format!("jsonb:{value}"),
             Self::Enum(value) => format!("enum:{value}"),
+            // Order-insensitive and deduplicated: membership in a set is
+            // what `ANY($user.field)` tests, so `[2, 1, 1]` and `[1, 2]`
+            // must produce the same canonical key (and therefore share a
+            // dataflow) — only genuinely different sets fork.
+            Self::List(items) => {
+                let mut reprs: Vec<String> = items.iter().map(Self::canonical_repr).collect();
+                reprs.sort();
+                reprs.dedup();
+                format!("list:[{}]", reprs.join(","))
+            }
             Self::Null => "null".to_owned(),
         }
     }
@@ -258,46 +283,80 @@ impl UserContext {
     /// permitted regardless of the declared type. Beyond the coarse type
     /// check, UUID values (and text bound to a declared `uuid` field)
     /// must parse as well-formed UUIDs, and a declared `jsonb` field
-    /// only accepts [`UserValue::Jsonb`].
+    /// only accepts [`UserValue::Jsonb`]. A [`UserValue::List`] validates
+    /// each element against the declared field type (the field type is
+    /// the *element* type); nested lists are rejected.
     pub fn validate(&self, schema: &UserContextSchema) -> Result<(), PermissionError> {
         for (field, value) in &self.values {
-            if let UserValue::Uuid(raw) = value {
-                if normalized_uuid(raw).is_none() {
-                    return Err(PermissionError::InvalidUserValue {
-                        field: field.clone(),
-                        reason: format!("'{raw}' is not a valid UUID"),
-                    });
-                }
-            }
-            let Some(expected) = schema.field(field) else {
-                continue;
-            };
-            let actual = value.column_type();
-            if matches!(value, UserValue::Null) {
-                continue;
-            }
-            if !expected.is_compatible_with(actual)
-                || (expected == ColumnType::Jsonb && !matches!(value, UserValue::Jsonb(_)))
-            {
-                return Err(PermissionError::UserValueTypeMismatch {
-                    field: field.clone(),
-                    expected,
-                    actual,
-                });
-            }
-            if expected == ColumnType::Uuid {
-                if let UserValue::Text(raw) = value {
-                    if normalized_uuid(raw).is_none() {
-                        return Err(PermissionError::InvalidUserValue {
-                            field: field.clone(),
-                            reason: format!("'{raw}' is not a valid UUID"),
-                        });
+            let expected = schema.field(field);
+            if let UserValue::List(items) = value {
+                for item in items {
+                    match item {
+                        UserValue::List(_) => {
+                            return Err(PermissionError::InvalidUserValue {
+                                field: field.clone(),
+                                reason: "nested lists are not supported".to_owned(),
+                            });
+                        }
+                        UserValue::Jsonb(_) => {
+                            return Err(PermissionError::InvalidUserValue {
+                                field: field.clone(),
+                                reason: "jsonb documents inside lists are not supported".to_owned(),
+                            });
+                        }
+                        _ => validate_scalar(field, item, expected)?,
                     }
                 }
+                continue;
             }
+            validate_scalar(field, value, expected)?;
         }
         Ok(())
     }
+}
+
+/// Validates one scalar value against an optionally-declared field type.
+/// Shared by top-level fields and list elements.
+fn validate_scalar(
+    field: &str,
+    value: &UserValue,
+    expected: Option<ColumnType>,
+) -> Result<(), PermissionError> {
+    if let UserValue::Uuid(raw) = value {
+        if normalized_uuid(raw).is_none() {
+            return Err(PermissionError::InvalidUserValue {
+                field: field.to_owned(),
+                reason: format!("'{raw}' is not a valid UUID"),
+            });
+        }
+    }
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if matches!(value, UserValue::Null) {
+        return Ok(());
+    }
+    let actual = value.column_type();
+    if !expected.is_compatible_with(actual)
+        || (expected == ColumnType::Jsonb && !matches!(value, UserValue::Jsonb(_)))
+    {
+        return Err(PermissionError::UserValueTypeMismatch {
+            field: field.to_owned(),
+            expected,
+            actual,
+        });
+    }
+    if expected == ColumnType::Uuid {
+        if let UserValue::Text(raw) = value {
+            if normalized_uuid(raw).is_none() {
+                return Err(PermissionError::InvalidUserValue {
+                    field: field.to_owned(),
+                    reason: format!("'{raw}' is not a valid UUID"),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -489,6 +548,73 @@ mod tests {
             UserValue::Enum("it's-a-label".to_owned()).to_sql_literal(),
             "'it''s-a-label'"
         );
+    }
+
+    #[test]
+    fn list_sql_literal_renders_array() {
+        let value = UserValue::List(vec![UserValue::Int(3), UserValue::Int(1)]);
+        assert_eq!(value.to_sql_literal(), "ARRAY[3, 1]");
+        let texts = UserValue::List(vec![UserValue::Text("o'brien".to_owned())]);
+        assert_eq!(texts.to_sql_literal(), "ARRAY['o''brien']");
+        assert_eq!(UserValue::List(Vec::new()).to_sql_literal(), "ARRAY[]");
+    }
+
+    #[test]
+    fn list_canonical_repr_is_order_insensitive_and_deduped() {
+        let a = UserValue::List(vec![
+            UserValue::Int(2),
+            UserValue::Int(1),
+            UserValue::Int(1),
+        ]);
+        let b = UserValue::List(vec![UserValue::Int(1), UserValue::Int(2)]);
+        assert_eq!(a.canonical_repr(), b.canonical_repr());
+        let c = UserValue::List(vec![UserValue::Int(1), UserValue::Int(3)]);
+        assert_ne!(a.canonical_repr(), c.canonical_repr());
+        // Type tags still matter inside lists.
+        assert_ne!(
+            UserValue::List(vec![UserValue::Int(0)]).canonical_repr(),
+            UserValue::List(vec![UserValue::Bool(false)]).canonical_repr(),
+        );
+    }
+
+    #[test]
+    fn validate_accepts_list_of_declared_element_type() {
+        let schema = UserContextSchema::new([("team_ids".to_owned(), ColumnType::Int)]);
+        let context = UserContext::new([(
+            "team_ids".to_owned(),
+            UserValue::List(vec![UserValue::Int(1), UserValue::Int(2)]),
+        )]);
+        context.validate(&schema).expect("int list validates");
+    }
+
+    #[test]
+    fn validate_rejects_list_with_mismatched_element() {
+        let schema = UserContextSchema::new([("team_ids".to_owned(), ColumnType::Int)]);
+        let context = UserContext::new([(
+            "team_ids".to_owned(),
+            UserValue::List(vec![UserValue::Int(1), UserValue::Text("nope".to_owned())]),
+        )]);
+        let err = context.validate(&schema).unwrap_err();
+        assert!(err.to_string().contains("team_ids"));
+    }
+
+    #[test]
+    fn validate_rejects_nested_lists() {
+        let schema = UserContextSchema::new([("team_ids".to_owned(), ColumnType::Int)]);
+        let context = UserContext::new([(
+            "team_ids".to_owned(),
+            UserValue::List(vec![UserValue::List(vec![UserValue::Int(1)])]),
+        )]);
+        let err = context.validate(&schema).unwrap_err();
+        assert!(err.to_string().contains("nested lists"));
+    }
+
+    #[test]
+    fn serde_round_trips_list() {
+        let value = UserValue::List(vec![UserValue::Int(1), UserValue::Text("a".to_owned())]);
+        let encoded = serde_json::to_string(&value).expect("serializes");
+        let decoded: UserValue = serde_json::from_str(&encoded).expect("deserializes");
+        assert_eq!(decoded, value);
     }
 
     #[test]

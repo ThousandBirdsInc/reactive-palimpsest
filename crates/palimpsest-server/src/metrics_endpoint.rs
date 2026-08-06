@@ -183,6 +183,31 @@ pub fn render_prometheus(snapshot: &MetricsSnapshot) -> String {
         "Estimated p99 fan-out latency in microseconds",
         snapshot.fanout_latency_p99_us,
     );
+
+    write_counter(
+        &mut out,
+        "palimpsest_permission_rule_updates_total",
+        "Permission rule-set swaps applied to the running router",
+        snapshot.permission_rule_updates,
+    );
+    write_counter(
+        &mut out,
+        "palimpsest_permission_resyncs_forced_total",
+        "Resync(PermissionsChanged) events forced onto active subscriptions by rule swaps",
+        snapshot.permission_resyncs_forced,
+    );
+    write_gauge_us(
+        &mut out,
+        "palimpsest_permission_revocation_lag_p50_microseconds",
+        "Estimated p50 server-side revocation lag (rule swap to resync enqueued) in microseconds",
+        snapshot.permission_revocation_lag_p50_us,
+    );
+    write_gauge_us(
+        &mut out,
+        "palimpsest_permission_revocation_lag_p99_microseconds",
+        "Estimated p99 server-side revocation lag (rule swap to resync enqueued) in microseconds",
+        snapshot.permission_revocation_lag_p99_us,
+    );
     out
 }
 

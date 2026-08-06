@@ -56,6 +56,14 @@ predicate = "id = $user.id OR $user.is_admin"
   - `enum` — a Postgres enum label, compared as text. The taxonomy is
     coarse: all enum types collapse into one, and no per-type label
     list is enforced.
+  - **Lists** — a field may be bound to a *list* of scalars at
+    subscribe time (e.g. a `team_ids` JWT claim that is a JSON array).
+    Declare the field with its **element** type (`team_ids` above is
+    declared `int`); list-ness is a property of the bound value, not
+    the declaration. Every element must match the declared type;
+    nested lists and lists of JSON documents are rejected. Reference
+    the field with `column = ANY($user.field)` — it materializes as
+    `column = ANY(ARRAY[...])`.
 
 - **`[[rule]]`** — a row-visibility / subscribe-authorization predicate
   applied to a specific table.
@@ -98,6 +106,18 @@ just whitespace — the canonical-form pass strips trivial differences).
 A table with **no rule** is visible to everyone — there is no implicit
 deny. Rule absence means "no policy"; if you want a default-deny
 posture, add `predicate = "false"` for tables you haven't reviewed.
+
+## Enforcement requires the dataflow
+
+Row-visibility filters are compiled into the query's dataflow plan.
+Queries the dataflow compiler cannot execute (joins, set ops,
+`DISTINCT`, recursive CTEs — see `supported-sql.md`) normally fall
+back to a raw pass-through path, which cannot enforce filters. When a
+row-visibility rule applies to any table such a query reads, the
+subscribe **fails closed**: the server rejects it with
+`permission_unenforceable` rather than serving unfiltered rows.
+Tautological rules (`predicate = "true"`) and `mode = "subscribe"`
+rules splice no filter, so they don't block pass-through.
 
 ## Examples
 
@@ -155,12 +175,27 @@ client sends a freshly-generated value at subscribe time. (Don't use
 ### Scoped read with admin override
 
 ```toml
+[[user_context]]
+name = "team_ids"
+type = "int"          # element type; the bound value is a list
+
 [[rule]]
 name = "team_read"
 table = "tasks"
 mode = "row_visibility"
 predicate = "team_id = ANY($user.team_ids) OR $user.is_admin"
 ```
+
+A subscriber whose `team_ids` is `[1, 3]` sees rows from teams 1 and 3
+and from no others.
+
+**Dataflow sharing for list values:** the canonical subgraph key treats
+a list as a *set* — element order and duplicates are normalized away,
+so `[2, 1, 1]` and `[1, 2]` share one dataflow. Subscribers with
+genuinely different team sets see different rows, so each distinct set
+necessarily gets its own dataflow (exactly as two subscribers with
+different scalar `$user.org_id` values do). If your tenancy model puts
+most users in one team, sharing degrades to per-team, not per-user.
 
 ## Common pitfalls
 
@@ -227,8 +262,18 @@ Stops *anyone* from subscribing until you write a real rule.
 
 ## Operational notes
 
-- Rule changes require a server restart in v1; hot reload is on the
-  roadmap.
+- Rule changes can be applied to a running server via
+  `Palimpsest::update_permissions` (or
+  `PalimpsestHandle::update_permissions`). Future subscribes compile
+  against the new rules immediately; every active subscription is sent
+  `Resync(PermissionsChanged)` before the call returns, forcing a
+  resubscribe under the new rules. The revocation bound is therefore
+  *one resubscribe round trip* after the swap; the server-side half is
+  published as
+  `palimpsest_permission_revocation_lag_p{50,99}_microseconds`, with
+  `palimpsest_permission_rule_updates_total` and
+  `palimpsest_permission_resyncs_forced_total` counting swaps and
+  forced resyncs.
 - The full rule set is hashed into the canonical-form key, so two
   servers with diverging rule sets will produce diverging canonical
   keys — don't let configurations drift.

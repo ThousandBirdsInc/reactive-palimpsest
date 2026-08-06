@@ -16,6 +16,7 @@ publish = false
 # Test-only crate.
 
 [dev-dependencies]
+palimpsest-client = { path = "../palimpsest-client" }
 palimpsest-dataflow = { path = "../palimpsest-dataflow" }
 palimpsest-permissions = { path = "../palimpsest-permissions" }
 palimpsest-server = { path = "../palimpsest-server" }
