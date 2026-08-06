@@ -13,6 +13,6 @@ canonical_before:
   project:id[input:base:posts:[][]]
 
 canonical_after:
-  project:id[input:filter:author_id = 42[input:base:posts:[][]]]
+  project:id[input:base:posts:[][]]
 
-stats: RewriteStats { base_tables_visited: 1, filters_inserted: 1, rules_elided: 1 }
+stats: RewriteStats { base_tables_visited: 1, filters_inserted: 0, rules_elided: 1 }

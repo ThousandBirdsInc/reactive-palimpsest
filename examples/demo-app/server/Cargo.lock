@@ -958,7 +958,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "palimpsest-dataflow"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "columnar",
@@ -966,9 +966,9 @@ dependencies = [
  "fnv",
  "palimpsest-sql",
  "palimpsest-wal",
- "paste",
  "petgraph",
  "serde",
+ "serde_json",
  "smallvec",
  "sqlparser",
  "thiserror 2.0.18",
@@ -1005,11 +1005,11 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-permissions"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "palimpsest-sql",
- "petgraph",
  "serde",
+ "serde_json",
  "sqlparser",
  "thiserror 2.0.18",
  "toml",
@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bincode",
  "prost",
@@ -1029,11 +1029,10 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
- "bincode",
  "futures",
  "http",
  "jsonwebtoken",
@@ -1042,7 +1041,6 @@ dependencies = [
  "palimpsest-proto",
  "palimpsest-sql",
  "palimpsest-wal",
- "prost",
  "serde",
  "serde_json",
  "smallvec",
@@ -1058,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-sql"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "petgraph",
  "sqlparser",
@@ -1067,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-wal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "futures",

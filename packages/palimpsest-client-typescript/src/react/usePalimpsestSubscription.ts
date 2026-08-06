@@ -11,12 +11,17 @@
 //       * "error"    → surface code+message; status = "error".
 //   - On unmount: call .unsubscribe() and stop reacting to events.
 //
-// The `refreshKey` dependency is a thin escape hatch: bump it from
-// caller-land to force a fresh subscribe after a write. Once the wire
-// protocol streams diffs end-to-end this becomes unnecessary, but it
-// lets demo apps work today.
+// Live diffs stream end-to-end (server WAL → dataflow → Diff /
+// TransactionUpdate), so `refreshKey` is only an escape hatch for
+// callers that want to force a full re-subscribe for their own
+// reasons — it is never required after a write.
+//
+// Callers that maintain their own cache (e.g. TanStack Query) can pass
+// `onDiff` to observe every event as it arrives and fold it into that
+// cache directly, and `trackRows: false` to switch off this hook's
+// internal row map so rows aren't held twice.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PalimpsestClient, TypedSubscription } from "../client.js";
 import type { RowDecoderOptions } from "../codec.js";
 import type {
@@ -34,16 +39,35 @@ export type SubscriptionStatus =
   | "error";
 
 export interface UseSubscriptionOptions<T> extends SubscribeOptions {
-  /** Bump to force a fresh subscribe (e.g. after a write). */
+  /**
+   * Bump to force a fresh subscribe. Live diffs stream automatically,
+   * so this is an escape hatch, not a requirement after writes.
+   */
   refreshKey?: number | string;
   /** Called when a `resync` lands; defaults to clearing local rows. */
   onResync?: (event: Extract<DiffEvent<T>, { kind: "resync" }>) => void;
+  /**
+   * Called for **every** event (`accepted`, `diff`, `transaction`,
+   * `resync`, `error`) before the hook applies it to its own row map.
+   * Use this to fold diffs into a host cache (e.g. TanStack Query's
+   * `setQueryData`) instead of copying `rows`. The latest callback is
+   * always invoked — changing its identity does not re-subscribe.
+   */
+  onDiff?: (event: DiffEvent<T>) => void;
+  /**
+   * Maintain the hook's internal primary-key row map and publish
+   * `rows` (default `true`). Pass `false` when a host cache driven by
+   * `onDiff` is the single source of truth — the hook then keeps no
+   * second copy of the rows and `rows` stays `[]`.
+   */
+  trackRows?: boolean;
   /** Per-row decoder override (overrides the client-level decoder). */
   decoder?: RowDecoderOptions;
 }
 
 export interface UseSubscriptionResult<T> {
   status: SubscriptionStatus;
+  /** Rolling result set; always `[]` when `trackRows: false`. */
   rows: T[];
   schema: Schema | null;
   error: Pick<ErrorEvent, "code" | "message"> | null;
@@ -82,6 +106,14 @@ export function usePalimpsestSubscription<T>(
     [options.vars],
   );
 
+  // Latest-callback refs so changing handler identity never tears the
+  // subscription down; the event callback always sees the current one.
+  const onDiffRef = useRef(options.onDiff);
+  onDiffRef.current = options.onDiff;
+  const onResyncRef = useRef(options.onResync);
+  onResyncRef.current = options.onResync;
+  const trackRows = options.trackRows !== false;
+
   // eslint-disable-next-line react-hooks/exhaustive-deps -- explicit deps below
   useEffect(() => {
     if (!client) {
@@ -115,18 +147,21 @@ export function usePalimpsestSubscription<T>(
 
         sub.onEvent((event) => {
           if (!alive) return;
+          // Host-cache hook point: the caller sees every event before
+          // the hook's own bookkeeping touches it.
+          onDiffRef.current?.(event);
           switch (event.kind) {
             case "accepted":
               currentSchema = event.schema;
               setSchema(event.schema);
               setLsn(event.snapshotLsn);
               rowsByPk.clear();
-              setRows([]);
+              if (trackRows) setRows([]);
               setStatus("open");
               break;
             case "diff": {
               setLsn(event.lsn);
-              if (!currentSchema) break;
+              if (!currentSchema || !trackRows) break;
               for (const row of event.rows) {
                 const pk = pkOf(row, currentSchema);
                 if (event.op === "delete") rowsByPk.delete(pk);
@@ -137,7 +172,7 @@ export function usePalimpsestSubscription<T>(
             }
             case "transaction": {
               setLsn(event.commitLsn);
-              if (!currentSchema) break;
+              if (!currentSchema || !trackRows) break;
               for (const change of event.changes) {
                 if (change.op === "delete") {
                   if (change.old) rowsByPk.delete(pkOf(change.old, currentSchema));
@@ -153,8 +188,8 @@ export function usePalimpsestSubscription<T>(
             }
             case "resync":
               rowsByPk.clear();
-              setRows([]);
-              if (options.onResync) options.onResync(event);
+              if (trackRows) setRows([]);
+              onResyncRef.current?.(event);
               // Force a fresh subscribe so the client refetches —
               // matches the server's DropAndResync contract.
               setResyncEpoch((n) => n + 1);
@@ -186,7 +221,7 @@ export function usePalimpsestSubscription<T>(
       }
       setStatus("closed");
     };
-  }, [client, sql, varsKey, options.refreshKey, resyncEpoch]);
+  }, [client, sql, varsKey, options.refreshKey, resyncEpoch, trackRows]);
 
   return { status, rows, schema, error, lsn };
 }

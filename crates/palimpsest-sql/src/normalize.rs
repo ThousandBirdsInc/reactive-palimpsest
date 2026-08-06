@@ -562,6 +562,19 @@ fn normalize_expr(
         }
         Expr::Function(function) => {
             let mut function = function.clone();
+            // Allowlist: every function the frontend accepts must be
+            // one the engine evaluates — aggregates are folded by the
+            // dataflow's aggregate operator, `coalesce`/`cardinality`
+            // by the expression evaluator. Anything else is rejected
+            // here, at parse time, with a named error rather than
+            // being accepted and silently never evaluated.
+            let name = function.name.to_string().to_ascii_lowercase();
+            if !matches!(
+                name.as_str(),
+                "count" | "sum" | "min" | "max" | "avg" | "coalesce" | "cardinality"
+            ) {
+                return Err(SqlError::UnsupportedFunction { name });
+            }
             if let FunctionArguments::List(list) = &mut function.args {
                 for arg in &mut list.args {
                     if let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) = arg {
@@ -1107,6 +1120,32 @@ mod tests {
         assert!(normalized
             .to_string()
             .contains("posts.author_id = ANY('{1,2}')"));
+    }
+
+    #[test]
+    fn accepts_coalesce_and_rejects_unlisted_functions() {
+        parse_and_normalize(
+            "SELECT coalesce(title, 'untitled') FROM posts",
+            &Catalog::demo(),
+        )
+        .expect("coalesce is on the evaluable allowlist");
+
+        let err = parse_and_normalize("SELECT upper(title) FROM posts", &Catalog::demo())
+            .expect_err("functions the dataflow cannot evaluate are rejected at parse time");
+        assert!(
+            matches!(&err, crate::SqlError::UnsupportedFunction { name } if name == "upper"),
+            "got {err}"
+        );
+
+        let err = parse_and_normalize(
+            "SELECT id FROM posts WHERE now() > created_at",
+            &Catalog::demo(),
+        )
+        .expect_err("functions in predicates are rejected too");
+        assert!(
+            matches!(&err, crate::SqlError::UnsupportedFunction { name } if name == "now"),
+            "got {err}"
+        );
     }
 
     #[test]

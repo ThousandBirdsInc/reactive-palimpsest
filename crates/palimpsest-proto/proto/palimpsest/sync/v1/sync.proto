@@ -130,6 +130,10 @@ enum ResyncReason {
   RESYNC_REASON_SCHEMA_CHANGED = 2;
   RESYNC_REASON_BACKPRESSURE = 3;
   RESYNC_REASON_SLOT_RECREATED = 4;
+  // Permission rules changed while the subscription was open; the
+  // client must resubscribe so the new rules are applied (and rows a
+  // revoked grant covered are retracted).
+  RESYNC_REASON_PERMISSIONS_CHANGED = 5;
 }
 
 enum DatumType {

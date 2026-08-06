@@ -33,6 +33,9 @@ struct RouterMetricsInner {
     wal_lag_bytes: AtomicU64,
     operator_memory_bytes: AtomicU64,
     fanout_latency: Mutex<RunningQuantiles>,
+    permission_rule_updates: AtomicU64,
+    permission_resyncs_forced: AtomicU64,
+    permission_revocation_lag: Mutex<RunningQuantiles>,
 }
 
 #[derive(Debug, Default)]
@@ -146,6 +149,27 @@ impl RouterMetrics {
         self.inner.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Records a permission rule-set swap: `lag` is the time from the
+    /// start of `SubscriptionRouter::set_rules` until a
+    /// `Resync(PermissionsChanged)` was enqueued on every active
+    /// subscription channel (`resynced` of them). This is the
+    /// server-side half of the revocation bound — the client adds one
+    /// resubscribe round trip on top.
+    pub fn record_permission_rules_update(&self, lag: Duration, resynced: usize) {
+        self.inner
+            .permission_rule_updates
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .permission_resyncs_forced
+            .fetch_add(resynced as u64, Ordering::Relaxed);
+        let micros = u64::try_from(lag.as_micros()).unwrap_or(u64::MAX);
+        #[allow(clippy::cast_precision_loss)]
+        let micros_f = micros as f64;
+        if let Ok(mut quantiles) = self.inner.permission_revocation_lag.lock() {
+            quantiles.observe(micros_f);
+        }
+    }
+
     /// Reports a per-subscription channel depth observation; tracked
     /// as a high-water gauge.
     pub fn observe_channel_depth(&self, depth: u64) {
@@ -179,6 +203,12 @@ impl RouterMetrics {
             .lock()
             .map(|q| q.snapshot())
             .unwrap_or_default();
+        let revocation = self
+            .inner
+            .permission_revocation_lag
+            .lock()
+            .map(|q| q.snapshot())
+            .unwrap_or_default();
         MetricsSnapshot {
             subscriptions_in_flight: self.inner.subscriptions_in_flight.load(Ordering::Relaxed),
             subscriptions_total: self.inner.subscriptions_total.load(Ordering::Relaxed),
@@ -192,6 +222,10 @@ impl RouterMetrics {
             operator_memory_bytes: self.inner.operator_memory_bytes.load(Ordering::Relaxed),
             fanout_latency_p50_us: quantiles.p50,
             fanout_latency_p99_us: quantiles.p99,
+            permission_rule_updates: self.inner.permission_rule_updates.load(Ordering::Relaxed),
+            permission_resyncs_forced: self.inner.permission_resyncs_forced.load(Ordering::Relaxed),
+            permission_revocation_lag_p50_us: revocation.p50,
+            permission_revocation_lag_p99_us: revocation.p99,
         }
     }
 }
@@ -223,6 +257,16 @@ pub struct MetricsSnapshot {
     pub fanout_latency_p50_us: f64,
     /// Estimated p99 fan-out latency, in microseconds.
     pub fanout_latency_p99_us: f64,
+    /// Total permission rule-set swaps applied via `set_rules`.
+    pub permission_rule_updates: u64,
+    /// Total `Resync(PermissionsChanged)` events forced onto active
+    /// subscriptions by rule-set swaps.
+    pub permission_resyncs_forced: u64,
+    /// Estimated p50 server-side revocation lag (rule swap → resync
+    /// enqueued on every active channel), in microseconds.
+    pub permission_revocation_lag_p50_us: f64,
+    /// Estimated p99 server-side revocation lag, in microseconds.
+    pub permission_revocation_lag_p99_us: f64,
 }
 
 /// Streaming p50 / p99 estimator.

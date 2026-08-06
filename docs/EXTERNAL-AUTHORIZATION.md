@@ -65,8 +65,8 @@ The seams this design builds on, by symbol:
   SQL text plus **every** `UserContext` field/value. Identical contexts
   share one arrangement; any differing field forks a private dataflow.
 - Wire protocol (`crates/palimpsest-proto`) — `Resync` reasons are a closed
-  enum (`LSN_COMPACTED | SCHEMA_CHANGED | BACKPRESSURE | SLOT_RECREATED`);
-  there is no permissions-related resync reason yet.
+  enum (`LSN_COMPACTED | SCHEMA_CHANGED | BACKPRESSURE | SLOT_RECREATED |
+  PERMISSIONS_CHANGED`).
 - Test infrastructure — `TestHarness::drive(&[LogicalEvent])`,
   `WalGenerator`, `MockPostgres`, `ReferenceExecutor`
   (`crates/palimpsest-test-harness`); property suites in
@@ -81,15 +81,23 @@ must not make worse (verified in code):
 - `Mode::Subscribe` is defined but dead — `Mode::affects_subscribe()` has
   no production call site. There is no subscribe-time deny today beyond a
   missing-user-field error.
-- Multiple rules on one table compile to stacked `Filter` nodes (AND),
-  while `PERMISSIONS.md` documents disjunctive (OR / Postgres `PERMISSIVE`)
-  semantics. This discrepancy must be resolved before external rules
-  compose with local ones (see Phase 1).
-- `ANY($user.team_ids)` appears in `PERMISSIONS.md` but cannot compile:
-  no list-valued `UserValue`, no `ANY` support in the predicate subset.
-- Authorization is evaluated exactly once, at subscribe time. Nothing
-  re-evaluates a running stream; `SubscriptionRouter::set_rules` exists
-  but is uncalled.
+- ~~Multiple rules on one table compile to stacked `Filter` nodes (AND)~~
+  Resolved: the rewriter now composes rules on one table disjunctively
+  (one `Filter` with `(p1) OR (p2)`), matching `PERMISSIONS.md` and
+  Postgres `PERMISSIVE`; pinned by
+  `permission_soundness.rs::multiple_rules_compose_disjunctively`.
+- ~~`ANY($user.team_ids)` cannot compile~~ Resolved: `UserValue::List`
+  materializes as `ANY(ARRAY[...])` and the dataflow evaluator executes
+  it; the canonical key normalizes lists as sets (order/duplicates do
+  not fork dataflows).
+- ~~Nothing re-evaluates a running stream~~ Partially resolved:
+  `SubscriptionRouter::set_rules` (via `Palimpsest::update_permissions`)
+  now forces `Resync(PermissionsChanged)` onto every active
+  subscription, so a rule swap propagates within one resubscribe round
+  trip, with lag published as
+  `palimpsest_permission_revocation_lag_p{50,99}_microseconds`. What
+  remains open is *automatic* re-evaluation driven by an external
+  grant store (the subject of this design).
 - `palimpsest_subscribe_rejected_total{reason="permissions"}` is
   documented but not emitted.
 

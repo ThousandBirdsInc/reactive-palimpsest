@@ -167,11 +167,29 @@ fn json_to_user_value(claim: &str, value: &serde_json::Value) -> Result<UserValu
         ),
         serde_json::Value::String(s) => Ok(UserValue::Text(s.clone())),
         serde_json::Value::Null => Ok(UserValue::Null),
+        // Arrays of scalars (e.g. a `team_ids` claim) map onto list
+        // user-context fields, consumed by `column = ANY($user.field)`
+        // predicates. Arrays containing structured values fall back to
+        // `jsonb`, like objects.
+        serde_json::Value::Array(items) => {
+            if items.iter().all(|item| {
+                !matches!(
+                    item,
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                )
+            }) {
+                let elements = items
+                    .iter()
+                    .map(|item| json_to_user_value(claim, item))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(UserValue::List(elements))
+            } else {
+                Ok(UserValue::Jsonb(value.clone()))
+            }
+        }
         // Structured claims map onto `jsonb` user-context fields.
         // Validation against the declared schema happens downstream.
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Ok(UserValue::Jsonb(value.clone()))
-        }
+        serde_json::Value::Object(_) => Ok(UserValue::Jsonb(value.clone())),
     }
 }
 

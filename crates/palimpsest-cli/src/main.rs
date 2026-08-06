@@ -523,6 +523,10 @@ fn user_value_label(value: &UserValue) -> String {
         UserValue::Uuid(value) => format!("uuid:{value}"),
         UserValue::Jsonb(value) => format!("jsonb:{value}"),
         UserValue::Enum(value) => format!("enum:{value:?}"),
+        UserValue::List(items) => {
+            let rendered: Vec<String> = items.iter().map(user_value_label).collect();
+            format!("list:[{}]", rendered.join(","))
+        }
         UserValue::Null => "null".to_owned(),
     }
 }
@@ -665,6 +669,18 @@ fn parse_json_user_value(
 ) -> Result<UserValue, CliError> {
     if value.is_null() {
         return Ok(UserValue::Null);
+    }
+    // JSON arrays bind as list values: each element is parsed against
+    // the field's declared (element) type, for `ANY($user.field)`
+    // predicates. `jsonb` fields keep the raw document instead.
+    if let serde_json::Value::Array(items) = value {
+        if schema_type(field, schema)? != ColumnType::Jsonb {
+            let elements = items
+                .iter()
+                .map(|item| parse_json_user_value(field, item, schema))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(UserValue::List(elements));
+        }
     }
     match schema_type(field, schema)? {
         ColumnType::Bool => value

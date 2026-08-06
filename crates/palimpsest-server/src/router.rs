@@ -183,10 +183,32 @@ impl SubscriptionRouter {
     }
 
     /// Replaces the compiled rule set the router uses for permission
-    /// rewriting.
+    /// rewriting, and forces `Resync(PermissionsChanged)` onto every
+    /// active subscription so revoked grants take effect on running
+    /// streams, not just future subscribes.
+    ///
+    /// The revocation bound this gives is: rules are swapped and every
+    /// open channel has a `Resync` enqueued before this method returns;
+    /// a well-behaved client resubscribes on `Resync`, and the fresh
+    /// subscribe runs under the new rules (rows a revoked grant covered
+    /// are absent from the new `Initial`). The server-side half of that
+    /// lag is published as
+    /// `palimpsest_permission_revocation_lag_p{50,99}_microseconds`,
+    /// alongside `palimpsest_permission_rule_updates_total` and the
+    /// `permissions_changed` label of
+    /// `palimpsest_resyncs_by_reason_total`.
     pub fn set_rules(&self, rules: Vec<CompiledRule>) {
-        let mut inner = self.inner.lock().expect("router lock");
-        inner.rules = rules;
+        let started = Instant::now();
+        let resynced = {
+            let mut inner = self.inner.lock().expect("router lock");
+            inner.rules = rules;
+            for channel in inner.channels.values() {
+                channel.force_resync(ResyncReason::PermissionsChanged);
+            }
+            inner.channels.len()
+        };
+        self.metrics
+            .record_permission_rules_update(started.elapsed(), resynced);
     }
 
     /// Returns a snapshot of the router's compiled permission rules.
@@ -414,9 +436,18 @@ impl SubscriptionRouter {
         }
     }
 
-    /// Drains `cursor` into the subscription's channel. Used by the
-    /// embed shim's per-subscription cursor task; tests drive the
-    /// router with [`crate::cursor::VecCursor`].
+    /// Drains `cursor` into the subscription's channel. This is the
+    /// serving-path pump for non-host-routed subscriptions (the gRPC
+    /// adapter's per-subscription cursor task calls it every poll
+    /// tick); tests drive the router with [`crate::cursor::VecCursor`].
+    ///
+    /// Empty transactions (Begin/Commit pairs that produced no diffs
+    /// for this query) are skipped rather than surfaced as no-op
+    /// events. On error the drain stops immediately: the failed
+    /// transaction is dropped (for `ChannelSaturated` the router has
+    /// already forced a `Resync`, so the client refetches), and any
+    /// transactions still queued in the cursor are picked up by the
+    /// caller's next drain.
     pub fn pump_cursor<C: TraceCursor + ?Sized>(
         &self,
         sub: SubscriptionId,
@@ -425,6 +456,9 @@ impl SubscriptionRouter {
     ) -> Result<usize, RouterError> {
         let mut events = 0;
         while let Some(delta) = cursor.next_transaction() {
+            if delta.is_empty() {
+                continue;
+            }
             self.pump_transaction(sub, delta, primary_key)?;
             events += 1;
         }
@@ -952,6 +986,63 @@ mod tests {
             canonical_subgraph_key(&QueryId::new("q"), &ctx_a),
             canonical_subgraph_key(&QueryId::new("q"), &ctx_b),
         );
+    }
+
+    #[tokio::test]
+    async fn set_rules_forces_permissions_resync_on_active_subscriptions() {
+        let router = SubscriptionRouter::new(RouterConfig::default());
+        let provider = StubProvider {
+            responses: RefCell::new(vec![snapshot_with(vec![1])]),
+        };
+        let graph = parse_and_lower("SELECT id FROM posts").unwrap();
+        let response = router
+            .subscribe(
+                SubscribeRequest {
+                    connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
+                    client_id: ClientSubscriptionId::new("posts"),
+                    query: QueryId::new("posts"),
+                    query_graph: &graph,
+                    user_ctx: UserContext::new(std::iter::empty()),
+                    schema: schema(),
+                    resume_lsn: None,
+                    compiled_plan: None,
+                    prerun_initial: None,
+                },
+                &provider,
+            )
+            .unwrap();
+
+        let user_schema = UserContextSchema::new([("id".to_owned(), ColumnType::Int)]);
+        let rules = compile_rules(
+            &[PermissionRule::new(
+                "posts_owner",
+                "posts",
+                "author_id = $user.id",
+            )],
+            &Catalog::demo(),
+            &user_schema,
+        )
+        .unwrap();
+        router.set_rules(rules);
+
+        let mut stream = response.stream;
+        // Drain the Initial, then the forced resync must follow.
+        let _ = stream.next().await;
+        let event = stream.next().await.expect("resync event");
+        assert!(
+            matches!(
+                event,
+                DiffEvent::Resync {
+                    reason: crate::diff::ResyncReason::PermissionsChanged
+                }
+            ),
+            "got {event:?}"
+        );
+
+        let snapshot = router.metrics().snapshot();
+        assert_eq!(snapshot.permission_rule_updates, 1);
+        assert_eq!(snapshot.permission_resyncs_forced, 1);
     }
 
     #[tokio::test]

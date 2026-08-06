@@ -4,10 +4,14 @@
 //! Rewrites a user's `MirGraph` to splice permission filters.
 //!
 //! For every `BaseTable` reference (\u{00a7}11.2) we look up matching
-//! rules and chain a `Filter` per rule above the base table.
-//! Tautologies (`true`) and rules whose `mode` does not affect row
-//! visibility are elided so the unconfigured/default-open case has
-//! zero overhead.
+//! rules and splice a single `Filter` above the base table whose
+//! predicate is the **disjunction** of every applicable rule: a row is
+//! visible iff at least one rule admits it, matching Postgres RLS's
+//! `PERMISSIVE` semantics (see `docs/PERMISSIONS.md`, "How rules
+//! compose"). Tautologies (`true`) and rules whose `mode` does not
+//! affect row visibility are elided so the unconfigured/default-open
+//! case has zero overhead; a tautology among several rules on the same
+//! table admits every row, so the whole filter is elided.
 
 use std::collections::BTreeMap;
 
@@ -37,9 +41,15 @@ pub struct RewriteStats {
     pub rules_elided: usize,
 }
 
-/// Splices a `Filter` node above every `BaseTable` whose name matches a
-/// rule. Rules whose predicate is a tautology, or whose mode does not
-/// affect row visibility, are elided.
+/// Splices one `Filter` node above every `BaseTable` whose name matches
+/// at least one rule.
+///
+/// Multiple rules on the same table compose **disjunctively**: the
+/// filter predicate is `(p1) OR (p2) OR ...`, so a row is visible iff
+/// at least one rule admits it (Postgres RLS `PERMISSIVE` semantics).
+/// Rules whose predicate is a tautology, or whose mode does not affect
+/// row visibility, are elided; a tautology makes the whole disjunction
+/// true, so the table gets no filter at all.
 ///
 /// The `UserContext` supplies the values bound to each `$user.*`
 /// reference; if a referenced field is absent, the rewriter returns
@@ -52,9 +62,6 @@ pub fn rewrite(
     let mut by_table: BTreeMap<&str, Vec<&CompiledRule>> = BTreeMap::new();
     for rule in rules {
         if !rule.mode.affects_visibility() {
-            continue;
-        }
-        if rule.predicate.is_tautology() {
             continue;
         }
         by_table.entry(rule.table.as_str()).or_default().push(rule);
@@ -73,23 +80,30 @@ pub fn rewrite(
             continue;
         };
 
-        let mut current = index;
-        for rule in rules_for_table {
-            let materialized = rule.predicate.materialize(context).map_err(|err| {
-                if let PermissionError::MissingUserValue(field) = err {
-                    PermissionError::MissingUserValue(field)
-                } else {
-                    err
-                }
-            })?;
-            current = output.splice_above(
-                current,
-                MirNodeKind::Filter {
-                    predicate: materialized,
-                },
-            );
-            stats.filters_inserted += 1;
+        // `true OR anything` is `true` — one tautological rule admits
+        // every row, so the table needs no filter.
+        if rules_for_table
+            .iter()
+            .any(|rule| rule.predicate.is_tautology())
+        {
+            continue;
         }
+
+        let mut clauses = Vec::with_capacity(rules_for_table.len());
+        for rule in rules_for_table {
+            clauses.push(rule.predicate.materialize(context)?);
+        }
+        let predicate = if clauses.len() == 1 {
+            clauses.pop().expect("non-empty clause list")
+        } else {
+            clauses
+                .iter()
+                .map(|clause| format!("({clause})"))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        };
+        output.splice_above(index, MirNodeKind::Filter { predicate });
+        stats.filters_inserted += 1;
     }
 
     stats.rules_elided = rules.len().saturating_sub(rules_in_play(rules));
@@ -238,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_chains_multiple_rules_for_same_table() {
+    fn rewrite_composes_multiple_rules_disjunctively() {
         let graph = parse_and_lower("SELECT id FROM posts").unwrap();
         let rules = compile_rules(
             &[
@@ -251,13 +265,23 @@ mod tests {
         .unwrap();
 
         let outcome = rewrite(&graph, &rules, &alice()).unwrap();
-        assert_eq!(outcome.stats.filters_inserted, 2);
-        let filter_count = outcome
+        // PERMISSIVE composition: one Filter whose predicate is the OR
+        // of both rules, not two stacked (AND-ed) filters.
+        assert_eq!(outcome.stats.filters_inserted, 1);
+        let filters: Vec<_> = outcome
             .graph
             .node_kinds()
-            .filter(|node| matches!(node, MirNodeKind::Filter { .. }))
-            .count();
-        assert_eq!(filter_count, 2);
+            .filter_map(|node| match node {
+                MirNodeKind::Filter { predicate } => Some(predicate.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(filters.len(), 1);
+        let predicate = &filters[0];
+        assert!(predicate.contains(" OR "), "got {predicate:?}");
+        // alice: id = 1, org_id = 7 — both bindings must be present.
+        assert!(predicate.contains('1'), "got {predicate:?}");
+        assert!(predicate.contains('7'), "got {predicate:?}");
 
         let input_edge_count = outcome
             .graph
@@ -265,7 +289,26 @@ mod tests {
             .edge_weights()
             .filter(|edge| matches!(edge, MirEdgeKind::Input))
             .count();
-        assert!(input_edge_count >= 3);
+        assert!(input_edge_count >= 2);
+    }
+
+    #[test]
+    fn rewrite_tautology_among_multiple_rules_elides_table_filter() {
+        let graph = parse_and_lower("SELECT id FROM posts").unwrap();
+        let rules = compile_rules(
+            &[
+                PermissionRule::new("owner", "posts", "author_id = $user.id"),
+                PermissionRule::new("everyone", "posts", "true"),
+            ],
+            &Catalog::demo(),
+            &schema(),
+        )
+        .unwrap();
+
+        // `true OR (author_id = $user.id)` admits every row, so no
+        // filter is spliced at all.
+        let outcome = rewrite(&graph, &rules, &alice()).unwrap();
+        assert_eq!(outcome.stats.filters_inserted, 0);
     }
 
     #[test]

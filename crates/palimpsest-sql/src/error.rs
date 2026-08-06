@@ -19,6 +19,16 @@ pub enum SqlError {
     #[error("unsupported SQL feature: {0}")]
     UnsupportedFeature(&'static str),
 
+    /// The query calls a function outside the evaluable allowlist
+    /// (aggregates `count`/`sum`/`min`/`max`/`avg`, plus `coalesce`
+    /// and `cardinality`). Rejected at parse time so the accepted
+    /// surface never exceeds what the dataflow can evaluate.
+    #[error("unsupported function: {name}")]
+    UnsupportedFunction {
+        /// The function name as written in the query, lowercased.
+        name: String,
+    },
+
     /// The query is inside the supported surface but structurally
     /// invalid (mirrors a Postgres-side error), e.g. a recursive CTE
     /// that is not `base UNION [ALL] step`, or `DISTINCT ON`

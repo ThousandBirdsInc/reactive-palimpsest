@@ -1436,6 +1436,7 @@ dependencies = [
 name = "palimpsest-integration-tests"
 version = "0.1.1"
 dependencies = [
+ "palimpsest-client",
  "palimpsest-dataflow",
  "palimpsest-permissions",
  "palimpsest-server",

@@ -208,6 +208,18 @@ impl Palimpsest {
         &self.router
     }
 
+    /// Hot-swaps the permission rule set on the running server.
+    ///
+    /// Future subscribes compile against the new rules immediately;
+    /// every *active* subscription receives
+    /// `Resync(PermissionsChanged)` before this call returns, so a
+    /// well-behaved client resubscribes and rows a revoked grant
+    /// covered are retracted after one resubscribe round trip. See
+    /// [`SubscriptionRouter::set_rules`] for the published lag metric.
+    pub fn update_permissions(&self, rules: Vec<CompiledRule>) {
+        self.router.set_rules(rules);
+    }
+
     /// Runs the gRPC server (and the metrics sidecar, if configured)
     /// until `shutdown` resolves.
     ///
@@ -294,6 +306,14 @@ pub struct PalimpsestHandle {
     pub router: Arc<SubscriptionRouter>,
     /// Live metrics handle.
     pub metrics: RouterMetrics,
+}
+
+impl PalimpsestHandle {
+    /// Hot-swaps the permission rule set; see
+    /// [`Palimpsest::update_permissions`].
+    pub fn update_permissions(&self, rules: Vec<CompiledRule>) {
+        self.router.set_rules(rules);
+    }
 }
 
 /// Walks the router's known channels and pushes a `Resync` onto each.

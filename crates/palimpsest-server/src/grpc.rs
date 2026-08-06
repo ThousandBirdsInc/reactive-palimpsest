@@ -463,6 +463,16 @@ async fn handle_subscribe(
             .await;
             return;
         }
+        Err(err @ SqlError::UnsupportedFunction { .. }) => {
+            let _ = send_error(
+                &outbound,
+                client_subscription_id,
+                "unsupported_function",
+                &err.to_string(),
+            )
+            .await;
+            return;
+        }
         Err(err) => {
             let _ = send_error(
                 &outbound,
@@ -1006,9 +1016,10 @@ fn spawn_canonical_pump(
 }
 
 /// Per-subscription pump for plans the persistent host doesn't handle
-/// (multi-table, unlowered). Pushes raw WAL diffs straight to the
-/// router. Same lifecycle and backpressure semantics as the pre-Option-C
-/// pump.
+/// (multi-table, unlowered). Drains the WAL cursor through
+/// [`SubscriptionRouter::pump_cursor`] straight into the subscription's
+/// channel. Same lifecycle and backpressure semantics as the
+/// pre-Option-C pump.
 fn spawn_legacy_pump(
     sub_id: SubscriptionId,
     query: QueryId,
@@ -1032,29 +1043,27 @@ fn spawn_legacy_pump(
 
         loop {
             tick.tick().await;
-            while let Some(transaction) = cursor.next_transaction() {
-                if transaction.diffs.is_empty() {
-                    continue;
+            match router.pump_cursor(sub_id, cursor.as_mut(), &primary_key) {
+                Ok(_events) => {}
+                Err(RouterError::UnknownSubscription(_)) => {
+                    debug!(
+                        sub = sub_id.get(),
+                        "legacy pump: subscription gone, exiting"
+                    );
+                    return;
                 }
-                match router.pump_transaction(sub_id, transaction, &primary_key) {
-                    Ok(()) => {}
-                    Err(RouterError::UnknownSubscription(_)) => {
-                        debug!(
-                            sub = sub_id.get(),
-                            "legacy pump: subscription gone, exiting"
-                        );
-                        return;
-                    }
-                    Err(RouterError::ChannelSaturated) => {
-                        debug!(
-                            sub = sub_id.get(),
-                            "legacy pump: channel saturated, batch dropped after resync",
-                        );
-                    }
-                    Err(err) => {
-                        warn!(sub = sub_id.get(), ?err, "legacy pump: pump_batch failed");
-                        return;
-                    }
+                Err(RouterError::ChannelSaturated) => {
+                    // Router already forced Resync; the failed
+                    // transaction is dropped and the drain resumes on
+                    // the next tick.
+                    debug!(
+                        sub = sub_id.get(),
+                        "legacy pump: channel saturated, batch dropped after resync",
+                    );
+                }
+                Err(err) => {
+                    warn!(sub = sub_id.get(), ?err, "legacy pump: pump_cursor failed");
+                    return;
                 }
             }
         }
@@ -1416,9 +1425,8 @@ const fn diff_op_to_proto(op: RouterDiffOp) -> proto::DiffOp {
 const fn resync_reason_to_proto(reason: RouterResyncReason) -> proto::ResyncReason {
     match reason {
         RouterResyncReason::LsnCompacted => proto::ResyncReason::LsnCompacted,
-        RouterResyncReason::SchemaChanged | RouterResyncReason::PermissionsChanged => {
-            proto::ResyncReason::SchemaChanged
-        }
+        RouterResyncReason::SchemaChanged => proto::ResyncReason::SchemaChanged,
+        RouterResyncReason::PermissionsChanged => proto::ResyncReason::PermissionsChanged,
         RouterResyncReason::Backpressure => proto::ResyncReason::Backpressure,
         RouterResyncReason::SlotRecreated => proto::ResyncReason::SlotRecreated,
     }

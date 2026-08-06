@@ -67,13 +67,13 @@ fn rewrite_single_table_filter() {
 }
 
 #[test]
-fn rewrite_chains_two_rules_on_same_table() {
+fn rewrite_composes_two_rules_on_same_table_disjunctively() {
     let rules = vec![
         PermissionRule::new("posts_owner", "posts", "author_id = $user.id"),
         PermissionRule::new("posts_org", "posts", "author_id = $user.org_id"),
     ];
     assert_permissions_snapshot!(
-        "rewrite_chains_two_rules_on_same_table",
+        "rewrite_composes_two_rules_on_same_table_disjunctively",
         render(&rules, "SELECT id FROM posts", &alice())
     );
 }

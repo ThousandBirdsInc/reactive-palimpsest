@@ -144,14 +144,46 @@ Decoders attached on the client (`PalimpsestClient.connect({ decoder
 })`) apply to every subscription; per-subscription decoders override
 them.
 
-## What's typed today vs. in flight
+## Live diffs
 
 The wire protocol delivers a snapshot (`accepted` + initial rows)
-synchronously; live diffs over the same subscription will arrive
-once the server's WAL-streaming path is wired through
-`SubscriptionRouter::pump_cursor` (see `DESIGN.md` §18.5). Until
-then, set `refreshKey` on the hook to force a fresh subscribe after
-a write — the hook supports this without any other code changes.
+followed by live diffs on the same subscription: a committed write in
+Postgres flows through the server's WAL cursor pumps and arrives as a
+`diff` / `transaction` event, which the hook folds into `rows` by
+primary key. No client-side action is needed after a write.
+
+## Driving a host cache with `onDiff`
+
+If your app already owns a cache (TanStack Query, Redux, a custom
+store), pass `onDiff` to observe every event and fold it yourself, and
+`trackRows: false` so the hook doesn't keep a second copy of the rows:
+
+```ts
+usePalimpsestSubscription<Post>(client, sql, {
+  trackRows: false, // hook keeps no row map; `rows` stays []
+  onDiff: (event) => {
+    switch (event.kind) {
+      case "accepted":
+        queryClient.setQueryData(["posts"], []);
+        break;
+      case "diff":
+      case "transaction":
+        queryClient.setQueryData(["posts"], (old: Post[] = []) =>
+          applyDiff(old, event),
+        );
+        break;
+      case "resync":
+        queryClient.invalidateQueries({ queryKey: ["posts"] });
+        break;
+    }
+  },
+});
+```
+
+`onDiff` fires for every event (`accepted`, `diff`, `transaction`,
+`resync`, `error`) before the hook's own bookkeeping, and the latest
+callback identity is always used — you can pass an inline closure
+without causing re-subscribes.
 
 ## Subpaths
 
