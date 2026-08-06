@@ -25,11 +25,13 @@ compile onto the dataflow is served by the v1 *pass-through* path: the
 server ships the referenced base tables' snapshot rows and raw WAL
 diffs verbatim, **without applying the query's operators server-side**
 (joins, set ops, `DISTINCT`, casts in projections, and recursive CTEs
-are in this bucket today). Note that server-side permission row
-filters are part of the compiled dataflow, so they also only apply on
-the Evaluates path — treat "Parses: yes / Evaluates: no" rows as
-unsuitable for permission-sensitive data until the pass-through path
-is retired.
+are in this bucket today). Server-side permission row filters are part
+of the compiled dataflow, so pass-through cannot enforce them — for
+that reason a subscribe **fails closed** when row-visibility rules
+apply to any table the query reads and no compiled plan exists: the
+server rejects it with the `permission_unenforceable` error code
+instead of serving unfiltered rows. "Parses: yes / Evaluates: no" rows
+are therefore only reachable for tables with no row-visibility rules.
 
 Scalar functions are the one place the two surfaces are forced to
 agree at parse time: any function call outside the evaluable

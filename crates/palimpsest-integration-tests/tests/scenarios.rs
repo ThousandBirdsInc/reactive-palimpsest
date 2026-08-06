@@ -201,18 +201,57 @@ async fn scenario_permission_change_flips_client_view() {
         &user_schema,
     )
     .unwrap();
-    router.set_rules(strict);
+    router.set_rules(strict.clone());
+
+    // Rule-guarded subscribes must carry a compiled plan (built from
+    // the permission-rewritten graph) — pass-through fails closed.
+    let graph = parse_and_lower("SELECT id FROM posts").unwrap();
+    let user_ctx = UserContext::new([("id".to_owned(), UserValue::Int(1))]);
+    let rewritten = palimpsest_permissions::rewrite(&graph, &strict, &user_ctx)
+        .unwrap()
+        .graph;
+    let posts_lookup = |table: &str| {
+        (table == "posts").then(|| {
+            (
+                TableId::new(1),
+                palimpsest_dataflow::palimpsest::eval::ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("author_id".to_owned(), ColumnType::Int),
+                ]),
+            )
+        })
+    };
+    let plan = palimpsest_dataflow::palimpsest::compile_mir(&rewritten, &posts_lookup).unwrap();
 
     let provider = ScriptedProvider::new(vec![snapshot(vec![(1, 7), (2, 9)])]);
-    let response = subscribe(&router, &provider, "posts", Some(1));
+    let response = router
+        .subscribe(
+            SubscribeRequest {
+                connection: ConnectionId::new(1),
+                subscription_id: router.allocate_subscription_id(),
+                client_id: ClientSubscriptionId::new("posts"),
+                query: QueryId::new("posts.recent"),
+                query_graph: &graph,
+                user_ctx,
+                schema: schema(),
+                resume_lsn: None,
+                compiled_plan: Some(plan),
+                prerun_initial: None,
+            },
+            &provider,
+        )
+        .unwrap();
     let mut stream = response.stream;
-    let DiffEvent::Initial { .. } = stream.next().await.unwrap() else {
+    let DiffEvent::Initial { rows, .. } = stream.next().await.unwrap() else {
         panic!("expected Initial");
     };
+    // The dataflow enforced the rule: only author 7's post survives.
+    assert_eq!(rows.len(), 1);
 
-    // Flip rules: now only author 9 may pass. The router stores the new
-    // rules; existing subscriptions are unaffected for already-emitted
-    // snapshots, but new subscribers see the post-flip view.
+    // Flip rules: now only author 9 may pass. The swap forces
+    // Resync(PermissionsChanged) onto the open subscription, so the
+    // client refetches under the new rules; new subscribers see the
+    // post-flip view immediately.
     let permissive = compile_rules(
         &[PermissionRule::new("posts_owner", "posts", "author_id = 9")],
         &Catalog::demo(),
@@ -221,6 +260,10 @@ async fn scenario_permission_change_flips_client_view() {
     .unwrap();
     router.set_rules(permissive);
     assert_eq!(router.active_subscriptions(), 1);
+    let DiffEvent::Resync { reason } = stream.next().await.unwrap() else {
+        panic!("expected Resync after rule swap");
+    };
+    assert_eq!(reason, ResyncReason::PermissionsChanged);
 }
 
 #[tokio::test]

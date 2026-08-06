@@ -28,6 +28,18 @@ pub enum RouterError {
     /// Permission compilation or rewrite failed.
     #[error(transparent)]
     Permission(#[from] palimpsest_permissions::PermissionError),
+    /// Row-visibility rules apply to one of the query's tables, but the
+    /// query has no compiled dataflow plan — the only execution path
+    /// left is the raw pass-through, which cannot enforce the filters.
+    /// The subscribe fails closed instead of serving unfiltered rows.
+    #[error(
+        "row-visibility rules apply to table {table:?} but the query has no compiled dataflow \
+         plan; refusing to serve unfiltered rows"
+    )]
+    PermissionUnenforceable {
+        /// First rule-guarded table the query reads.
+        table: String,
+    },
     /// Diff codec failure (bincode encode/decode).
     #[error(transparent)]
     Codec(#[from] CodecError),

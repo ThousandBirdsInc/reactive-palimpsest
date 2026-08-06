@@ -21,7 +21,7 @@ use palimpsest_dataflow::palimpsest::{
     SharedSubgraphRelease, WalUpdate,
 };
 use palimpsest_permissions::{CompiledRule, RewriteStats, UserContext};
-use palimpsest_sql::mir::MirGraph;
+use palimpsest_sql::mir::{MirGraph, MirNodeKind};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::warn;
 
@@ -92,7 +92,14 @@ pub struct SubscribeRequest<'a> {
     /// dataflow and emits the aggregate result rather than the raw
     /// table data. Absent for queries the compiler couldn't lower
     /// (e.g. `Join`, set ops) — those still ship via the v1
-    /// pass-through path.
+    /// pass-through path **unless row-visibility rules apply to the
+    /// query's tables**, in which case `subscribe` fails closed with
+    /// [`RouterError::PermissionUnenforceable`] (pass-through cannot
+    /// enforce the filters).
+    ///
+    /// Caller contract: the plan must be compiled from the
+    /// permission-rewritten graph (as the gRPC adapter does), so the
+    /// spliced visibility filters are actually part of the dataflow.
     pub compiled_plan: Option<palimpsest_dataflow::palimpsest::CompiledPlan>,
     /// Pre-computed `Initial` payload. When `Some`, the router uses
     /// these rows + LSN for the snapshot event and **skips** the
@@ -264,6 +271,20 @@ impl SubscriptionRouter {
 
         let rules = self.inner.lock().expect("router lock").rules.clone();
         let outcome = install_permission_filters(query_graph, &rules, &user_ctx)?;
+
+        // Fail closed: when the rewrite spliced at least one
+        // row-visibility filter, the only execution path that enforces
+        // it is the compiled dataflow. Without a compiled plan the
+        // subscription would serve raw pass-through rows — unfiltered —
+        // so reject the subscribe instead. (Tautology-only and
+        // subscribe-mode rules splice no filter and stay eligible for
+        // pass-through.)
+        if outcome.stats.filters_inserted > 0 && compiled_plan.is_none() {
+            let table = first_rule_guarded_table(query_graph, &rules)
+                .unwrap_or_else(|| "<unknown>".to_owned());
+            return Err(RouterError::PermissionUnenforceable { table });
+        }
+
         let canonical = canonical_subgraph_key(&query, &user_ctx);
 
         // Cached fast-path: caller (gRPC adapter) already has the
@@ -532,6 +553,23 @@ impl SubscriptionRouter {
             CompactionWindow::new(record.snapshot_lsn, self.config.default_latest_known_lsn);
         Some(resolve_resume(resume_lsn, window))
     }
+}
+
+/// First base table in `graph` guarded by a row-visibility rule.
+/// Used for the fail-closed error message when a rule-guarded query
+/// has no compiled dataflow plan.
+fn first_rule_guarded_table(graph: &MirGraph, rules: &[CompiledRule]) -> Option<String> {
+    graph.node_kinds().find_map(|node| match node {
+        MirNodeKind::BaseTable { table, .. } => rules
+            .iter()
+            .any(|rule| {
+                rule.mode.affects_visibility()
+                    && !rule.predicate.is_tautology()
+                    && rule.table == *table
+            })
+            .then(|| table.clone()),
+        _ => None,
+    })
 }
 
 /// Builds the canonical key for a `(query, user_ctx)` pair.
@@ -931,16 +969,25 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn permission_filter_is_applied_during_subscribe() {
-        let router = SubscriptionRouter::new(RouterConfig::default());
-        let provider = StubProvider {
-            responses: RefCell::new(vec![snapshot_with(vec![])]),
-        };
-        let graph = parse_and_lower("SELECT id FROM posts").unwrap();
+    /// Schema lookup for the demo `posts` table, used to compile
+    /// permission-rewritten plans in tests.
+    fn posts_lookup(
+        table: &str,
+    ) -> Option<(TableId, palimpsest_dataflow::palimpsest::eval::ScalarSchema)> {
+        (table == "posts").then(|| {
+            (
+                TableId::new(1),
+                palimpsest_dataflow::palimpsest::eval::ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("author_id".to_owned(), ColumnType::Int),
+                ]),
+            )
+        })
+    }
 
+    fn owner_rules() -> Vec<palimpsest_permissions::CompiledRule> {
         let user_schema = UserContextSchema::new([("id".to_owned(), ColumnType::Int)]);
-        let rules = compile_rules(
+        compile_rules(
             &[PermissionRule::new(
                 "posts_owner",
                 "posts",
@@ -949,8 +996,26 @@ mod tests {
             &Catalog::demo(),
             &user_schema,
         )
-        .unwrap();
-        router.set_rules(rules);
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn permission_filter_is_applied_during_subscribe() {
+        let router = SubscriptionRouter::new(RouterConfig::default());
+        let provider = StubProvider {
+            responses: RefCell::new(vec![snapshot_with(vec![])]),
+        };
+        let graph = parse_and_lower("SELECT id FROM posts").unwrap();
+        let rules = owner_rules();
+        router.set_rules(rules.clone());
+
+        // Compile the permission-rewritten graph, as the gRPC adapter
+        // does — the plan is what enforces the filter.
+        let user_ctx = UserContext::new([("id".to_owned(), UserValue::Int(7))]);
+        let rewritten = palimpsest_permissions::rewrite(&graph, &rules, &user_ctx)
+            .unwrap()
+            .graph;
+        let plan = palimpsest_dataflow::palimpsest::compile_mir(&rewritten, &posts_lookup).unwrap();
 
         let response = router
             .subscribe(
@@ -960,7 +1025,84 @@ mod tests {
                     client_id: ClientSubscriptionId::new("posts"),
                     query: QueryId::new("posts"),
                     query_graph: &graph,
-                    user_ctx: UserContext::new([("id".to_owned(), UserValue::Int(7))]),
+                    user_ctx,
+                    schema: schema(),
+                    resume_lsn: None,
+                    compiled_plan: Some(plan),
+                    prerun_initial: None,
+                },
+                &provider,
+            )
+            .unwrap();
+        assert_eq!(response.permission_stats.filters_inserted, 1);
+    }
+
+    #[tokio::test]
+    async fn pass_through_subscribe_with_visibility_rules_fails_closed() {
+        let router = SubscriptionRouter::new(RouterConfig::default());
+        let provider = StubProvider {
+            responses: RefCell::new(vec![snapshot_with(vec![1, 2])]),
+        };
+        let graph = parse_and_lower("SELECT id FROM posts").unwrap();
+        router.set_rules(owner_rules());
+
+        // No compiled plan: the pass-through path cannot enforce the
+        // spliced visibility filter, so the subscribe must be rejected
+        // rather than serving unfiltered rows.
+        let Err(err) = router.subscribe(
+            SubscribeRequest {
+                connection: ConnectionId::new(1),
+                subscription_id: router.allocate_subscription_id(),
+                client_id: ClientSubscriptionId::new("posts"),
+                query: QueryId::new("posts"),
+                query_graph: &graph,
+                user_ctx: UserContext::new([("id".to_owned(), UserValue::Int(7))]),
+                schema: schema(),
+                resume_lsn: None,
+                compiled_plan: None,
+                prerun_initial: None,
+            },
+            &provider,
+        ) else {
+            panic!("expected fail-closed rejection");
+        };
+        assert!(
+            matches!(
+                &err,
+                crate::error::RouterError::PermissionUnenforceable { table } if table == "posts"
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(router.active_subscriptions(), 0);
+    }
+
+    #[tokio::test]
+    async fn pass_through_subscribe_with_tautology_rule_is_allowed() {
+        let router = SubscriptionRouter::new(RouterConfig::default());
+        let provider = StubProvider {
+            responses: RefCell::new(vec![snapshot_with(vec![1])]),
+        };
+        let graph = parse_and_lower("SELECT id FROM posts").unwrap();
+        let user_schema = UserContextSchema::new([("id".to_owned(), ColumnType::Int)]);
+        let rules = compile_rules(
+            &[PermissionRule::new("everyone", "posts", "true")],
+            &Catalog::demo(),
+            &user_schema,
+        )
+        .unwrap();
+        router.set_rules(rules);
+
+        // A tautology admits every row, so pass-through leaks nothing
+        // and stays permitted.
+        let response = router
+            .subscribe(
+                SubscribeRequest {
+                    connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
+                    client_id: ClientSubscriptionId::new("posts"),
+                    query: QueryId::new("posts"),
+                    query_graph: &graph,
+                    user_ctx: UserContext::new(std::iter::empty()),
                     schema: schema(),
                     resume_lsn: None,
                     compiled_plan: None,
@@ -969,7 +1111,7 @@ mod tests {
                 &provider,
             )
             .unwrap();
-        assert_eq!(response.permission_stats.filters_inserted, 1);
+        assert_eq!(response.permission_stats.filters_inserted, 0);
     }
 
     #[test]

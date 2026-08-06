@@ -209,10 +209,35 @@ async fn permission_subscriptions_with_different_user_context_split_subgraphs() 
         &user_schema,
     )
     .unwrap();
-    router.set_rules(rules);
+    router.set_rules(rules.clone());
 
     let provider = ScriptedProvider::new(vec![snapshot(vec![]), snapshot(vec![])]);
     let graph = parse_and_lower("SELECT id FROM posts").unwrap();
+
+    // Rule-guarded subscribes need a compiled (permission-rewritten)
+    // plan — pass-through would fail closed.
+    let posts_lookup = |table: &str| {
+        (table == "posts").then(|| {
+            (
+                TableId::new(1),
+                palimpsest_dataflow::palimpsest::eval::ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("author_id".to_owned(), ColumnType::Int),
+                ]),
+            )
+        })
+    };
+    let plan_for = |user_ctx: &UserContext| {
+        let rewritten = palimpsest_permissions::rewrite(&graph, &rules, user_ctx)
+            .unwrap()
+            .graph;
+        palimpsest_dataflow::palimpsest::compile_mir(&rewritten, &posts_lookup).unwrap()
+    };
+
+    let alice_ctx = UserContext::new([("id".to_owned(), UserValue::Int(1))]);
+    let bob_ctx = UserContext::new([("id".to_owned(), UserValue::Int(2))]);
+    let alice_plan = plan_for(&alice_ctx);
+    let bob_plan = plan_for(&bob_ctx);
 
     let alice = router
         .subscribe(
@@ -222,10 +247,10 @@ async fn permission_subscriptions_with_different_user_context_split_subgraphs() 
                 client_id: ClientSubscriptionId::new("posts"),
                 query: QueryId::new("posts"),
                 query_graph: &graph,
-                user_ctx: UserContext::new([("id".to_owned(), UserValue::Int(1))]),
+                user_ctx: alice_ctx,
                 schema: schema_for_posts(),
                 resume_lsn: None,
-                compiled_plan: None,
+                compiled_plan: Some(alice_plan),
                 prerun_initial: None,
             },
             &provider,
@@ -239,10 +264,10 @@ async fn permission_subscriptions_with_different_user_context_split_subgraphs() 
                 client_id: ClientSubscriptionId::new("posts"),
                 query: QueryId::new("posts"),
                 query_graph: &graph,
-                user_ctx: UserContext::new([("id".to_owned(), UserValue::Int(2))]),
+                user_ctx: bob_ctx,
                 schema: schema_for_posts(),
                 resume_lsn: None,
-                compiled_plan: None,
+                compiled_plan: Some(bob_plan),
                 prerun_initial: None,
             },
             &provider,

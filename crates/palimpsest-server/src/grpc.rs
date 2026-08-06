@@ -588,6 +588,16 @@ async fn handle_subscribe(
             .await;
             return;
         }
+        Err(SubscribeBlockingError::Router(err @ RouterError::PermissionUnenforceable { .. })) => {
+            let _ = send_error(
+                &outbound,
+                client_subscription_id,
+                "permission_unenforceable",
+                &err.to_string(),
+            )
+            .await;
+            return;
+        }
         Err(SubscribeBlockingError::Router(err)) => {
             let _ = send_error(
                 &outbound,
