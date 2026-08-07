@@ -33,6 +33,7 @@ guides or deep-dives that assume that bigger picture.
 | [`OPERATOR-GUIDE.md`](OPERATOR-GUIDE.md) | The deploy / configure / tune lifecycle for the team running Palimpsest. |
 | [`RUNBOOK.md`](RUNBOOK.md) | On-call recovery procedures for the failure modes you're most likely to hit. |
 | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Fast triage matrix: symptom → metric → action. |
+| [`LOAD-TESTING.md`](LOAD-TESTING.md) | The `palimpsest-loadsuite` scenario suite: modeling realistic large-scale workloads, reading its reports, and gating on latency budgets. |
 
 ## Security
 

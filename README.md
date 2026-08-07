@@ -56,7 +56,7 @@ from the Postgres WAL.
 | `crates/palimpsest-integration-tests` | Full-stack integration scenarios. |
 | `crates/palimpsest-conformance` | Opt-in real-Postgres conformance harness. |
 | `crates/palimpsest-properties` | Property tests for correctness invariants. |
-| `crates/palimpsest-soak` | Soak and load-test binaries. |
+| `crates/palimpsest-soak` | Soak harness plus the `palimpsest-loadsuite` scenario suite modeling realistic large-scale workloads (see [docs/LOAD-TESTING.md](docs/LOAD-TESTING.md)). |
 | `examples/demo-app` | Dockerized React + WASM + Rust end-to-end demo. |
 | `docs` | Architecture, user, operator, security, TLS, migration, and runbook docs. |
 | `xtask` | Project maintenance commands. |
