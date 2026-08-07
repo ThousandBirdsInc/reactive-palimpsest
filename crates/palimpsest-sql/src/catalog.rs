@@ -38,7 +38,7 @@ impl ColumnType {
     /// parser rejects those casts up front, and the evaluator uses the
     /// same mapping to build the conversion.
     #[must_use]
-    pub fn from_cast_target(data_type: &sqlparser::ast::DataType) -> Option<Self> {
+    pub const fn from_cast_target(data_type: &sqlparser::ast::DataType) -> Option<Self> {
         use sqlparser::ast::DataType;
         Some(match data_type {
             DataType::Text
