@@ -148,10 +148,10 @@ where
                     });
             }
             MirNodeKind::CteRef { .. } => {
-                stack.extend(input_nodes(graph, node, MirEdgeKind::CteExpansion));
+                stack.extend(cte_expansion_inputs(graph, node));
             }
             _ => {
-                stack.extend(input_nodes(graph, node, MirEdgeKind::Input));
+                stack.extend(graph.ordered_inputs(node));
             }
         }
     }
@@ -175,10 +175,10 @@ pub fn base_tables(graph: &MirGraph) -> Vec<String> {
         match &graph.graph()[node] {
             MirNodeKind::BaseTable { table, .. } => tables.push(table.clone()),
             MirNodeKind::CteRef { .. } => {
-                stack.extend(input_nodes(graph, node, MirEdgeKind::CteExpansion));
+                stack.extend(cte_expansion_inputs(graph, node));
             }
             _ => {
-                stack.extend(input_nodes(graph, node, MirEdgeKind::Input));
+                stack.extend(graph.ordered_inputs(node));
             }
         }
     }
@@ -214,11 +214,11 @@ pub fn referenced_columns(graph: &MirGraph, table: &str) -> Vec<ColumnRef> {
     columns
 }
 
-fn input_nodes(graph: &MirGraph, node: NodeIndex, edge: MirEdgeKind) -> Vec<NodeIndex> {
+fn cte_expansion_inputs(graph: &MirGraph, node: NodeIndex) -> Vec<NodeIndex> {
     graph
         .graph()
         .edges_directed(node, Direction::Incoming)
-        .filter(|candidate| *candidate.weight() == edge)
+        .filter(|candidate| matches!(candidate.weight(), MirEdgeKind::CteExpansion))
         .map(|candidate| candidate.source())
         .collect()
 }

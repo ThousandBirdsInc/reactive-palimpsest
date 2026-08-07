@@ -56,6 +56,10 @@ fn rebuild_node(
 ) -> (NodeIndex, String) {
     assert!(stack.insert(node_index), "MIR graph contains a cycle");
 
+    let commutative = matches!(
+        source.graph()[node_index],
+        MirNodeKind::Union { .. } | MirNodeKind::Intersect { .. }
+    );
     let mut inputs = source
         .graph()
         .edges_directed(node_index, Direction::Incoming)
@@ -66,16 +70,18 @@ fn rebuild_node(
         })
         .collect::<Vec<_>>();
 
-    if matches!(
-        source.graph()[node_index],
-        MirNodeKind::Union { .. } | MirNodeKind::Intersect { .. }
-    ) {
-        inputs.sort_by(|left, right| left.2.cmp(&right.2));
-    }
+    // Sort for a deterministic signature regardless of petgraph edge
+    // iteration order. Commutative set ops drop the input ordinal from
+    // the edge name so swapped branches still intern identically;
+    // order-sensitive nodes keep it, so the ordinal dominates the sort.
+    inputs.sort_by(|left, right| {
+        (edge_kind_name(left.0, commutative), &left.2)
+            .cmp(&(edge_kind_name(right.0, commutative), &right.2))
+    });
 
     let input_signature = inputs
         .iter()
-        .map(|(edge, _, child)| format!("{}:{child}", edge_kind_name(*edge)))
+        .map(|(edge, _, child)| format!("{}:{child}", edge_kind_name(*edge, commutative)))
         .collect::<Vec<_>>()
         .join(",");
     let signature = format!(
@@ -89,11 +95,10 @@ fn rebuild_node(
     }
 
     let rebuilt_node = rebuilt.add_node(source.graph()[node_index].clone());
-    // petgraph iterates incoming edges in reverse insertion order, so
-    // re-insert in reverse of the collected order to preserve the
-    // original traversal order for order-sensitive nodes (Join,
-    // Except, Fixpoint base-vs-step).
-    for (edge, child, _) in inputs.into_iter().rev() {
+    // Edge weights carry the input ordinal, so insertion order no
+    // longer matters — executors recover left/right (and base/step)
+    // from the ordinal, not from petgraph iteration order.
+    for (edge, child, _) in inputs {
         rebuilt.add_edge(child, rebuilt_node, edge);
     }
     interned.insert(signature.clone(), rebuilt_node);
@@ -108,11 +113,15 @@ fn canonical_node(
 ) -> String {
     assert!(stack.insert(node_index), "MIR graph contains a cycle");
 
+    let commutative = matches!(
+        graph.graph()[node_index],
+        MirNodeKind::Union { .. } | MirNodeKind::Intersect { .. }
+    );
     let mut inputs = graph
         .graph()
         .edges_directed(node_index, Direction::Incoming)
         .map(|edge| {
-            let edge_kind = edge_kind_name(*edge.weight());
+            let edge_kind = edge_kind_name(*edge.weight(), commutative);
             format!(
                 "{edge_kind}:{}",
                 canonical_node(graph, edge.source(), stack)
@@ -120,22 +129,27 @@ fn canonical_node(
         })
         .collect::<Vec<_>>();
 
-    if matches!(
-        graph.graph()[node_index],
-        MirNodeKind::Union { .. } | MirNodeKind::Intersect { .. }
-    ) {
-        inputs.sort();
-    }
+    // Deterministic regardless of edge iteration order: ordinals in
+    // the edge names keep order-sensitive inputs (join left/right,
+    // fixpoint base/step) apart, while commutative set-op inputs sort
+    // purely by child signature.
+    inputs.sort();
 
     let node = canonical_node_kind(&graph.graph()[node_index]);
     stack.remove(&node_index);
     format!("{node}[{}]", inputs.join(","))
 }
 
-const fn edge_kind_name(edge: MirEdgeKind) -> &'static str {
+fn edge_kind_name(edge: MirEdgeKind, strip_ordinal: bool) -> String {
     match edge {
-        MirEdgeKind::Input => "input",
-        MirEdgeKind::CteExpansion => "cte",
+        MirEdgeKind::Input(ordinal) => {
+            if strip_ordinal {
+                "input".to_owned()
+            } else {
+                format!("input{ordinal:03}")
+            }
+        }
+        MirEdgeKind::CteExpansion => "cte".to_owned(),
     }
 }
 

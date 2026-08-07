@@ -22,7 +22,7 @@ use std::fmt;
 
 use palimpsest_sql::catalog::ColumnType;
 use palimpsest_wal::Datum;
-use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value as SqlValue};
+use sqlparser::ast::{BinaryOperator, CastKind, DataType, Expr, UnaryOperator, Value as SqlValue};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use thiserror::Error;
@@ -133,6 +133,128 @@ pub fn compile_scalar(expr_sql: &str, schema: &ScalarSchema) -> Result<ScalarFn,
     compile_inner(&expr, schema)
 }
 
+/// Compile `expr_sql` into a scalar closure together with its inferred
+/// output [`ColumnType`]. Used for projection entries that are full
+/// expressions (casts, `coalesce`, comparisons) rather than plain
+/// column references — the caller needs a type to advertise in the
+/// output schema.
+///
+/// # Errors
+/// See [`compile_predicate`]; additionally returns
+/// [`EvalError::Unsupported`] when no output type can be inferred
+/// (the wire schema would be a guess, and a wrong type surfaces as a
+/// client-side decode failure).
+pub fn compile_typed_scalar(
+    expr_sql: &str,
+    schema: &ScalarSchema,
+) -> Result<(ScalarFn, ColumnType), EvalError> {
+    let expr = parse_expr(expr_sql)?;
+    let scalar = compile_inner(&expr, schema)?;
+    let ty = infer_type(&expr, schema);
+    if ty == ColumnType::Unknown {
+        return Err(EvalError::Unsupported(format!(
+            "cannot infer output type of expression {expr_sql}"
+        )));
+    }
+    Ok((scalar, ty))
+}
+
+/// Output-column label for a projection entry that is a cast of a
+/// simple column (`id::text`, `CAST(posts.id AS text)`): Postgres
+/// names that column after the inner identifier. `None` for anything
+/// else — the caller falls back to the raw expression text.
+#[must_use]
+pub fn cast_label(expr_sql: &str) -> Option<String> {
+    fn inner(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Nested(nested) => inner(nested),
+            Expr::Cast { expr: source, .. } => match source.as_ref() {
+                Expr::Identifier(ident) => Some(ident.value.clone()),
+                Expr::CompoundIdentifier(parts) => parts.last().map(|part| part.value.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    inner(&parse_expr(expr_sql).ok()?)
+}
+
+/// Best-effort static type of `expr` against `schema`. `Unknown` when
+/// inference has nothing to go on (bare `NULL`, unsupported shapes).
+fn infer_type(expr: &Expr, schema: &ScalarSchema) -> ColumnType {
+    match expr {
+        Expr::Nested(inner) => infer_type(inner, schema),
+        Expr::Identifier(ident) => schema
+            .column_type(&ident.value)
+            .unwrap_or(ColumnType::Unknown),
+        Expr::CompoundIdentifier(parts) => parts
+            .last()
+            .and_then(|last| schema.column_type(&last.value))
+            .unwrap_or(ColumnType::Unknown),
+        Expr::Value(SqlValue::Boolean(_)) => ColumnType::Bool,
+        Expr::Value(SqlValue::Number(n, _)) => {
+            if n.parse::<i64>().is_ok() {
+                ColumnType::Int
+            } else {
+                ColumnType::Float
+            }
+        }
+        Expr::Value(SqlValue::SingleQuotedString(_) | SqlValue::DoubleQuotedString(_)) => {
+            ColumnType::Text
+        }
+        Expr::BinaryOp { op, .. } => match op {
+            BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+            | BinaryOperator::And
+            | BinaryOperator::Or => ColumnType::Bool,
+            _ => ColumnType::Unknown,
+        },
+        Expr::UnaryOp { op, expr: inner } => match op {
+            UnaryOperator::Not => ColumnType::Bool,
+            UnaryOperator::Minus | UnaryOperator::Plus => infer_type(inner, schema),
+            _ => ColumnType::Unknown,
+        },
+        Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::IsTrue(_)
+        | Expr::IsFalse(_)
+        | Expr::AnyOp { .. } => ColumnType::Bool,
+        Expr::Cast { data_type, .. } => cast_target_type(data_type).unwrap_or(ColumnType::Unknown),
+        Expr::Function(function) => {
+            let name = function.name.to_string().to_ascii_lowercase();
+            match name.as_str() {
+                "cardinality" => ColumnType::Int,
+                "coalesce" => coalesce_args(function)
+                    .into_iter()
+                    .map(|arg| infer_type(arg, schema))
+                    .find(|ty| *ty != ColumnType::Unknown)
+                    .unwrap_or(ColumnType::Unknown),
+                _ => ColumnType::Unknown,
+            }
+        }
+        _ => ColumnType::Unknown,
+    }
+}
+
+fn coalesce_args(function: &sqlparser::ast::Function) -> Vec<&Expr> {
+    use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+    match &function.args {
+        FunctionArguments::List(list) => list
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Some(expr),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Convenience: compile a single column reference into an `i64`
 /// extractor. Used by aggregate input expressions like `SUM(value)`,
 /// where the argument is a simple identifier. Also accepts `*` as
@@ -215,8 +337,144 @@ fn compile_inner(expr: &Expr, schema: &ScalarSchema) -> Result<ScalarFn, EvalErr
             right,
             ..
         } => any_scalar(left, compare_op, right, schema),
+        Expr::Cast {
+            kind: CastKind::Cast | CastKind::DoubleColon,
+            expr: inner,
+            data_type,
+            ..
+        } => {
+            let target = cast_target_type(data_type)
+                .ok_or_else(|| EvalError::Unsupported(format!("cast target type {data_type}")))?;
+            let source = compile_inner(inner, schema)?;
+            Ok(Box::new(move |row| cast_datum(source(row), target)))
+        }
         Expr::Function(function) => function_scalar(function, schema),
         other => Err(EvalError::Unsupported(format!("{other:?}"))),
+    }
+}
+
+/// Maps a SQL cast target onto the engine's coarse [`ColumnType`]
+/// taxonomy. `None` for types the evaluator can't produce.
+fn cast_target_type(data_type: &DataType) -> Option<ColumnType> {
+    Some(match data_type {
+        DataType::Text
+        | DataType::String(_)
+        | DataType::Varchar(_)
+        | DataType::CharVarying(_)
+        | DataType::CharacterVarying(_)
+        | DataType::Char(_)
+        | DataType::Character(_) => ColumnType::Text,
+        DataType::TinyInt(_)
+        | DataType::SmallInt(_)
+        | DataType::Int2(_)
+        | DataType::Int(_)
+        | DataType::Int4(_)
+        | DataType::Integer(_)
+        | DataType::BigInt(_)
+        | DataType::Int8(_) => ColumnType::Int,
+        DataType::Real
+        | DataType::Float4
+        | DataType::Float8
+        | DataType::Float(_)
+        | DataType::Double
+        | DataType::DoublePrecision => ColumnType::Float,
+        DataType::Bool | DataType::Boolean => ColumnType::Bool,
+        DataType::Uuid => ColumnType::Uuid,
+        DataType::JSON | DataType::JSONB => ColumnType::Jsonb,
+        _ => return None,
+    })
+}
+
+/// Runtime cast with Postgres-flavoured conversions. Total: values a
+/// cast cannot convert become `Datum::Null` (the evaluator's stand-in
+/// for a runtime error, consistent with the rest of this module).
+#[allow(clippy::cast_possible_truncation)]
+fn cast_datum(datum: Datum, target: ColumnType) -> Datum {
+    use Datum::{Bool, Json, Jsonb, Null, Numeric, Text, Uuid, F32, F64, I16, I32, I64};
+
+    fn text_of(datum: &Datum) -> Option<String> {
+        match datum {
+            Text(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
+            I64(v) => Some(v.to_string()),
+            I32(v) => Some(v.to_string()),
+            I16(v) => Some(v.to_string()),
+            F64(bits) => Some(f64::from_bits(*bits).to_string()),
+            F32(bits) => Some(f32::from_bits(*bits).to_string()),
+            Bool(v) => Some(v.to_string()),
+            Uuid(v) => Some(v.to_string()),
+            Numeric(v) => Some(v.as_str().to_owned()),
+            Jsonb(bytes) | Json(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
+            _ => None,
+        }
+    }
+
+    if matches!(datum, Null) {
+        return Null;
+    }
+    match target {
+        ColumnType::Text | ColumnType::Enum => {
+            text_of(&datum).map_or(Null, |text| Text(text.into_bytes().into()))
+        }
+        ColumnType::Int => match &datum {
+            I64(v) => I64(*v),
+            I32(v) => I64(i64::from(*v)),
+            I16(v) => I64(i64::from(*v)),
+            // Postgres rounds float → int casts to the nearest integer.
+            F64(bits) => I64(f64::from_bits(*bits).round() as i64),
+            F32(bits) => I64(f32::from_bits(*bits).round() as i64),
+            Bool(v) => I64(i64::from(*v)),
+            Text(bytes) => std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|text| text.trim().parse::<i64>().ok())
+                .map_or(Null, I64),
+            _ => Null,
+        },
+        ColumnType::Float => match &datum {
+            F64(bits) => F64(*bits),
+            F32(bits) => F64(f64::from(f32::from_bits(*bits)).to_bits()),
+            I64(v) => F64((*v as f64).to_bits()),
+            I32(v) => F64(f64::from(*v).to_bits()),
+            I16(v) => F64(f64::from(*v).to_bits()),
+            Text(bytes) => std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+                .map_or(Null, |v| F64(v.to_bits())),
+            _ => Null,
+        },
+        ColumnType::Bool => match &datum {
+            Bool(v) => Bool(*v),
+            I64(v) => Bool(*v != 0),
+            I32(v) => Bool(*v != 0),
+            I16(v) => Bool(*v != 0),
+            Text(bytes) => match std::str::from_utf8(bytes)
+                .map(|text| text.trim().to_ascii_lowercase())
+            {
+                Ok(text) if ["t", "true", "yes", "on", "1"].contains(&text.as_str()) => Bool(true),
+                Ok(text) if ["f", "false", "no", "off", "0"].contains(&text.as_str()) => {
+                    Bool(false)
+                }
+                _ => Null,
+            },
+            _ => Null,
+        },
+        ColumnType::Uuid => match &datum {
+            Uuid(v) => Uuid(*v),
+            Text(bytes) => std::str::from_utf8(bytes)
+                .ok()
+                .and_then(palimpsest_wal::Uuid::parse_text)
+                .map_or(Null, Uuid),
+            _ => Null,
+        },
+        ColumnType::Jsonb => match datum {
+            Jsonb(bytes) | Json(bytes) => Jsonb(bytes),
+            Text(bytes) => Jsonb(bytes),
+            _ => Null,
+        },
+        ColumnType::Timestamp => match datum {
+            timestamp @ Datum::Timestamp(_) => timestamp,
+            _ => Null,
+        },
+        ColumnType::Unknown => datum,
     }
 }
 

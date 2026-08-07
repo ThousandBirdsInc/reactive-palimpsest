@@ -539,6 +539,75 @@ mod tests {
     }
 
     #[test]
+    fn persistent_host_drives_multi_table_join_plan_incrementally() {
+        let articles = TableId::new(20);
+        let authors = TableId::new(21);
+        let join_lookup = move |table: &str| match table {
+            "articles" => Some((
+                articles,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("author_id".to_owned(), ColumnType::Int),
+                ]),
+            )),
+            "authors" => Some((
+                authors,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("name".to_owned(), ColumnType::Text),
+                ]),
+            )),
+            _ => None,
+        };
+
+        let graph = parse_and_lower(
+            "SELECT articles.id, authors.name
+             FROM articles JOIN authors ON articles.author_id = authors.id",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &join_lookup).unwrap();
+        let mut plan_inputs = plan.inputs.clone();
+        plan_inputs.sort();
+        assert_eq!(plan_inputs, vec![articles, authors]);
+
+        let host = PersistentHost::new();
+        let canonical = "articles.board";
+
+        let ada = Datum::Text(bytes::Bytes::from_static(b"Ada"));
+        let mut seed = HashMap::new();
+        seed.insert(articles, vec![row(vec![Datum::I64(1), Datum::I64(42)])]);
+        seed.insert(authors, vec![row(vec![Datum::I64(42), ada.clone()])]);
+        let initial = host.register_or_seed(canonical, &plan, seed, Lsn::new(1), 9);
+        assert_eq!(initial, vec![row(vec![Datum::I64(1), ada.clone()])]);
+
+        // A new article by Ada arrives on the *articles* input; the
+        // join emits exactly the new joined row.
+        let deltas = host.push_table_diff(
+            canonical,
+            articles,
+            row(vec![Datum::I64(2), Datum::I64(42)]),
+            1,
+            Lsn::new(2),
+        );
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].diff, 1);
+        assert_eq!(deltas[0].row, row(vec![Datum::I64(2), ada.clone()]));
+
+        // Deleting the author retracts every joined row it fed.
+        let deltas = host.push_table_diff(
+            canonical,
+            authors,
+            row(vec![Datum::I64(42), ada.clone()]),
+            -1,
+            Lsn::new(3),
+        );
+        assert_eq!(deltas.len(), 2);
+        assert!(deltas.iter().all(|d| d.diff == -1));
+
+        host.release(canonical, 9);
+    }
+
+    #[test]
     fn snapshot_run_emits_aggregate_rows() {
         let sql = "WITH per_category AS (
             SELECT category_id, COUNT(*) AS n, SUM(value) AS total

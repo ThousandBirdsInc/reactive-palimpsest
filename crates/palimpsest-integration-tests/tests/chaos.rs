@@ -158,6 +158,7 @@ async fn slow_consumer_saturates_bounded_channel_into_resync() {
 
     // Initial is queued. Don't drain; pump another diff to saturate.
     let mut cursor = VecCursor::new([RawDiff {
+        table: None,
         row: smallvec![Datum::I64(1), Datum::I64(7)],
         lsn: DataflowLsn::new(110),
         diff: 1,

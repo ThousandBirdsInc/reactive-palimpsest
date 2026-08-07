@@ -1,10 +1,9 @@
 ---
 source: crates/palimpsest-sql/tests/snapshots.rs
-assertion_line: 51
 expression: "format!(\"canonical_form:\\n{}\\n\\ncollapsed_mir:\\n{canonicalized:#?}\",\ncanonical_form(&canonicalized))"
 ---
 canonical_form:
-topk:[OrderKey { expression: "post_id", descending: false }]:10:0[input:project:post_id,authors.name[input:join:Inner:[(ColumnRef { relation: Some("recent_posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input:base:authors:[][],input:cte-ref[cte:project:id,author_id,created_at[input:filter:author_id IN (42, 7) AND created_at IS NOT NULL[input:base:posts:[][]]]]]]]
+topk:[OrderKey { expression: "post_id", descending: false }]:10:0[input000:project:post_id,authors.name[input000:join:Inner:[(ColumnRef { relation: Some("recent_posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input000:cte-ref[cte:project:id,author_id,created_at[input000:filter:author_id IN (42, 7) AND created_at IS NOT NULL[input000:base:posts:[][]]]],input001:base:authors:[][]]]]
 
 collapsed_mir:
 MirGraph {
@@ -72,13 +71,25 @@ MirGraph {
             },
         },
         edge weights: {
-            0: Input,
-            1: Input,
+            0: Input(
+                0,
+            ),
+            1: Input(
+                0,
+            ),
             2: CteExpansion,
-            3: Input,
-            4: Input,
-            5: Input,
-            6: Input,
+            3: Input(
+                0,
+            ),
+            4: Input(
+                1,
+            ),
+            5: Input(
+                0,
+            ),
+            6: Input(
+                0,
+            ),
         },
     },
     root: NodeIndex(7),

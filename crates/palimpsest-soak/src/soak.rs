@@ -100,6 +100,7 @@ async fn main() -> ExitCode {
         let mut diffs = Vec::with_capacity(batch_size);
         for i in 0..batch_size {
             diffs.push(RawDiff {
+                table: None,
                 row: smallvec![
                     Datum::I64((round * 1024 + i as u64) as i64),
                     Datum::I64((s as i64) % 64),

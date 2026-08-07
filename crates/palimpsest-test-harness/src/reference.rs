@@ -180,11 +180,9 @@ impl ReferenceExecutor {
                 sort_records(&mut records, order_by);
                 records.into_iter().skip(*offset).take(*limit).collect()
             }
-            MirNodeKind::CteRef { .. } => {
-                self.single_input_by_edge(graph, node, MirEdgeKind::CteExpansion, env)
-            }
+            MirNodeKind::CteRef { .. } => self.cte_expansion_input(graph, node, env),
             MirNodeKind::Fixpoint { cte, union_all } => {
-                let inputs = input_nodes(graph, node, MirEdgeKind::Input);
+                let inputs = graph.ordered_inputs(node);
                 let [base, step] = inputs.as_slice() else {
                     return Vec::new();
                 };
@@ -261,21 +259,25 @@ impl ReferenceExecutor {
     }
 
     fn single_input(&self, graph: &MirGraph, node: NodeIndex, env: &RecursiveEnv) -> Vec<Record> {
-        let inputs = input_nodes(graph, node, MirEdgeKind::Input);
+        let inputs = graph.ordered_inputs(node);
         let [input] = inputs.as_slice() else {
             return Vec::new();
         };
         self.execute_records(graph, *input, env)
     }
 
-    fn single_input_by_edge(
+    fn cte_expansion_input(
         &self,
         graph: &MirGraph,
         node: NodeIndex,
-        edge: MirEdgeKind,
         env: &RecursiveEnv,
     ) -> Vec<Record> {
-        let inputs = input_nodes(graph, node, edge);
+        let inputs: Vec<NodeIndex> = graph
+            .graph()
+            .edges_directed(node, Direction::Incoming)
+            .filter(|edge| matches!(edge.weight(), MirEdgeKind::CteExpansion))
+            .map(|edge| edge.source())
+            .collect();
         let [input] = inputs.as_slice() else {
             return Vec::new();
         };
@@ -288,7 +290,7 @@ impl ReferenceExecutor {
         node: NodeIndex,
         env: &RecursiveEnv,
     ) -> [Vec<Record>; 2] {
-        let inputs = input_nodes(graph, node, MirEdgeKind::Input);
+        let inputs = graph.ordered_inputs(node);
         let [left, right] = inputs.as_slice() else {
             return [Vec::new(), Vec::new()];
         };
@@ -384,17 +386,6 @@ pub fn assert_set_eq(left: &[Row], right: &[Row]) -> Result<(), SetDiff> {
 #[must_use]
 pub fn fixture_line_count_within_budget(contents: &str, max_lines: usize) -> bool {
     contents.lines().count() <= max_lines
-}
-
-fn input_nodes(graph: &MirGraph, node: NodeIndex, edge: MirEdgeKind) -> Vec<NodeIndex> {
-    let mut nodes = graph
-        .graph()
-        .edges_directed(node, Direction::Incoming)
-        .filter(|candidate| *candidate.weight() == edge)
-        .map(|candidate| candidate.source())
-        .collect::<Vec<_>>();
-    nodes.sort_by_key(|node| node.index());
-    nodes
 }
 
 fn project_record(record: &Record, columns: &[String]) -> Record {

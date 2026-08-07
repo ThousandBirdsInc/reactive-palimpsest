@@ -125,6 +125,7 @@ fn bench_pump_to_deliver(c: &mut Criterion) {
                         let lsn = Lsn::new(200 + round);
                         let diffs: Vec<RawDiff> = (0..batch)
                             .map(|i| RawDiff {
+                                table: None,
                                 row: smallvec![
                                     Datum::I64((round * batch as u64 + i as u64) as i64),
                                     Datum::I64((i % 8) as i64),

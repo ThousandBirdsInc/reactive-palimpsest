@@ -9,9 +9,9 @@ query:
   SELECT id FROM posts
 
 canonical_before:
-  project:id[input:base:posts:[][]]
+  project:id[input000:base:posts:[][]]
 
 canonical_after:
-  project:id[input:base:posts:[][]]
+  project:id[input000:base:posts:[][]]
 
 stats: RewriteStats { base_tables_visited: 1, filters_inserted: 0, rules_elided: 1 }

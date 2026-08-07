@@ -175,6 +175,7 @@ async fn committed_write_reaches_open_subscription_without_resubscribe() {
     // subscription is live. No client action follows — the diff must
     // arrive on the already-open stream.
     journal.lock().expect("journal").push(RawDiff {
+        table: None,
         row: smallvec![Datum::I64(42)],
         lsn: Lsn::new(2),
         diff: 1,

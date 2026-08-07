@@ -132,24 +132,24 @@ impl Store {
         let mut journal = self.journal.lock().expect("journal poisoned");
         for change in changes {
             match change {
-                PostChange::Insert(post) => journal.push(RawDiff {
+                PostChange::Insert(post) => journal.push(RawDiff { table: None,
                     row: post_to_row(post),
                     lsn,
                     diff: 1,
                 }),
                 PostChange::Update { prev, curr } => {
-                    journal.push(RawDiff {
+                    journal.push(RawDiff { table: None,
                         row: post_to_row(prev),
                         lsn,
                         diff: -1,
                     });
-                    journal.push(RawDiff {
+                    journal.push(RawDiff { table: None,
                         row: post_to_row(curr),
                         lsn,
                         diff: 1,
                     });
                 }
-                PostChange::Delete(prev) => journal.push(RawDiff {
+                PostChange::Delete(prev) => journal.push(RawDiff { table: None,
                     row: post_to_row(prev),
                     lsn,
                     diff: -1,
@@ -233,24 +233,24 @@ impl OrderStore {
         let mut journal = self.journal.lock().expect("orders journal poisoned");
         for change in changes {
             match change {
-                OrderChange::Insert(ev) => journal.push(RawDiff {
+                OrderChange::Insert(ev) => journal.push(RawDiff { table: None,
                     row: order_to_row(ev),
                     lsn,
                     diff: 1,
                 }),
                 OrderChange::Update { prev, curr } => {
-                    journal.push(RawDiff {
+                    journal.push(RawDiff { table: None,
                         row: order_to_row(prev),
                         lsn,
                         diff: -1,
                     });
-                    journal.push(RawDiff {
+                    journal.push(RawDiff { table: None,
                         row: order_to_row(curr),
                         lsn,
                         diff: 1,
                     });
                 }
-                OrderChange::Delete(prev) => journal.push(RawDiff {
+                OrderChange::Delete(prev) => journal.push(RawDiff { table: None,
                     row: order_to_row(prev),
                     lsn,
                     diff: -1,
@@ -330,24 +330,24 @@ impl AccountStore {
         let mut journal = self.journal.lock().expect("accounts journal poisoned");
         for change in changes {
             match change {
-                AccountChange::Insert(account) => journal.push(RawDiff {
+                AccountChange::Insert(account) => journal.push(RawDiff { table: None,
                     row: account_to_row(account),
                     lsn,
                     diff: 1,
                 }),
                 AccountChange::Update { prev, curr } => {
-                    journal.push(RawDiff {
+                    journal.push(RawDiff { table: None,
                         row: account_to_row(prev),
                         lsn,
                         diff: -1,
                     });
-                    journal.push(RawDiff {
+                    journal.push(RawDiff { table: None,
                         row: account_to_row(curr),
                         lsn,
                         diff: 1,
                     });
                 }
-                AccountChange::Delete(prev) => journal.push(RawDiff {
+                AccountChange::Delete(prev) => journal.push(RawDiff { table: None,
                     row: account_to_row(prev),
                     lsn,
                     diff: -1,

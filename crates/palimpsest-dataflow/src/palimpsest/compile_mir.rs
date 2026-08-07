@@ -19,27 +19,32 @@
 //! operator data of the exact shape it expects (e.g. `(i64, i64)`
 //! pairs into `aggregate_i64`).
 //!
-//! Coverage today: `BaseTable`, `Filter` (boolean predicates),
-//! `Project` (column rename / reorder), `Aggregate` (group-by with
-//! `COUNT` / `SUM` / `MIN` / `MAX` / `AVG`), `TopK` (single-column
-//! sort), and `CteRef`. `Join`, `Distinct`, `DistinctOn`, `Union`,
-//! `Except`, `Intersect`, `Fixpoint`, `RecursiveRef`, and `Leaf`
-//! return [`CompileError::Unsupported`]. The walker is structured so
-//! each of those reduces to a single `match` arm + recipe variant
-//! when wired.
+//! Coverage today: `BaseTable`, `Filter` (boolean predicates, casts),
+//! `Project` (column rename / reorder, `*` and `rel.*` wildcards,
+//! cast / `coalesce` / `cardinality` expressions), `Join` (inner,
+//! left, semi, anti — equi-keys only), `Distinct`, `Union` (`ALL` and
+//! `DISTINCT`), `Aggregate` (group-by with `COUNT` / `SUM` / `MIN` /
+//! `MAX` / `AVG`), `TopK` (single-column sort), and `CteRef`.
+//! `DistinctOn`, `Except`, `Intersect`, `Fixpoint`, `RecursiveRef`,
+//! and `Leaf` return [`CompileError::Unsupported`]. The walker is
+//! structured so each of those reduces to a single `match` arm +
+//! recipe variant when wired.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use palimpsest_sql::catalog::ColumnType;
-use palimpsest_sql::mir::{AggExpr, ColumnRef, MirGraph, MirNodeKind, OrderKey};
+use palimpsest_sql::mir::{
+    AggExpr, ColumnRef, JoinKind, MirGraph, MirNodeKind, OrderKey, SetQuantifierKind,
+};
 use palimpsest_wal::{Datum, TableId};
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::palimpsest::eval::{compile_predicate, EvalError, ScalarSchema};
+use crate::operators::Join as _;
+use crate::palimpsest::eval::{compile_predicate, compile_typed_scalar, EvalError, ScalarSchema};
 use crate::palimpsest::relational::{self, AggregateFunc, AggregateValue, SortDirection};
 use crate::palimpsest::wal::Row;
 use crate::{lattice::Lattice, VecCollection};
@@ -96,6 +101,29 @@ pub enum NodeRecipe {
         /// Closure that reads from the input row and returns the
         /// projected row.
         extract: Arc<dyn Fn(&Row) -> Row + Send + Sync>,
+    },
+    /// Equi-join of the node's two ordered inputs. Key columns are
+    /// row indices resolved at compile time; the runtime key is the
+    /// `Vec<Datum>` of those columns. SQL null semantics: a `NULL` in
+    /// any key column never matches.
+    Join {
+        /// Inner / left / semi / anti.
+        kind: JoinKind,
+        /// Key column indices into the left input's rows.
+        left_keys: Vec<usize>,
+        /// Key column indices into the right input's rows.
+        right_keys: Vec<usize>,
+        /// Right input's column count — the null-extension width for
+        /// unmatched left rows in a `Left` join.
+        right_width: usize,
+    },
+    /// Bag → set: drop duplicate rows.
+    Distinct,
+    /// Concatenate the node's two ordered inputs; `all: false` also
+    /// deduplicates (`UNION` vs `UNION ALL`).
+    Union {
+        /// `true` for `UNION ALL` (bag semantics).
+        all: bool,
     },
     /// Group-by aggregate. Group key is the value of one column (a
     /// single-column grouping is all we wire today); each aggregate
@@ -201,6 +229,7 @@ pub fn compile_mir<L: TableSchemaLookup>(
 
     let mut state = CompileState {
         node_schemas: HashMap::new(),
+        node_provenance: HashMap::new(),
         recipes: HashMap::new(),
         inputs: Vec::new(),
         input_schemas: HashMap::new(),
@@ -226,6 +255,14 @@ pub fn compile_mir<L: TableSchemaLookup>(
 
 struct CompileState {
     node_schemas: HashMap<NodeIndex, ScalarSchema>,
+    /// Per-node, per-column source-relation attribution, aligned with
+    /// the node's schema columns. `Some(table)` while a column can
+    /// still be traced to one base table; `None` after aggregates,
+    /// set ops, or computed projections. Qualified references
+    /// (`posts.id`) and `rel.*` wildcards resolve through this — the
+    /// flat `ScalarSchema` alone can't disambiguate columns that share
+    /// a name across a join's two sides.
+    node_provenance: HashMap<NodeIndex, Vec<Option<String>>>,
     recipes: HashMap<NodeIndex, NodeRecipe>,
     inputs: Vec<TableId>,
     input_schemas: HashMap<TableId, ScalarSchema>,
@@ -253,10 +290,10 @@ fn compile_node<L: TableSchemaLookup>(
             offset,
         } => compile_topk(graph, node, order_by, *limit, *offset, state),
         MirNodeKind::CteRef { cte } => compile_cte_ref(graph, node, cte, state),
-        MirNodeKind::Join { .. } => Err(CompileError::Unsupported("Join".to_owned())),
-        MirNodeKind::Distinct => Err(CompileError::Unsupported("Distinct".to_owned())),
+        MirNodeKind::Join { kind, on } => compile_join(graph, node, *kind, on, state),
+        MirNodeKind::Distinct => compile_distinct(graph, node, state),
         MirNodeKind::DistinctOn { .. } => Err(CompileError::Unsupported("DistinctOn".to_owned())),
-        MirNodeKind::Union { .. } => Err(CompileError::Unsupported("Union".to_owned())),
+        MirNodeKind::Union { quantifier } => compile_union(graph, node, *quantifier, state),
         MirNodeKind::Except { .. } => Err(CompileError::Unsupported("Except".to_owned())),
         MirNodeKind::Intersect { .. } => Err(CompileError::Unsupported("Intersect".to_owned())),
         MirNodeKind::Fixpoint { .. } => Err(CompileError::Unsupported("Fixpoint".to_owned())),
@@ -304,6 +341,9 @@ fn compile_base_table<L: TableSchemaLookup>(
         state.input_schemas.insert(table_id, full_schema);
     }
 
+    state
+        .node_provenance
+        .insert(node, vec![Some(table.to_owned()); schema.len()]);
     state.node_schemas.insert(node, schema);
     state
         .recipes
@@ -327,11 +367,24 @@ fn compile_filter(
     let pred = compile_predicate(predicate, &input_schema)?;
     let pred: Arc<dyn Fn(&Row) -> bool + Send + Sync> = Arc::from(pred);
 
+    let provenance = state
+        .node_provenance
+        .get(&input_node)
+        .cloned()
+        .unwrap_or_else(|| vec![None; input_schema.len()]);
+    state.node_provenance.insert(node, provenance);
     state.node_schemas.insert(node, input_schema);
     state
         .recipes
         .insert(node, NodeRecipe::Filter { predicate: pred });
     Ok(())
+}
+
+/// One projected output column: either a passthrough of an input
+/// column by index, or a compiled scalar expression.
+enum OutputColumn {
+    Index(usize),
+    Scalar(Arc<dyn Fn(&Row) -> Datum + Send + Sync>),
 }
 
 fn compile_project(
@@ -346,33 +399,144 @@ fn compile_project(
         .get(&input_node)
         .ok_or_else(|| CompileError::Unknown("project input schema".to_owned()))?
         .clone();
+    let input_prov = state
+        .node_provenance
+        .get(&input_node)
+        .cloned()
+        .unwrap_or_else(|| vec![None; input_schema.len()]);
 
-    let mut indices = Vec::with_capacity(columns.len());
+    let mut outputs: Vec<OutputColumn> = Vec::with_capacity(columns.len());
     let mut output_pairs = Vec::with_capacity(columns.len());
-    for col in columns {
-        let idx = input_schema
-            .index_of(col)
-            .ok_or_else(|| CompileError::Unknown(format!("project column {col}")))?;
-        let ty = input_schema
-            .column_type(col)
-            .expect("type for known column");
-        indices.push(idx);
-        output_pairs.push((col.clone(), ty));
+    let mut output_prov = Vec::with_capacity(columns.len());
+    let push_index = |index: usize,
+                      name: String,
+                      outputs: &mut Vec<OutputColumn>,
+                      output_pairs: &mut Vec<(String, ColumnType)>,
+                      output_prov: &mut Vec<Option<String>>| {
+        let ty = input_schema.columns()[index].1;
+        outputs.push(OutputColumn::Index(index));
+        output_pairs.push((name, ty));
+        output_prov.push(input_prov.get(index).cloned().flatten());
+    };
+
+    for entry in columns {
+        let entry = entry.trim();
+
+        // `SELECT *` — every input column, in order.
+        if entry == "*" {
+            for (index, (name, _)) in input_schema.columns().iter().enumerate() {
+                push_index(
+                    index,
+                    name.clone(),
+                    &mut outputs,
+                    &mut output_pairs,
+                    &mut output_prov,
+                );
+            }
+            continue;
+        }
+
+        // `rel.*` — the columns provenance attributes to `rel`.
+        if let Some(relation) = entry.strip_suffix(".*") {
+            let mut matched = false;
+            for (index, (name, _)) in input_schema.columns().iter().enumerate() {
+                if input_prov.get(index).and_then(Option::as_deref) == Some(relation) {
+                    matched = true;
+                    push_index(
+                        index,
+                        name.clone(),
+                        &mut outputs,
+                        &mut output_pairs,
+                        &mut output_prov,
+                    );
+                }
+            }
+            if !matched {
+                return Err(CompileError::Unknown(format!("project columns {entry}")));
+            }
+            continue;
+        }
+
+        // Bare column name.
+        if let Some(index) = input_schema.index_of(entry) {
+            push_index(
+                index,
+                entry.to_owned(),
+                &mut outputs,
+                &mut output_pairs,
+                &mut output_prov,
+            );
+            continue;
+        }
+
+        // Qualified `rel.column`: prefer the provenance-attributed
+        // occurrence (a join can carry the same bare name on both
+        // sides), fall back to the bare name. The output column is
+        // named by the trailing segment, matching Postgres.
+        if let Some((relation, bare)) = split_qualified(entry) {
+            let attributed =
+                input_schema
+                    .columns()
+                    .iter()
+                    .enumerate()
+                    .position(|(i, (name, _))| {
+                        name == bare
+                            && input_prov.get(i).and_then(Option::as_deref) == Some(relation)
+                    });
+            let index = attributed.or_else(|| input_schema.index_of(bare));
+            if let Some(index) = index {
+                push_index(
+                    index,
+                    bare.to_owned(),
+                    &mut outputs,
+                    &mut output_pairs,
+                    &mut output_prov,
+                );
+                continue;
+            }
+            return Err(CompileError::Unknown(format!("project column {entry}")));
+        }
+
+        // Anything else is a scalar expression (cast, coalesce, ...).
+        let (scalar, ty) = compile_typed_scalar(entry, &input_schema)?;
+        let name = crate::palimpsest::eval::cast_label(entry).unwrap_or_else(|| entry.to_owned());
+        outputs.push(OutputColumn::Scalar(Arc::from(scalar)));
+        output_pairs.push((name, ty));
+        output_prov.push(None);
     }
 
     let output_schema = ScalarSchema::from_pairs(output_pairs);
-    let indices_owned = indices;
+    let outputs_owned = outputs;
     let extract: Arc<dyn Fn(&Row) -> Row + Send + Sync> = Arc::new(move |row: &Row| {
-        let mut out: Row = SmallVec::with_capacity(indices_owned.len());
-        for &i in &indices_owned {
-            out.push(row.get(i).cloned().unwrap_or(Datum::Null));
+        let mut out: Row = SmallVec::with_capacity(outputs_owned.len());
+        for column in &outputs_owned {
+            match column {
+                OutputColumn::Index(i) => {
+                    out.push(row.get(*i).cloned().unwrap_or(Datum::Null));
+                }
+                OutputColumn::Scalar(scalar) => out.push(scalar(row)),
+            }
         }
         out
     });
 
+    state.node_provenance.insert(node, output_prov);
     state.node_schemas.insert(node, output_schema);
     state.recipes.insert(node, NodeRecipe::Project { extract });
     Ok(())
+}
+
+/// Splits `rel.column` when both segments are plain identifiers;
+/// `None` for anything with operators, calls, casts, or extra dots.
+fn split_qualified(entry: &str) -> Option<(&str, &str)> {
+    let (relation, bare) = entry.split_once('.')?;
+    let is_ident = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '"')
+    };
+    (is_ident(relation) && is_ident(bare)).then_some((relation, bare))
 }
 
 fn compile_aggregate(
@@ -466,6 +630,9 @@ fn compile_aggregate(
 
     let output_schema = ScalarSchema::from_pairs(output_pairs);
 
+    state
+        .node_provenance
+        .insert(node, vec![None; output_schema.len()]);
     state.node_schemas.insert(node, output_schema);
     state.recipes.insert(
         node,
@@ -473,6 +640,217 @@ fn compile_aggregate(
             group_extract,
             value_extract,
             funcs,
+        },
+    );
+    Ok(())
+}
+
+fn compile_join(
+    graph: &MirGraph,
+    node: NodeIndex,
+    kind: JoinKind,
+    on: &[(ColumnRef, ColumnRef)],
+    state: &mut CompileState,
+) -> Result<(), CompileError> {
+    let inputs = graph.ordered_inputs(node);
+    let [left, right] = inputs.as_slice() else {
+        return Err(CompileError::Unsupported(format!(
+            "join with {} inputs",
+            inputs.len()
+        )));
+    };
+    let left_schema = state
+        .node_schemas
+        .get(left)
+        .ok_or_else(|| CompileError::Unknown("join left schema".to_owned()))?
+        .clone();
+    let right_schema = state
+        .node_schemas
+        .get(right)
+        .ok_or_else(|| CompileError::Unknown("join right schema".to_owned()))?
+        .clone();
+    let left_prov = state
+        .node_provenance
+        .get(left)
+        .cloned()
+        .unwrap_or_else(|| vec![None; left_schema.len()]);
+    let right_prov = state
+        .node_provenance
+        .get(right)
+        .cloned()
+        .unwrap_or_else(|| vec![None; right_schema.len()]);
+
+    if on.is_empty() {
+        return Err(CompileError::Unsupported(
+            "join without equi-keys".to_owned(),
+        ));
+    }
+
+    // Each ON pair is written in source order, which need not match
+    // the join's (left, right) input order — resolve both
+    // orientations, qualifier-aware first so `t2.x = t1.y` binds
+    // through provenance even when both sides carry an `x` and a `y`.
+    let mut left_keys = Vec::with_capacity(on.len());
+    let mut right_keys = Vec::with_capacity(on.len());
+    for (a, b) in on {
+        let orientations = [
+            (
+                resolve_column(&left_schema, &left_prov, a, true),
+                resolve_column(&right_schema, &right_prov, b, true),
+            ),
+            (
+                resolve_column(&left_schema, &left_prov, b, true),
+                resolve_column(&right_schema, &right_prov, a, true),
+            ),
+            (
+                resolve_column(&left_schema, &left_prov, a, false),
+                resolve_column(&right_schema, &right_prov, b, false),
+            ),
+            (
+                resolve_column(&left_schema, &left_prov, b, false),
+                resolve_column(&right_schema, &right_prov, a, false),
+            ),
+        ];
+        let Some((left_idx, right_idx)) = orientations.into_iter().find_map(|pair| match pair {
+            (Some(l), Some(r)) => Some((l, r)),
+            _ => None,
+        }) else {
+            return Err(CompileError::Unknown(format!("join key {a:?} = {b:?}")));
+        };
+        left_keys.push(left_idx);
+        right_keys.push(right_idx);
+    }
+
+    let right_width = right_schema.len();
+
+    // Inner/left joins emit left ++ right; semi/anti joins emit the
+    // left rows untouched.
+    let (output_schema, output_prov) = match kind {
+        JoinKind::Inner | JoinKind::Left => {
+            let mut pairs: Vec<(String, ColumnType)> = left_schema.columns().to_vec();
+            pairs.extend(right_schema.columns().iter().cloned());
+            let mut prov = left_prov;
+            prov.extend(right_prov);
+            (ScalarSchema::from_pairs(pairs), prov)
+        }
+        JoinKind::Semi | JoinKind::Anti => (left_schema, left_prov),
+    };
+
+    state.node_provenance.insert(node, output_prov);
+    state.node_schemas.insert(node, output_schema);
+    state.recipes.insert(
+        node,
+        NodeRecipe::Join {
+            kind,
+            left_keys,
+            right_keys,
+            right_width,
+        },
+    );
+    Ok(())
+}
+
+/// Resolves a join-key reference against one input's schema. In
+/// `strict` mode a qualified reference must bind through provenance
+/// (its qualifier attributed to the column's source table); in lenient
+/// mode it falls back to the bare column name, which also covers
+/// table aliases the lowering discarded.
+fn resolve_column(
+    schema: &ScalarSchema,
+    provenance: &[Option<String>],
+    reference: &ColumnRef,
+    strict: bool,
+) -> Option<usize> {
+    if let Some(relation) = &reference.relation {
+        let attributed = schema
+            .columns()
+            .iter()
+            .enumerate()
+            .find_map(|(i, (name, _))| {
+                (name == &reference.name
+                    && provenance.get(i).and_then(Option::as_deref) == Some(relation.as_str()))
+                .then_some(i)
+            });
+        if strict {
+            return attributed;
+        }
+        if attributed.is_some() {
+            return attributed;
+        }
+    } else if strict {
+        // An unqualified reference has no qualifier to check; let the
+        // lenient pass handle it so qualified bindings win first.
+        return None;
+    }
+    schema.index_of(&reference.name)
+}
+
+fn compile_distinct(
+    graph: &MirGraph,
+    node: NodeIndex,
+    state: &mut CompileState,
+) -> Result<(), CompileError> {
+    let input_node = single_input(graph, node)?;
+    let input_schema = state
+        .node_schemas
+        .get(&input_node)
+        .ok_or_else(|| CompileError::Unknown("distinct input schema".to_owned()))?
+        .clone();
+    let provenance = state
+        .node_provenance
+        .get(&input_node)
+        .cloned()
+        .unwrap_or_else(|| vec![None; input_schema.len()]);
+
+    state.node_provenance.insert(node, provenance);
+    state.node_schemas.insert(node, input_schema);
+    state.recipes.insert(node, NodeRecipe::Distinct);
+    Ok(())
+}
+
+fn compile_union(
+    graph: &MirGraph,
+    node: NodeIndex,
+    quantifier: SetQuantifierKind,
+    state: &mut CompileState,
+) -> Result<(), CompileError> {
+    let inputs = graph.ordered_inputs(node);
+    let [left, right] = inputs.as_slice() else {
+        return Err(CompileError::Unsupported(format!(
+            "union with {} inputs",
+            inputs.len()
+        )));
+    };
+    let left_schema = state
+        .node_schemas
+        .get(left)
+        .ok_or_else(|| CompileError::Unknown("union left schema".to_owned()))?
+        .clone();
+    let right_schema = state
+        .node_schemas
+        .get(right)
+        .ok_or_else(|| CompileError::Unknown("union right schema".to_owned()))?;
+
+    // Set ops align columns positionally; a width mismatch would make
+    // rows of different arity flow through one collection.
+    if left_schema.len() != right_schema.len() {
+        return Err(CompileError::Unsupported(format!(
+            "UNION branches with {} vs {} columns",
+            left_schema.len(),
+            right_schema.len()
+        )));
+    }
+
+    // Postgres names set-op output after the left branch. Column
+    // provenance does not survive a union.
+    state
+        .node_provenance
+        .insert(node, vec![None; left_schema.len()]);
+    state.node_schemas.insert(node, left_schema);
+    state.recipes.insert(
+        node,
+        NodeRecipe::Union {
+            all: quantifier == SetQuantifierKind::All,
         },
     );
     Ok(())
@@ -526,6 +904,12 @@ fn compile_topk(
         SortDirection::Ascending
     };
 
+    let provenance = state
+        .node_provenance
+        .get(&input_node)
+        .cloned()
+        .unwrap_or_else(|| vec![None; input_schema.len()]);
+    state.node_provenance.insert(node, provenance);
     state.node_schemas.insert(node, input_schema);
     state.recipes.insert(
         node,
@@ -567,6 +951,12 @@ fn compile_cte_ref(
         .cloned()
         .ok_or_else(|| CompileError::Unknown(format!("cte target schema {cte}")))?;
 
+    let provenance = state
+        .node_provenance
+        .get(&target)
+        .cloned()
+        .unwrap_or_else(|| vec![None; schema.len()]);
+    state.node_provenance.insert(node, provenance);
     state.node_schemas.insert(node, schema);
     state.recipes.insert(node, NodeRecipe::CteRef { target });
     Ok(())
@@ -581,7 +971,7 @@ fn single_input(graph: &MirGraph, node: NodeIndex) -> Result<NodeIndex, CompileE
     let mut inputs = graph
         .graph()
         .edges_directed(node, Direction::Incoming)
-        .filter(|edge| matches!(edge.weight(), palimpsest_sql::mir::MirEdgeKind::Input))
+        .filter(|edge| matches!(edge.weight(), palimpsest_sql::mir::MirEdgeKind::Input(_)))
         .map(|edge| edge.source());
     let first = inputs
         .next()
@@ -711,11 +1101,108 @@ where
             let sliced = relational::topk(&with_key, *direction, *limit, *offset);
             relational::project(&sliced, |(_, row): (i64, Row)| row)
         }
+        NodeRecipe::Join {
+            kind,
+            left_keys,
+            right_keys,
+            right_width,
+        } => {
+            let join_inputs = plan.graph.ordered_inputs(node);
+            let (left_node, right_node) = (join_inputs[0], join_inputs[1]);
+            let left = install_recursive(plan, scope, inputs, left_node, cache);
+            let right = install_recursive(plan, scope, inputs, right_node, cache);
+
+            let lk = left_keys.clone();
+            let rk = right_keys.clone();
+            let left_keyed = relational::project(&left, move |row: Row| (key_of(&row, &lk), row));
+            let right_keyed = relational::project(&right, move |row: Row| (key_of(&row, &rk), row));
+            // SQL equality: a NULL key never matches. Differential's
+            // Rust equality would pair NULL with NULL, so strip
+            // null-keyed rows from the right side — left rows then
+            // simply find no partner (and still surface null-extended
+            // / unmatched under Left / Anti).
+            let right_keyed = relational::filter(&right_keyed, |(key, _): &(Vec<Datum>, Row)| {
+                !key.iter().any(|d| matches!(d, Datum::Null))
+            });
+
+            match kind {
+                JoinKind::Inner => relational::equi_join(
+                    &left_keyed,
+                    &right_keyed,
+                    |_key, left_row: &Row, right_row: &Row| {
+                        let mut out: Row =
+                            SmallVec::with_capacity(left_row.len() + right_row.len());
+                        out.extend(left_row.iter().cloned());
+                        out.extend(right_row.iter().cloned());
+                        out
+                    },
+                ),
+                JoinKind::Left => {
+                    let width = *right_width;
+                    relational::left_join(
+                        &left_keyed,
+                        &right_keyed,
+                        move |_key, left_row: &Row, right_row: Option<&Row>| {
+                            let mut out: Row = SmallVec::with_capacity(left_row.len() + width);
+                            out.extend(left_row.iter().cloned());
+                            match right_row {
+                                Some(row) => out.extend(row.iter().cloned()),
+                                None => {
+                                    out.extend(std::iter::repeat_n(Datum::Null, width));
+                                }
+                            }
+                            out
+                        },
+                    )
+                }
+                JoinKind::Semi | JoinKind::Anti => {
+                    // Deduplicate the right keys so a left row's
+                    // multiplicity is preserved no matter how many
+                    // right partners exist.
+                    let right_keys_distinct = relational::distinct(&relational::project(
+                        &right_keyed,
+                        |(key, _row): (Vec<Datum>, Row)| key,
+                    ));
+                    let joined = if matches!(kind, JoinKind::Semi) {
+                        left_keyed.semijoin(&right_keys_distinct)
+                    } else {
+                        left_keyed.antijoin(&right_keys_distinct)
+                    };
+                    relational::project(&joined, |(_key, row): (Vec<Datum>, Row)| row)
+                }
+            }
+        }
+        NodeRecipe::Distinct => {
+            let input_node = single_input(&plan.graph, node).expect("compile_mir validated");
+            let input = install_recursive(plan, scope, inputs, input_node, cache);
+            relational::distinct(&input)
+        }
+        NodeRecipe::Union { all } => {
+            let union_inputs = plan.graph.ordered_inputs(node);
+            let (left_node, right_node) = (union_inputs[0], union_inputs[1]);
+            let left = install_recursive(plan, scope, inputs, left_node, cache);
+            let right = install_recursive(plan, scope, inputs, right_node, cache);
+            if *all {
+                relational::union(&left, &right)
+            } else {
+                relational::union_distinct(&left, &right)
+            }
+        }
         NodeRecipe::CteRef { target } => install_recursive(plan, scope, inputs, *target, cache),
     };
 
     cache.insert(node, collection.clone());
     collection
+}
+
+/// Join key: the named columns' datums, in key order. `Vec<Datum>`
+/// rather than `Row` so the key satisfies the exchange bounds without
+/// extra trait plumbing on the inline-storage row type.
+fn key_of(row: &Row, indices: &[usize]) -> Vec<Datum> {
+    indices
+        .iter()
+        .map(|&i| row.get(i).cloned().unwrap_or(Datum::Null))
+        .collect()
 }
 
 fn saturating_i128_to_i64(v: i128) -> i64 {
@@ -908,5 +1395,329 @@ mod tests {
             let expected = scope.new_collection_from(expected).1;
             output.assert_eq(&expected);
         });
+    }
+
+    // -------------------------------------------------------------------------
+    // Join / set-op / wildcard / cast coverage
+    // -------------------------------------------------------------------------
+
+    const ARTICLES: TableId = TableId::new(10);
+    const AUTHORS: TableId = TableId::new(11);
+    const COMMENTS: TableId = TableId::new(12);
+
+    fn relational_lookup(table: &str) -> Option<(TableId, ScalarSchema)> {
+        match table {
+            "articles" => Some((
+                ARTICLES,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("author_id".to_owned(), ColumnType::Int),
+                ]),
+            )),
+            "authors" => Some((
+                AUTHORS,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("name".to_owned(), ColumnType::Text),
+                ]),
+            )),
+            "comments" => Some((
+                COMMENTS,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("article_id".to_owned(), ColumnType::Int),
+                ]),
+            )),
+            _ => None,
+        }
+    }
+
+    fn text(s: &str) -> Datum {
+        Datum::Text(bytes::Bytes::copy_from_slice(s.as_bytes()))
+    }
+
+    fn articles_rows() -> Vec<Row> {
+        vec![
+            datum_row(vec![Datum::I64(1), Datum::I64(42)]),
+            datum_row(vec![Datum::I64(2), Datum::I64(7)]),
+        ]
+    }
+
+    fn authors_rows() -> Vec<Row> {
+        vec![datum_row(vec![Datum::I64(42), text("Ada")])]
+    }
+
+    fn run_plan(plan: &CompiledPlan, seeds: Vec<(TableId, Vec<Row>)>, expected: Vec<Row>) {
+        let plan = plan.clone();
+        timely::example(move |scope| {
+            let mut inputs: HashMap<TableId, VecCollection<_, Row, isize>> = HashMap::new();
+            for table in &plan.inputs {
+                let rows = seeds
+                    .iter()
+                    .find(|(id, _)| id == table)
+                    .map(|(_, rows)| rows.clone())
+                    .unwrap_or_default();
+                inputs.insert(*table, scope.new_collection_from(rows).1);
+            }
+            let output = install_plan(&plan, scope, &inputs);
+            let expected = scope.new_collection_from(expected).1;
+            output.assert_eq(&expected);
+        });
+    }
+
+    #[test]
+    fn inner_join_emits_matched_rows() {
+        let graph = parse_and_lower(
+            "SELECT articles.id, authors.name
+             FROM articles JOIN authors ON articles.author_id = authors.id",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        let mut inputs = plan.inputs.clone();
+        inputs.sort();
+        assert_eq!(inputs, vec![ARTICLES, AUTHORS]);
+        assert_eq!(plan.output_schema.column_type("id"), Some(ColumnType::Int));
+        assert_eq!(
+            plan.output_schema.column_type("name"),
+            Some(ColumnType::Text)
+        );
+
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles_rows()), (AUTHORS, authors_rows())],
+            vec![datum_row(vec![Datum::I64(1), text("Ada")])],
+        );
+    }
+
+    #[test]
+    fn inner_join_resolves_swapped_on_operands() {
+        // ON authors.id = articles.author_id — pair order opposite the
+        // join's (left, right) input order.
+        let graph = parse_and_lower(
+            "SELECT articles.id, authors.name
+             FROM articles JOIN authors ON authors.id = articles.author_id",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles_rows()), (AUTHORS, authors_rows())],
+            vec![datum_row(vec![Datum::I64(1), text("Ada")])],
+        );
+    }
+
+    #[test]
+    fn left_join_null_extends_unmatched_rows() {
+        let graph = parse_and_lower(
+            "SELECT articles.id, authors.name
+             FROM articles LEFT JOIN authors ON articles.author_id = authors.id",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles_rows()), (AUTHORS, authors_rows())],
+            vec![
+                datum_row(vec![Datum::I64(1), text("Ada")]),
+                datum_row(vec![Datum::I64(2), Datum::Null]),
+            ],
+        );
+    }
+
+    #[test]
+    fn exists_lowers_to_semi_join_and_emits_left_rows_once() {
+        let graph = parse_and_lower(
+            "SELECT id FROM articles
+             WHERE EXISTS (SELECT 1 FROM comments WHERE comments.article_id = articles.id)",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        // Article 1 has two comments but the semi-join emits it once.
+        let comments = vec![
+            datum_row(vec![Datum::I64(10), Datum::I64(1)]),
+            datum_row(vec![Datum::I64(11), Datum::I64(1)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles_rows()), (COMMENTS, comments)],
+            vec![datum_row(vec![Datum::I64(1)])],
+        );
+    }
+
+    #[test]
+    fn not_exists_lowers_to_anti_join() {
+        let graph = parse_and_lower(
+            "SELECT id FROM articles
+             WHERE NOT EXISTS (SELECT 1 FROM comments WHERE comments.article_id = articles.id)",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        let comments = vec![datum_row(vec![Datum::I64(10), Datum::I64(1)])];
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles_rows()), (COMMENTS, comments)],
+            vec![datum_row(vec![Datum::I64(2)])],
+        );
+    }
+
+    #[test]
+    fn null_join_keys_never_match() {
+        let graph = parse_and_lower(
+            "SELECT articles.id, authors.name
+             FROM articles JOIN authors ON articles.author_id = authors.id",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        let articles = vec![datum_row(vec![Datum::I64(3), Datum::Null])];
+        let authors = vec![datum_row(vec![Datum::Null, text("ghost")])];
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles), (AUTHORS, authors)],
+            Vec::new(),
+        );
+    }
+
+    #[test]
+    fn union_all_keeps_duplicates_and_union_dedupes() {
+        let seeds = || {
+            vec![(
+                ARTICLES,
+                vec![
+                    datum_row(vec![Datum::I64(1), Datum::I64(42)]),
+                    datum_row(vec![Datum::I64(1), Datum::I64(42)]),
+                ],
+            )]
+        };
+
+        let all =
+            parse_and_lower("SELECT id FROM articles UNION ALL SELECT id FROM articles").unwrap();
+        let plan = compile_mir(&all, &relational_lookup).unwrap();
+        run_plan(&plan, seeds(), vec![datum_row(vec![Datum::I64(1)]); 4]);
+
+        let distinct =
+            parse_and_lower("SELECT id FROM articles UNION SELECT id FROM articles").unwrap();
+        let plan = compile_mir(&distinct, &relational_lookup).unwrap();
+        run_plan(&plan, seeds(), vec![datum_row(vec![Datum::I64(1)])]);
+    }
+
+    #[test]
+    fn select_distinct_dedupes_rows() {
+        let graph = parse_and_lower("SELECT DISTINCT author_id FROM articles").unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        let articles = vec![
+            datum_row(vec![Datum::I64(1), Datum::I64(42)]),
+            datum_row(vec![Datum::I64(2), Datum::I64(42)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles)],
+            vec![datum_row(vec![Datum::I64(42)])],
+        );
+    }
+
+    #[test]
+    fn select_star_projects_every_column() {
+        let graph = parse_and_lower("SELECT * FROM posts WHERE published = true").unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        assert_eq!(plan.output_schema.len(), 3);
+        assert_eq!(
+            plan.output_schema
+                .columns()
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "title", "published"],
+        );
+
+        let seed = vec![
+            datum_row(vec![Datum::I64(1), text("a"), Datum::Bool(true)]),
+            datum_row(vec![Datum::I64(2), text("b"), Datum::Bool(false)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(TableId::new(1), seed)],
+            vec![datum_row(vec![Datum::I64(1), text("a"), Datum::Bool(true)])],
+        );
+    }
+
+    #[test]
+    fn qualified_star_expands_one_join_side() {
+        let graph = parse_and_lower(
+            "SELECT articles.*, authors.name
+             FROM articles JOIN authors ON articles.author_id = authors.id",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        assert_eq!(
+            plan.output_schema
+                .columns()
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "author_id", "name"],
+        );
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles_rows()), (AUTHORS, authors_rows())],
+            vec![datum_row(vec![Datum::I64(1), Datum::I64(42), text("Ada")])],
+        );
+    }
+
+    #[test]
+    fn casts_work_in_projections_and_predicates() {
+        let graph = parse_and_lower("SELECT id::text FROM posts WHERE id::text = '1'").unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        // Postgres names a simple cast after the inner column, typed
+        // by the cast target.
+        assert_eq!(plan.output_schema.column_type("id"), Some(ColumnType::Text));
+
+        let seed = vec![
+            datum_row(vec![Datum::I64(1), text("a"), Datum::Bool(true)]),
+            datum_row(vec![Datum::I64(2), text("b"), Datum::Bool(true)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(TableId::new(1), seed)],
+            vec![datum_row(vec![text("1")])],
+        );
+    }
+
+    #[test]
+    fn spliced_filter_above_left_join_input_keeps_sides_straight() {
+        // Emulates the permission rewriter: splice a Filter directly
+        // above the join's *left* base table. `splice_above` removes
+        // edges (recycling petgraph edge indices) and adds a node with
+        // a higher index than either input — both of which used to
+        // scramble join input ordering.
+        let mut graph = parse_and_lower(
+            "SELECT articles.id, authors.name
+             FROM articles JOIN authors ON articles.author_id = authors.id",
+        )
+        .unwrap();
+        let left_base = graph
+            .base_table_indices()
+            .into_iter()
+            .find(|index| {
+                matches!(
+                    graph.node_kind(*index),
+                    MirNodeKind::BaseTable { table, .. } if table == "articles"
+                )
+            })
+            .expect("articles base table");
+        graph.splice_above(
+            left_base,
+            MirNodeKind::Filter {
+                predicate: "author_id = 42".to_owned(),
+            },
+        );
+
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        // Article 2 (author 7) is dropped by the spliced filter, and
+        // the join still treats articles as the left side.
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles_rows()), (AUTHORS, authors_rows())],
+            vec![datum_row(vec![Datum::I64(1), text("Ada")])],
+        );
     }
 }
