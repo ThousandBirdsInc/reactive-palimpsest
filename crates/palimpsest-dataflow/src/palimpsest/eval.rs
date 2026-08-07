@@ -134,16 +134,12 @@ pub fn compile_scalar(expr_sql: &str, schema: &ScalarSchema) -> Result<ScalarFn,
 }
 
 /// Compile `expr_sql` into a scalar closure together with its inferred
-/// output [`ColumnType`]. Used for projection entries that are full
-/// expressions (casts, `coalesce`, comparisons) rather than plain
-/// column references — the caller needs a type to advertise in the
-/// output schema.
-///
-/// # Errors
-/// See [`compile_predicate`]; additionally returns
-/// [`EvalError::Unsupported`] when no output type can be inferred
-/// (the wire schema would be a guess, and a wrong type surfaces as a
-/// client-side decode failure).
+/// output [`ColumnType`]. Used for projection entries and aggregate
+/// arguments that are full expressions (casts, `coalesce`,
+/// arithmetic) rather than plain column references — the caller needs
+/// a type to advertise in the output schema. `ColumnType::Unknown`
+/// when inference has nothing to go on (e.g. a bare `NULL` literal);
+/// unknown-typed columns are advertised permissively on the wire.
 pub fn compile_typed_scalar(
     expr_sql: &str,
     schema: &ScalarSchema,
@@ -151,11 +147,6 @@ pub fn compile_typed_scalar(
     let expr = parse_expr(expr_sql)?;
     let scalar = compile_inner(&expr, schema)?;
     let ty = infer_type(&expr, schema);
-    if ty == ColumnType::Unknown {
-        return Err(EvalError::Unsupported(format!(
-            "cannot infer output type of expression {expr_sql}"
-        )));
-    }
     Ok((scalar, ty))
 }
 

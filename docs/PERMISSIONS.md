@@ -110,17 +110,17 @@ posture, add `predicate = "false"` for tables you haven't reviewed.
 ## Enforcement requires the dataflow
 
 Row-visibility filters are compiled into the query's dataflow plan.
-The dataflow executes filters, projections (including `*` wildcards,
-casts, and arithmetic), equi-joins (inner / left / semi / anti),
-`DISTINCT` and `DISTINCT ON`, all set operations, aggregates (multi-
-and zero-column `GROUP BY`, `HAVING`, `COUNT(DISTINCT)`), multi-key
-ordering, and `UNION`-distinct recursive CTEs. The few shapes it
-cannot execute (recursive `UNION ALL`, uninferable projection
-expression types, non-integer `SUM`/`MIN`/`MAX`/`AVG` — see
-`supported-sql.md`) fall back to a raw pass-through path, which
-cannot enforce filters. When a
-row-visibility rule applies to any table such a query reads, the
-subscribe **fails closed**: the server rejects it with
+The dataflow executes every relational shape the SQL frontend
+accepts: filters, projections (wildcards, casts, arithmetic,
+literals), equi-joins (inner / left / semi / anti), `DISTINCT` and
+`DISTINCT ON`, all set operations, aggregates (multi- and zero-column
+`GROUP BY`, `HAVING`, `DISTINCT` aggregates, typed `SUM`/`MIN`/`MAX`),
+multi-key ordering with hidden sort columns, and recursive CTEs
+(`UNION` and `UNION ALL`). The pass-through path remains only as a
+safety net for scalar operators outside the expression evaluator
+(e.g. `LIKE` — see `supported-sql.md`), and it cannot enforce
+filters. When a row-visibility rule applies to any table such a query
+reads, the subscribe **fails closed**: the server rejects it with
 `permission_unenforceable` rather than serving unfiltered rows.
 Tautological rules (`predicate = "true"`) and `mode = "subscribe"`
 rules splice no filter, so they don't block pass-through.

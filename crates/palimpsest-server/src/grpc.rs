@@ -1132,7 +1132,12 @@ fn schema_definition_from_plan(
         .map(|(name, ty)| ColumnSpec {
             name: name.clone(),
             datum_type: column_type_to_datum_type(*ty),
-            nullable: false,
+            // Dataflow outputs can carry NULLs the base schema never
+            // would: left-join null extension, SUM/MIN/MAX over empty
+            // or all-null groups, NULL-yielding casts. Declare every
+            // output column nullable so the client-side wire
+            // validation admits them.
+            nullable: true,
         })
         .collect();
     SchemaDefinition {

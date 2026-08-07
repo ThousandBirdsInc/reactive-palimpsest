@@ -163,6 +163,12 @@ fn apply_order_limit(graph: &mut MirGraph, query: &Query) -> Result<(), SqlError
         })
         .collect();
 
+    // ORDER BY may reference columns the projection dropped
+    // (Postgres allows it). When that happens, extend the projection
+    // with hidden sort-key columns and re-project the visible columns
+    // above the TopK.
+    let visible = extend_projection_with_order_keys(graph, &order_by);
+
     let root = graph.root();
     if let MirNodeKind::DistinctOn {
         on,
@@ -191,7 +197,79 @@ fn apply_order_limit(graph: &mut MirGraph, query: &Query) -> Result<(), SqlError
             offset,
         },
     );
+    if let Some(columns) = visible {
+        push_unary(graph, MirNodeKind::Project { columns });
+    }
     Ok(())
+}
+
+/// When an ORDER BY key is not among the projected columns, appends it
+/// to the query's output projection as a hidden column (so downstream
+/// sort operators can read it) and returns the visible column names to
+/// re-project above the sort. `None` when nothing was hidden — or when
+/// the projection's output names cannot be recomputed (wildcards,
+/// unaliased expressions), in which case the caller keeps today's
+/// behaviour.
+fn extend_projection_with_order_keys(
+    graph: &mut MirGraph,
+    order_by: &[OrderKey],
+) -> Option<Vec<String>> {
+    let root = graph.root();
+    let project_node = match graph.node_kind(root) {
+        MirNodeKind::Project { .. } => root,
+        // `SELECT DISTINCT ON` sits directly above its projection and
+        // passes columns through unchanged.
+        MirNodeKind::DistinctOn { .. } => {
+            let input = *graph.ordered_inputs(root).first()?;
+            matches!(graph.node_kind(input), MirNodeKind::Project { .. }).then_some(input)?
+        }
+        _ => return None,
+    };
+    let MirNodeKind::Project { columns } = graph.node_kind(project_node).clone() else {
+        return None;
+    };
+
+    let mut missing: Vec<String> = Vec::new();
+    for key in order_by {
+        if !columns.contains(&key.expression) && !missing.contains(&key.expression) {
+            missing.push(key.expression.clone());
+        }
+    }
+    if missing.is_empty() {
+        return None;
+    }
+
+    let visible: Option<Vec<String>> = columns.iter().map(|entry| visible_name(entry)).collect();
+    let visible = visible?;
+
+    let MirNodeKind::Project { columns } = graph.node_kind_mut(project_node) else {
+        unreachable!("checked above");
+    };
+    columns.extend(missing);
+    Some(visible)
+}
+
+/// Output name of a projection entry, when it can be recomputed from
+/// the entry text alone: plain identifiers name themselves, qualified
+/// identifiers their trailing segment, aliased entries already carry
+/// the alias. `None` for wildcards and expression entries, whose
+/// output names are assigned during dataflow compilation.
+fn visible_name(entry: &str) -> Option<String> {
+    let is_ident = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '"')
+    };
+    if is_ident(entry) {
+        return Some(entry.to_owned());
+    }
+    if let Some((relation, bare)) = entry.split_once('.') {
+        if is_ident(relation) && is_ident(bare) {
+            return Some(bare.to_owned());
+        }
+    }
+    None
 }
 
 #[derive(Debug, Default)]
@@ -1501,9 +1579,40 @@ mod tests {
                         },
                     ]
         )));
+        // `created_at` is not projected, so the projection grows a
+        // hidden sort column and a visible re-projection sits above
+        // the TopK.
         assert!(matches!(
             graph.root_kind(),
-            MirNodeKind::TopK { limit: 5, .. }
+            MirNodeKind::Project { columns }
+                if columns == &vec!["id".to_owned(), "author_id".to_owned()]
+        ));
+        assert!(graph
+            .node_kinds()
+            .any(|node| matches!(node, MirNodeKind::TopK { limit: 5, .. })));
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Project { columns }
+                if columns
+                    == &vec!["id".to_owned(), "author_id".to_owned(), "created_at".to_owned()]
+        )));
+    }
+
+    #[test]
+    fn lowers_hidden_order_keys_for_unprojected_columns() {
+        let graph = parse_and_lower("SELECT id FROM posts ORDER BY created_at DESC LIMIT 3")
+            .expect("ORDER BY over a non-projected column should lower");
+
+        // Inner projection carries the hidden key; the root
+        // re-projects the visible column above the TopK.
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Project { columns }
+                if columns == &vec!["id".to_owned(), "created_at".to_owned()]
+        )));
+        assert!(matches!(
+            graph.root_kind(),
+            MirNodeKind::Project { columns } if columns == &vec!["id".to_owned()]
         ));
     }
 

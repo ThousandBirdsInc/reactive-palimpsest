@@ -24,10 +24,12 @@ The two are **not** the same surface. A query that parses but does not
 compile onto the dataflow is served by the v1 *pass-through* path: the
 server ships the referenced base tables' snapshot rows and raw WAL
 diffs verbatim, **without applying the query's operators server-side**.
-That bucket is now small: recursive `UNION ALL` CTEs, projection
-expressions whose output type cannot be inferred, `SUM`/`MIN`/`MAX`/`AVG`
-over non-integer columns, and `DISTINCT` inside aggregates other than
-`COUNT`. Server-side permission row filters are part
+Every relational shape the frontend accepts now compiles; the fallback
+remains only as a safety net for scalar expressions outside the
+evaluator's operator surface (e.g. `LIKE`, which the evaluator does
+not implement — see the `WHERE` row for the supported operators) and
+for a projection wildcard combined with an expression-valued `ORDER BY`
+key that the projection does not carry. Server-side permission row filters are part
 of the compiled dataflow, so pass-through cannot enforce them — for
 that reason a subscribe **fails closed** when row-visibility rules
 apply to any table the query reads and no compiled plan exists: the
@@ -51,8 +53,8 @@ above). A dash means the row never reaches that gate.
 | --- | --- | --- | --- |
 | Single `SELECT` query | Yes | Yes | Non-query statements and multi-statement inputs are rejected. |
 | `WITH name AS (...)` | Yes | Yes | Non-recursive CTEs lower to `CteRef` placeholders plus expansion edges. |
-| `WITH RECURSIVE` | Yes | Partial | Self-referential CTEs must be `base UNION [ALL] step` with exactly one self-reference in the step term (linear recursion). `UNION` (distinct) recursion compiles onto differential's iterate operator and converges to the fixed point; `UNION ALL` recursion has no fixed point to converge on and falls back to pass-through. Nested/mutual recursion falls back. |
-| Projection expressions | Yes | Partial | Column references, aliases, casts, arithmetic, `coalesce`, and `cardinality` evaluate; expressions whose output type cannot be inferred make the plan fall back to pass-through. |
+| `WITH RECURSIVE` | Yes | Yes | Self-referential CTEs must be `base UNION [ALL] step` with exactly one self-reference in the step term (linear recursion). `UNION` recursion converges on the distinct set; `UNION ALL` recursion circulates per-iteration waves and accumulates them — over cyclic data it does not terminate, exactly as in Postgres. An earlier recursive CTE may be used inside a later recursive step; it is hoisted out of the iteration as a loop-invariant input. |
+| Projection expressions | Yes | Yes | Column references, aliases, casts, arithmetic, `coalesce`, `cardinality`, and literals (including bare `NULL`) evaluate. Output types are inferred; a column whose type cannot be inferred is advertised permissively and its datums describe themselves on the wire. |
 | `*` and `relation.*` | Yes | Yes | Expanded at compile time against the input schema; `relation.*` resolves through per-column provenance, so it also works on join outputs. |
 | `FROM table` | Yes | Yes | Table names lower to `BaseTable` MIR nodes. |
 | Derived tables | Yes | Partial | Subqueries in `FROM (...) AS alias` lower through the nested query path; they evaluate when every lowered operator is a compiled one. |
@@ -75,14 +77,14 @@ above). A dash means the row never reaches that gate.
 | `coalesce(...)` | Yes | Yes | Returns the first non-`NULL` argument. |
 | Other scalar functions | Rejected | — | Rejected at parse time with `SqlError::UnsupportedFunction` so the accepted surface never exceeds what the dataflow evaluates. |
 | `SELECT DISTINCT` | Yes | Yes | Lowers to a `Distinct` MIR node, compiled onto differential's `distinct` operator. |
-| `DISTINCT ON (exprs)` | Yes | Yes | With an `ORDER BY`, the Postgres rule applies (`DISTINCT ON` expressions must match the initial `ORDER BY` expressions) and the order keys pick the surviving row per group; without one the surviving row is arbitrary but deterministic. Order keys must survive the projection (ordering by a non-projected column falls back). |
+| `DISTINCT ON (exprs)` | Yes | Yes | With an `ORDER BY`, the Postgres rule applies (`DISTINCT ON` expressions must match the initial `ORDER BY` expressions) and the order keys pick the surviving row per group; without one the surviving row is arbitrary but deterministic. Order keys the projection dropped are carried as hidden columns and re-projected away above the sort. |
 | Plain `GROUP BY` | Yes | Yes | Grouping expressions must be column references; the dataflow compiles any number of grouping columns (including zero — see Aggregates). |
 | `GROUP BY ALL`, grouping sets, rollup, cube | Rejected | — | Group-by modifiers are outside the Phase 1 subset. |
-| Aggregates | Yes | Yes | `count`, `sum`, `min`, `max`, and `avg` are recognized in projections and folded incrementally, each over its own value expression. A global aggregate (no `GROUP BY`) returns one row even over an empty input (`COUNT` = 0, other aggregates `NULL`). `sum`/`min`/`max`/`avg` require integer-typed inputs; other types fall back rather than aggregating wrong values. |
-| Aggregate `DISTINCT` | Yes | Partial | `COUNT(DISTINCT col)` folds incrementally; `DISTINCT` inside other aggregate functions falls back to pass-through. |
+| Aggregates | Yes | Yes | `count`, `sum`, `min`, `max`, and `avg` are recognized in projections and folded incrementally, each over its own value expression. A global aggregate (no `GROUP BY`) returns one row even over an empty input (`COUNT` = 0, other aggregates `NULL`). `SUM` follows its input's numeric type (integer in, integer out; float in, float out), `MIN`/`MAX` order any datum type, `AVG` yields a float, and `COUNT(col)` skips `NULL`s. `SUM`/`MIN`/`MAX` over empty or all-`NULL` groups yield `NULL`. |
+| Aggregate `DISTINCT` | Yes | Yes | `COUNT`/`SUM`/`AVG(DISTINCT col)` fold each distinct value once; `MIN`/`MAX(DISTINCT)` are equivalent to their plain forms. |
 | Named aggregate arguments | Rejected | — | Aggregate arguments must be unnamed expressions or wildcards. |
 | `HAVING` | Yes | Yes | Lowers to a filter above the aggregate. Aggregate calls in the predicate reference aggregate output columns; aggregates that appear only in `HAVING` are computed as hidden columns and dropped by the projection. Requires aggregates or `GROUP BY`; `EXISTS` inside `HAVING` is rejected. |
-| `ORDER BY ... LIMIT` | Yes | Yes | Literal integer `LIMIT` and optional literal integer `OFFSET` are supported. The dataflow compiles any number of typed sort keys with per-key `ASC`/`DESC` (TopK); `NULL`s sort last ascending and first descending, matching Postgres defaults. |
+| `ORDER BY ... LIMIT` | Yes | Yes | Literal integer `LIMIT` and optional literal integer `OFFSET` are supported. The dataflow compiles any number of typed sort keys with per-key `ASC`/`DESC` (TopK); `NULL`s sort last ascending and first descending, matching Postgres defaults. Sort keys need not appear in the projection — missing keys are carried as hidden columns and dropped after the sort. |
 | `ORDER BY` without `LIMIT` | Yes | Yes | Plans as a TopK with an unbounded limit ("sort the whole result set"). |
 | `TOP`, `SELECT INTO`, non-standard SELECT clauses | Rejected during lowering | — | Includes prewhere, cluster/distribute/sort-by, named windows, qualify, value-table mode, and connect-by. |
 | `UNION ALL` | Yes | Yes | Lowers to a `Union` MIR node; branches are concatenated positionally (both branches must have the same column count; output columns are named after the left branch). |

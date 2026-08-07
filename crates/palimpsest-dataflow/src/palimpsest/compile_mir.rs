@@ -45,7 +45,7 @@ use thiserror::Error;
 
 use crate::operators::Join as _;
 use crate::palimpsest::eval::{compile_predicate, compile_typed_scalar, EvalError, ScalarSchema};
-use crate::palimpsest::relational::{self, AggregateFunc, AggregateValue};
+use crate::palimpsest::relational;
 use crate::palimpsest::wal::Row;
 use crate::{lattice::Lattice, AsCollection, VecCollection};
 
@@ -126,18 +126,19 @@ pub enum NodeRecipe {
         all: bool,
     },
     /// Group-by aggregate over zero or more group columns. Group keys
-    /// keep their original `Datum` types end-to-end; each aggregate
-    /// function reads its own `i64`-coerced value expression.
+    /// and aggregate inputs keep their original `Datum` types; each
+    /// aggregate function reads its own value expression, typed at
+    /// compile time (integer vs float sums, order-based min/max).
     Aggregate {
         /// Closure that reads the group-key datums out of the input
         /// row (empty vector for a global aggregate).
         group_extract: Arc<dyn Fn(&Row) -> Vec<Datum> + Send + Sync>,
         /// One value extractor per aggregate function, in projection
-        /// order. `COUNT(*)` uses a constant-zero extractor (the
-        /// operator only counts diffs).
-        value_extracts: Vec<Arc<dyn Fn(&Row) -> i64 + Send + Sync>>,
+        /// order. `COUNT(*)` uses a constant non-null placeholder so
+        /// every row counts.
+        value_extracts: Vec<Arc<dyn Fn(&Row) -> Datum + Send + Sync>>,
         /// One entry per aggregate function in projection order.
-        funcs: Vec<AggregateFunc>,
+        funcs: Vec<relational::DatumAggregate>,
         /// For global (no `GROUP BY`) aggregates: the row to emit when
         /// the input is empty — SQL still returns one row there
         /// (`COUNT` = 0, other aggregates NULL). `None` for grouped
@@ -174,13 +175,18 @@ pub enum NodeRecipe {
         /// set semantics.
         all: bool,
     },
-    /// `WITH RECURSIVE` fixpoint (UNION-distinct recursion): iterate
-    /// the step term over the working table until no new rows appear.
-    /// Ordered inputs are the base term then the step term; the step
-    /// subgraph reads the working table through a [`Self::RecursiveRef`].
+    /// `WITH RECURSIVE` fixpoint. Ordered inputs are the base term
+    /// then the step term; the step subgraph reads the working table
+    /// through a [`Self::RecursiveRef`]. `UNION` recursion iterates
+    /// the step over the accumulated distinct set until it stops
+    /// changing; `UNION ALL` recursion circulates per-iteration waves
+    /// and accumulates them (terminating exactly when the recursion
+    /// itself does, like Postgres).
     Fixpoint {
         /// CTE name the step's `RecursiveRef` binds against.
         cte: String,
+        /// `true` for `UNION ALL` (bag accumulation) recursion.
+        union_all: bool,
     },
     /// Reference to the enclosing fixpoint's working table. Resolved
     /// at install time from the iteration's variable binding.
@@ -669,48 +675,46 @@ fn compile_aggregate(
         })
     };
 
-    // Each aggregate reads its own value expression, `i64`-coerced.
+    // Each aggregate reads its own value expression as a raw datum;
+    // the evaluator variant is picked from the SQL function and the
+    // argument's inferred type.
     let mut funcs = Vec::with_capacity(aggs.len());
-    let mut value_extracts: Vec<Arc<dyn Fn(&Row) -> i64 + Send + Sync>> =
+    let mut value_extracts: Vec<Arc<dyn Fn(&Row) -> Datum + Send + Sync>> =
         Vec::with_capacity(aggs.len());
     for agg in aggs {
-        let (func, arg) = parse_agg_call(agg)?;
-        funcs.push(func);
-
-        let extractor: Arc<dyn Fn(&Row) -> i64 + Send + Sync> = if arg == "*" {
-            // COUNT(*): the operator only reads the diff multiplicity.
-            Arc::new(|_row: &Row| 0)
-        } else {
-            let (scalar, ty) = compile_typed_scalar(&arg, &input_schema)?;
-            // SUM / MIN / MAX / AVG results are advertised as
-            // integers; a non-integer input column would silently
-            // aggregate as zeros, so reject it instead of computing
-            // wrong numbers. COUNT variants only test presence.
-            if !matches!(func, AggregateFunc::Count | AggregateFunc::CountDistinct)
-                && ty != ColumnType::Int
-            {
-                return Err(CompileError::Unsupported(format!(
-                    "aggregate {}({arg}) over non-integer column",
-                    agg.function
-                )));
-            }
-            Arc::new(move |row: &Row| match scalar(row) {
-                Datum::I64(v) => v,
-                Datum::I32(v) => i64::from(v),
-                Datum::I16(v) => i64::from(v),
-                _ => 0,
-            })
-        };
+        let (distinct, arg) = parse_agg_call(agg);
+        let (extractor, arg_type): (Arc<dyn Fn(&Row) -> Datum + Send + Sync>, ColumnType) =
+            if arg == "*" {
+                // COUNT(*): a constant non-null placeholder counts
+                // every row.
+                (Arc::new(|_row: &Row| Datum::Bool(true)), ColumnType::Bool)
+            } else {
+                let (scalar, ty) = compile_typed_scalar(&arg, &input_schema)?;
+                (Arc::from(scalar), ty)
+            };
         value_extracts.push(extractor);
+
+        use relational::DatumAggregate;
+        let (func, output_type) = match agg.function.to_ascii_lowercase().as_str() {
+            "count" => (DatumAggregate::Count { distinct }, ColumnType::Int),
+            "sum" => {
+                if arg_type == ColumnType::Int {
+                    (DatumAggregate::SumInt { distinct }, ColumnType::Int)
+                } else {
+                    (DatumAggregate::SumFloat { distinct }, ColumnType::Float)
+                }
+            }
+            "avg" => (DatumAggregate::Avg { distinct }, ColumnType::Float),
+            "min" => (DatumAggregate::Min, arg_type),
+            "max" => (DatumAggregate::Max, arg_type),
+            other => return Err(CompileError::UnsupportedAggregate(other.to_owned())),
+        };
+        funcs.push(func);
 
         let name = agg
             .alias
             .clone()
             .unwrap_or_else(|| aggregate_display_name(agg));
-        let output_type = match func {
-            AggregateFunc::Avg => ColumnType::Float,
-            _ => ColumnType::Int,
-        };
         output_pairs.push((name, output_type));
     }
 
@@ -720,7 +724,7 @@ fn compile_aggregate(
         funcs
             .iter()
             .map(|func| match func {
-                AggregateFunc::Count | AggregateFunc::CountDistinct => Datum::I64(0),
+                relational::DatumAggregate::Count { .. } => Datum::I64(0),
                 _ => Datum::Null,
             })
             .collect()
@@ -744,27 +748,17 @@ fn compile_aggregate(
     Ok(())
 }
 
-/// Splits an [`AggExpr`] into its dataflow function and value-argument
-/// text. The lowering marks `COUNT(DISTINCT x)` by prepending a
+/// Splits an [`AggExpr`] into its `DISTINCT` flag and value-argument
+/// text. The lowering marks `agg(DISTINCT x)` by prepending a
 /// `DISTINCT` sentinel to the argument list.
-fn parse_agg_call(agg: &AggExpr) -> Result<(AggregateFunc, String), CompileError> {
+fn parse_agg_call(agg: &AggExpr) -> (bool, String) {
     let distinct = agg.args.first().is_some_and(|arg| arg == "DISTINCT");
     let arg = agg
         .args
         .get(usize::from(distinct))
         .map(|arg| arg.trim().to_owned())
         .unwrap_or_else(|| "*".to_owned());
-    let func = parse_agg_func(&agg.function)?;
-    if distinct {
-        if func == AggregateFunc::Count {
-            return Ok((AggregateFunc::CountDistinct, arg));
-        }
-        return Err(CompileError::Unsupported(format!(
-            "{}(DISTINCT ...)",
-            agg.function
-        )));
-    }
-    Ok((func, arg))
+    (distinct, arg)
 }
 
 /// Output-column name for an unaliased aggregate, matching how the
@@ -992,17 +986,6 @@ fn compile_union(
     Ok(())
 }
 
-fn parse_agg_func(name: &str) -> Result<AggregateFunc, CompileError> {
-    match name.to_ascii_lowercase().as_str() {
-        "count" => Ok(AggregateFunc::Count),
-        "sum" => Ok(AggregateFunc::Sum),
-        "min" => Ok(AggregateFunc::Min),
-        "max" => Ok(AggregateFunc::Max),
-        "avg" => Ok(AggregateFunc::Avg),
-        other => Err(CompileError::UnsupportedAggregate(other.to_owned())),
-    }
-}
-
 /// Compiles one key-expression string (an `ORDER BY` key or a
 /// `DISTINCT ON` expression) into a datum extractor: plain and
 /// qualified column references resolve by index (provenance-aware),
@@ -1190,14 +1173,6 @@ fn compile_fixpoint(
     union_all: bool,
     state: &mut CompileState,
 ) -> Result<(), CompileError> {
-    // UNION ALL recursion accumulates rows across iterations rather
-    // than converging on a set; there is no fixed point for the
-    // dataflow to reach, so only UNION (distinct) recursion compiles.
-    if union_all {
-        return Err(CompileError::Unsupported(
-            "recursive UNION ALL (no fixed point to converge on)".to_owned(),
-        ));
-    }
     let inputs = graph.ordered_inputs(node);
     let [base, step] = inputs.as_slice() else {
         return Err(CompileError::Unsupported(format!(
@@ -1208,34 +1183,39 @@ fn compile_fixpoint(
 
     // The installer runs the step term inside one iteration scope and
     // cannot open another one within it (that would recurse the scope
-    // type without bound), so a fixpoint nested inside this step —
-    // or a reference to a *different* recursion — is rejected here.
-    let mut stack = vec![*step];
-    let mut visited = std::collections::BTreeSet::new();
-    while let Some(current) = stack.pop() {
-        if !visited.insert(current) {
-            continue;
-        }
-        match graph.node_kind(current) {
-            MirNodeKind::Fixpoint { .. } => {
-                return Err(CompileError::Unsupported(
-                    "nested recursive CTEs".to_owned(),
-                ));
+    // type without bound). Fixpoints nested in the step are fine when
+    // they are *loop-invariant* — earlier, fully-lowered recursive
+    // CTEs expanded here — because the installer hoists them outside
+    // the iteration. What must not appear is a reference to this
+    // fixpoint's working table from inside a nested fixpoint (the
+    // hoisted computation cannot see it), or a reference to a
+    // recursion that isn't in scope. The frontend's
+    // single-self-reference rule already excludes both; this walk is
+    // a defensive check for hand-built graphs.
+    let (top_level, nested_roots) = fixpoint_step_partition(graph, *step);
+    for index in &top_level {
+        if let MirNodeKind::RecursiveRef { cte: name } = graph.node_kind(*index) {
+            if name != cte {
+                return Err(CompileError::Unsupported(format!(
+                    "recursive CTE {name} referenced outside its fixpoint"
+                )));
             }
-            MirNodeKind::RecursiveRef { cte: name } if name != cte => {
-                return Err(CompileError::Unsupported(
-                    "mutually recursive CTEs".to_owned(),
-                ));
-            }
-            _ => {}
         }
-        use petgraph::visit::EdgeRef;
-        stack.extend(
-            graph
-                .graph()
-                .edges_directed(current, Direction::Incoming)
-                .map(|edge| edge.source()),
-        );
+    }
+    let mut pending = nested_roots;
+    while let Some(nested) = pending.pop() {
+        let (nested_nodes, deeper) = fixpoint_step_partition(graph, nested);
+        pending.extend(deeper);
+        for index in nested_nodes {
+            if matches!(
+                graph.node_kind(index),
+                MirNodeKind::RecursiveRef { cte: name } if name == cte
+            ) {
+                return Err(CompileError::Unsupported(format!(
+                    "nested recursive CTE references enclosing recursion {cte}"
+                )));
+            }
+        }
     }
 
     let base_schema = state
@@ -1252,9 +1232,40 @@ fn compile_fixpoint(
         node,
         NodeRecipe::Fixpoint {
             cte: cte.to_owned(),
+            union_all,
         },
     );
     Ok(())
+}
+
+/// Partitions the subtree feeding `start` (inclusive) into the nodes
+/// reachable without crossing a nested `Fixpoint`, and the nested
+/// `Fixpoint` roots encountered (which are not traversed). `start`
+/// itself is always traversed, so passing a `Fixpoint` walks *its*
+/// base and step subtrees.
+fn fixpoint_step_partition(graph: &MirGraph, start: NodeIndex) -> (Vec<NodeIndex>, Vec<NodeIndex>) {
+    use petgraph::visit::EdgeRef;
+    let mut top_level = Vec::new();
+    let mut nested = Vec::new();
+    let mut stack = vec![start];
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        if current != start && matches!(graph.node_kind(current), MirNodeKind::Fixpoint { .. }) {
+            nested.push(current);
+            continue;
+        }
+        top_level.push(current);
+        stack.extend(
+            graph
+                .graph()
+                .edges_directed(current, Direction::Incoming)
+                .map(|edge| edge.source()),
+        );
+    }
+    (top_level, nested)
 }
 
 fn compile_recursive_ref<L: TableSchemaLookup>(
@@ -1289,7 +1300,11 @@ fn compile_recursive_ref<L: TableSchemaLookup>(
         .cloned()
         .ok_or_else(|| CompileError::Unknown(format!("recursive CTE schema {cte}")))?;
 
-    state.node_provenance.insert(node, vec![None; schema.len()]);
+    // The working table is a relation named after its CTE, so
+    // qualified references (`reach.id`) resolve against it.
+    state
+        .node_provenance
+        .insert(node, vec![Some(cte.to_owned()); schema.len()]);
     state.node_schemas.insert(node, schema);
     state.recipes.insert(
         node,
@@ -1328,12 +1343,12 @@ fn compile_cte_ref(
         .cloned()
         .ok_or_else(|| CompileError::Unknown(format!("cte target schema {cte}")))?;
 
-    let provenance = state
+    // A CTE reference introduces a fresh relation named after the CTE
+    // — `SELECT r.col FROM r` qualifies against `r`, not against the
+    // base tables inside it (which are out of scope there, as in SQL).
+    state
         .node_provenance
-        .get(&target)
-        .cloned()
-        .unwrap_or_else(|| vec![None; schema.len()]);
-    state.node_provenance.insert(node, provenance);
+        .insert(node, vec![Some(cte.to_owned()); schema.len()]);
     state.node_schemas.insert(node, schema);
     state.recipes.insert(node, NodeRecipe::CteRef { target });
     Ok(())
@@ -1410,35 +1425,89 @@ where
         NodeRecipe::RecursiveRef { cte } => {
             unreachable!("RecursiveRef {cte} outside its fixpoint's step term")
         }
-        NodeRecipe::Fixpoint { cte } => {
+        NodeRecipe::Fixpoint { cte, union_all } => {
             let fix_inputs = plan.graph.ordered_inputs(node);
             let (base_node, step_node) = (fix_inputs[0], fix_inputs[1]);
             let base = install_recursive(plan, scope, inputs, base_node, cache);
 
-            // UNION-distinct recursion: iterate the step over the
-            // working table, re-adding the base each round, until the
-            // distinct set stops changing. The closing `distinct`
-            // consolidates, which is also what guarantees the loop's
-            // differences dissipate.
-            use crate::operators::iterate::Iterate;
-            base.iterate(|working| {
-                let mut child = working.scope();
-                let entered: HashMap<TableId, VecCollection<_, Row, isize>> = inputs
-                    .iter()
-                    .map(|(table, collection)| (*table, collection.enter(&child)))
-                    .collect();
-                let base_in = base.enter(&child);
-                let mut step_cache = HashMap::new();
-                let step_out = install_step(
-                    plan,
-                    &mut child,
-                    &entered,
-                    step_node,
-                    &mut step_cache,
-                    (cte, working),
-                );
-                relational::distinct(&relational::union(&base_in, &step_out))
-            })
+            // Nested fixpoints in the step term are loop-invariant
+            // (earlier recursive CTEs expanded here) — install them in
+            // *this* scope and enter their results into the iteration,
+            // pre-seeded into the step installer's cache.
+            let (_, nested_roots) = fixpoint_step_partition(&plan.graph, step_node);
+            let hoisted: Vec<(NodeIndex, VecCollection<G, Row, isize>)> = nested_roots
+                .into_iter()
+                .map(|nested| {
+                    (
+                        nested,
+                        install_recursive(plan, scope, inputs, nested, cache),
+                    )
+                })
+                .collect();
+
+            if *union_all {
+                // UNION ALL recursion: circulate per-iteration *waves*
+                // (W₀ = base, Wᵢ₊₁ = step(Wᵢ)) and accumulate them
+                // (A = base + ΣΔ step-output). Converges exactly when
+                // the recursion itself terminates — a cyclic
+                // recursion runs forever, as it would in Postgres.
+                use crate::operators::iterate::Variable;
+                use timely::order::Product;
+                scope.iterative::<u64, _, _>(|child| {
+                    let entered: HashMap<TableId, VecCollection<_, Row, isize>> = inputs
+                        .iter()
+                        .map(|(table, collection)| (*table, collection.enter(child)))
+                        .collect();
+                    let base_in = base.enter(child);
+                    let summary = Product::new(Default::default(), 1);
+                    let wave = Variable::new_from(base_in.clone(), summary.clone());
+                    let mut step_cache: HashMap<NodeIndex, VecCollection<_, Row, isize>> = hoisted
+                        .iter()
+                        .map(|(nested, collection)| (*nested, collection.enter(child)))
+                        .collect();
+                    let step_out = install_step(
+                        plan,
+                        child,
+                        &entered,
+                        step_node,
+                        &mut step_cache,
+                        (cte, &wave),
+                    );
+                    let accumulator = Variable::new_from(base_in, summary);
+                    let total = accumulator.concat(&step_out).consolidate();
+                    let result = accumulator.set(&total);
+                    wave.set(&step_out.consolidate());
+                    result.leave()
+                })
+            } else {
+                // UNION-distinct recursion: iterate the step over the
+                // working table, re-adding the base each round, until
+                // the distinct set stops changing. The closing
+                // `distinct` consolidates, which is also what
+                // guarantees the loop's differences dissipate.
+                use crate::operators::iterate::Iterate;
+                base.iterate(|working| {
+                    let mut child = working.scope();
+                    let entered: HashMap<TableId, VecCollection<_, Row, isize>> = inputs
+                        .iter()
+                        .map(|(table, collection)| (*table, collection.enter(&child)))
+                        .collect();
+                    let base_in = base.enter(&child);
+                    let mut step_cache: HashMap<NodeIndex, VecCollection<_, Row, isize>> = hoisted
+                        .iter()
+                        .map(|(nested, collection)| (*nested, collection.enter(&child)))
+                        .collect();
+                    let step_out = install_step(
+                        plan,
+                        &mut child,
+                        &entered,
+                        step_node,
+                        &mut step_cache,
+                        (cte, working),
+                    );
+                    relational::distinct(&relational::union(&base_in, &step_out))
+                })
+            }
         }
         dual @ (NodeRecipe::Join { .. } | NodeRecipe::Union { .. } | NodeRecipe::SetOp { .. }) => {
             let op_inputs = plan.graph.ordered_inputs(node);
@@ -1566,40 +1635,25 @@ where
             funcs,
             empty_default,
         } => {
-            // Project Row → (group_keys, per-aggregate values).
+            // Project Row → (group_keys, per-aggregate value datums).
             let ge = Arc::clone(group_extract);
             let ves = value_extracts.clone();
             let keyed = relational::project(&ins[0], move |row: Row| {
-                let values: Vec<i64> = ves.iter().map(|ve| ve(&row)).collect();
+                let values: Vec<Datum> = ves.iter().map(|ve| ve(&row)).collect();
                 (ge(&row), values)
             });
-            let aggregated = relational::aggregate_multi(&keyed, funcs.clone());
+            let aggregated = relational::aggregate_datums(&keyed, funcs.clone());
 
-            // Project (group_keys, Vec<AggregateValue>) → Row. Group
-            // keys keep their original Datum types, so the row matches
-            // the schema advertised to clients.
-            let result = relational::project(
-                &aggregated,
-                |(group, aggs): (Vec<Datum>, Vec<AggregateValue>)| {
+            // Project (group_keys, aggregate datums) → Row. Group keys
+            // and aggregate results keep their Datum types, so the row
+            // matches the schema advertised to clients.
+            let result =
+                relational::project(&aggregated, |(group, aggs): (Vec<Datum>, Vec<Datum>)| {
                     let mut row: Row = SmallVec::with_capacity(group.len() + aggs.len());
                     row.extend(group);
-                    for av in aggs {
-                        let datum = match av {
-                            AggregateValue::Integer(v) => Datum::I64(saturating_i128_to_i64(v)),
-                            AggregateValue::Average { sum, count } => {
-                                let avg = if count == 0 {
-                                    0.0
-                                } else {
-                                    sum as f64 / count as f64
-                                };
-                                Datum::F64(avg.to_bits())
-                            }
-                        };
-                        row.push(datum);
-                    }
+                    row.extend(aggs);
                     row
-                },
-            );
+                });
 
             // A global aggregate still returns one row over an empty
             // input. Reduce emits nothing for absent groups, so emit
@@ -1610,7 +1664,7 @@ where
                 let default_row = default_row.clone();
                 let present = relational::distinct(&relational::project(
                     &keyed,
-                    |(key, _values): (Vec<Datum>, Vec<i64>)| key,
+                    |(key, _values): (Vec<Datum>, Vec<Datum>)| key,
                 ));
                 let unit: VecCollection<G, Vec<Datum>, isize> = vec![(
                     Vec::new(),
@@ -1765,16 +1819,6 @@ fn key_of(row: &Row, indices: &[usize]) -> Vec<Datum> {
         .iter()
         .map(|&i| row.get(i).cloned().unwrap_or(Datum::Null))
         .collect()
-}
-
-fn saturating_i128_to_i64(v: i128) -> i64 {
-    if v > i64::MAX as i128 {
-        i64::MAX
-    } else if v < i64::MIN as i128 {
-        i64::MIN
-    } else {
-        v as i64
-    }
 }
 
 #[cfg(test)]
@@ -1967,6 +2011,7 @@ mod tests {
     const AUTHORS: TableId = TableId::new(11);
     const COMMENTS: TableId = TableId::new(12);
     const EDGES: TableId = TableId::new(13);
+    const MEASUREMENTS: TableId = TableId::new(14);
 
     fn relational_lookup(table: &str) -> Option<(TableId, ScalarSchema)> {
         match table {
@@ -1975,6 +2020,14 @@ mod tests {
                 ScalarSchema::from_pairs([
                     ("id".to_owned(), ColumnType::Int),
                     ("parent".to_owned(), ColumnType::Int),
+                ]),
+            )),
+            "measurements" => Some((
+                MEASUREMENTS,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("reading".to_owned(), ColumnType::Float),
+                    ("label".to_owned(), ColumnType::Text),
                 ]),
             )),
             "articles" => Some((
@@ -2366,7 +2419,7 @@ mod tests {
     }
 
     #[test]
-    fn recursive_union_all_still_falls_back() {
+    fn recursive_union_all_accumulates_per_iteration_waves() {
         let graph = parse_and_lower(
             "WITH RECURSIVE reach AS (
                 SELECT id, parent FROM edges WHERE parent = 1
@@ -2377,10 +2430,23 @@ mod tests {
              SELECT id FROM reach",
         )
         .unwrap();
-        let Err(err) = compile_mir(&graph, &relational_lookup) else {
-            panic!("recursive UNION ALL must not compile");
-        };
-        assert!(err.to_string().contains("UNION ALL"), "got {err}");
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        // Two roots point at 1, and node 3 hangs off node 2 — the
+        // second wave re-derives it once per parent occurrence, and
+        // UNION ALL keeps every derivation.
+        let edges = vec![
+            datum_row(vec![Datum::I64(2), Datum::I64(1)]),
+            datum_row(vec![Datum::I64(3), Datum::I64(2)]),
+            datum_row(vec![Datum::I64(9), Datum::I64(8)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(EDGES, edges)],
+            vec![
+                datum_row(vec![Datum::I64(2)]),
+                datum_row(vec![Datum::I64(3)]),
+            ],
+        );
     }
 
     #[test]
@@ -2517,6 +2583,143 @@ mod tests {
             &plan,
             vec![(TableId::new(2), events_seed())],
             vec![datum_row(vec![Datum::I64(7)])],
+        );
+    }
+
+    fn float(value: f64) -> Datum {
+        Datum::F64(value.to_bits())
+    }
+
+    #[test]
+    fn aggregates_handle_float_and_text_inputs() {
+        let graph = parse_and_lower(
+            "SELECT min(label) AS first_label, max(reading) AS peak,
+                    sum(reading) AS total, avg(reading) AS mean
+             FROM measurements",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        assert_eq!(
+            plan.output_schema.column_type("first_label"),
+            Some(ColumnType::Text)
+        );
+        assert_eq!(
+            plan.output_schema.column_type("peak"),
+            Some(ColumnType::Float)
+        );
+        assert_eq!(
+            plan.output_schema.column_type("total"),
+            Some(ColumnType::Float)
+        );
+
+        let rows = vec![
+            datum_row(vec![Datum::I64(1), float(1.5), text("b")]),
+            datum_row(vec![Datum::I64(2), float(2.5), text("a")]),
+        ];
+        run_plan(
+            &plan,
+            vec![(MEASUREMENTS, rows)],
+            vec![datum_row(vec![
+                text("a"),
+                float(2.5),
+                float(4.0),
+                float(2.0),
+            ])],
+        );
+    }
+
+    #[test]
+    fn sum_distinct_sums_each_value_once() {
+        let graph = parse_and_lower("SELECT sum(DISTINCT value) AS total FROM events").unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        // events values: 10, 10, 20, 5 → distinct sum 35.
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![datum_row(vec![Datum::I64(35)])],
+        );
+    }
+
+    #[test]
+    fn count_of_a_column_skips_nulls() {
+        let graph = parse_and_lower("SELECT count(title) AS n FROM posts").unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        let rows = vec![
+            datum_row(vec![Datum::I64(1), text("a"), Datum::Bool(true)]),
+            datum_row(vec![Datum::I64(2), Datum::Null, Datum::Bool(true)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(TableId::new(1), rows)],
+            vec![datum_row(vec![Datum::I64(1)])],
+        );
+    }
+
+    #[test]
+    fn null_literal_projection_compiles() {
+        let graph = parse_and_lower("SELECT id, NULL FROM posts").unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        assert_eq!(plan.output_schema.len(), 2);
+        let rows = vec![datum_row(vec![Datum::I64(1), text("a"), Datum::Bool(true)])];
+        run_plan(
+            &plan,
+            vec![(TableId::new(1), rows)],
+            vec![datum_row(vec![Datum::I64(1), Datum::Null])],
+        );
+    }
+
+    #[test]
+    fn order_by_non_projected_column_uses_hidden_key() {
+        let graph = parse_and_lower("SELECT id FROM posts ORDER BY title DESC LIMIT 1").unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        assert_eq!(plan.output_schema.len(), 1, "hidden key is dropped");
+        let rows = vec![
+            datum_row(vec![Datum::I64(1), text("alpha"), Datum::Bool(true)]),
+            datum_row(vec![Datum::I64(2), text("zeta"), Datum::Bool(true)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(TableId::new(1), rows)],
+            vec![datum_row(vec![Datum::I64(2)])],
+        );
+    }
+
+    #[test]
+    fn loop_invariant_nested_recursion_is_hoisted() {
+        let graph = parse_and_lower(
+            "WITH RECURSIVE r1 AS (
+                SELECT id, parent FROM edges WHERE parent = 1
+                UNION
+                SELECT edges.id, edges.parent
+                FROM edges JOIN r1 ON edges.parent = r1.id
+             ), r2 AS (
+                SELECT id, parent FROM edges WHERE parent = 9
+                UNION
+                SELECT r1.id, r1.parent
+                FROM r1 JOIN r2 ON r1.id = r2.parent
+             )
+             SELECT id FROM r2",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup)
+            .expect("earlier recursive CTE used in a later step must compile");
+        let edges = vec![
+            datum_row(vec![Datum::I64(2), Datum::I64(1)]),
+            datum_row(vec![Datum::I64(3), Datum::I64(2)]),
+            datum_row(vec![Datum::I64(9), Datum::I64(3)]),
+            datum_row(vec![Datum::I64(10), Datum::I64(9)]),
+        ];
+        // r1 = reachable from 1: {(2,1), (3,2), (9,3)}. r2 starts at
+        // (10,9) and walks parents through r1: 9, 3, 2.
+        run_plan(
+            &plan,
+            vec![(EDGES, edges)],
+            vec![
+                datum_row(vec![Datum::I64(10)]),
+                datum_row(vec![Datum::I64(9)]),
+                datum_row(vec![Datum::I64(3)]),
+                datum_row(vec![Datum::I64(2)]),
+            ],
         );
     }
 
