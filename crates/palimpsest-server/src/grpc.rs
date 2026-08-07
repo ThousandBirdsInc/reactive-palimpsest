@@ -640,18 +640,19 @@ async fn handle_subscribe(
     let primary_key = schema.primary_key_columns.clone();
     // Cursor pump topology:
     //
-    // * Host-routed plans (single-table aggregate that the compiler
-    //   lowered): the WAL diffs are routed *through* the persistent
-    //   host so the dataflow re-aggregates, and there is one pump per
-    //   canonical query key. All subscribers sharing the canonical key
-    //   (e.g. two browsers watching the same orders aggregate) attach
-    //   to the same host plan and the same pump, which fans deltas
-    //   out via `router.pump_transaction` to each subscriber's
-    //   channel.
+    // * Host-routed plans (every query the compiler lowered — filters,
+    //   aggregates, joins, set ops): the WAL diffs are routed
+    //   *through* the persistent host so the dataflow recomputes the
+    //   query (and its spliced permission filters), and there is one
+    //   pump per canonical query key. All subscribers sharing the
+    //   canonical key (e.g. two browsers watching the same orders
+    //   aggregate) attach to the same host plan and the same pump,
+    //   which fans deltas out via `router.pump_transaction` to each
+    //   subscriber's channel.
     //
-    // * Non-host-routed plans (multi-table joins, queries the compiler
-    //   can't lower yet): one pump per subscription, raw WAL diffs
-    //   straight to the router. No state sharing.
+    // * Non-host-routed plans (the query shapes the compiler can't
+    //   lower yet): one pump per subscription, raw WAL diffs straight
+    //   to the router. No state sharing.
     let cursor_query = QueryId::new(request.sql.clone());
     if let (Some(canonical), Some(plan)) =
         (host_canonical.as_ref(), compiled_plan_for_host.as_ref())
@@ -777,11 +778,13 @@ fn blocking_subscribe(
     // `router.pump_transaction(SubscriptionId, ...)`).
     let subscription_id = router.allocate_subscription_id();
 
-    // Single-table host-routed plans use the canonical subgraph key
-    // to share state across subscribers. Multi-table or unlowered
-    // plans don't go through the host.
+    // Every compiled plan is host-routed under its canonical subgraph
+    // key so live WAL diffs flow *through* the dataflow (join /
+    // aggregate / permission-filter semantics) and state is shared
+    // across subscribers. Only unlowered pass-through queries skip the
+    // host.
     let canonical_key: Option<String> = match compiled_plan_for_host.as_ref() {
-        Some(plan) if plan.inputs.len() == 1 => Some(canonical_subgraph_key(&query, &user_ctx)),
+        Some(plan) if !plan.inputs.is_empty() => Some(canonical_subgraph_key(&query, &user_ctx)),
         _ => None,
     };
 
@@ -943,7 +946,14 @@ fn spawn_canonical_pump(
 ) -> tokio::task::JoinHandle<()> {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-    let table_id = plan.inputs.first().copied().expect("single-table plan");
+    // Single-input plans can attribute unlabelled cursor diffs to
+    // their sole table; multi-input plans need the cursor to say which
+    // table each diff belongs to.
+    let default_table = if plan.inputs.len() == 1 {
+        plan.inputs.first().copied()
+    } else {
+        None
+    };
 
     tokio::spawn(async move {
         let mut cursor = match wal.open_cursor(&query, from_lsn) {
@@ -963,15 +973,29 @@ fn spawn_canonical_pump(
                 return;
             }
             while let Some(transaction) = cursor.next_transaction() {
-                let diffs: Vec<(
+                let mut diffs: Vec<(
                     palimpsest_wal::TableId,
                     palimpsest_dataflow::palimpsest::Row,
                     isize,
-                )> = transaction
-                    .diffs
-                    .iter()
-                    .map(|d| (table_id, d.row.clone(), d.diff as isize))
-                    .collect();
+                )> = Vec::with_capacity(transaction.diffs.len());
+                let mut unattributed = 0_usize;
+                for d in &transaction.diffs {
+                    match d.table.or(default_table) {
+                        Some(table) => diffs.push((table, d.row.clone(), d.diff as isize)),
+                        None => unattributed += 1,
+                    }
+                }
+                if unattributed > 0 {
+                    // A multi-input plan received diffs the cursor
+                    // didn't attribute to a table. Feeding them into
+                    // an arbitrary input would corrupt the dataflow's
+                    // state, so drop them and say so loudly.
+                    warn!(
+                        canonical,
+                        unattributed,
+                        "canonical pump: dropping table-unattributed diffs on multi-table plan",
+                    );
+                }
                 let Some((deltas, subscribers)) =
                     host.apply_and_fanout(&canonical, diffs, transaction.commit_lsn)
                 else {
@@ -989,6 +1013,7 @@ fn spawn_canonical_pump(
                     diffs: deltas
                         .into_iter()
                         .map(|d| RawDiff {
+                            table: None,
                             row: d.row,
                             lsn: d.lsn,
                             diff: i64::from(d.diff as i32),
@@ -1107,7 +1132,12 @@ fn schema_definition_from_plan(
         .map(|(name, ty)| ColumnSpec {
             name: name.clone(),
             datum_type: column_type_to_datum_type(*ty),
-            nullable: false,
+            // Dataflow outputs can carry NULLs the base schema never
+            // would: left-join null extension, SUM/MIN/MAX over empty
+            // or all-null groups, NULL-yielding casts. Declare every
+            // output column nullable so the client-side wire
+            // validation admits them.
+            nullable: true,
         })
         .collect();
     SchemaDefinition {

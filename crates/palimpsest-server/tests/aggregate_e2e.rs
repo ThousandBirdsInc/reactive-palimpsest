@@ -76,6 +76,7 @@ impl TestEventsWal {
 
         self.rows.lock().expect("rows lock").push(row.clone());
         self.journal.lock().expect("journal lock").push(RawDiff {
+            table: None,
             row,
             lsn: new_lsn,
             diff: 1,

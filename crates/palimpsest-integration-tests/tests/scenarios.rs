@@ -126,6 +126,7 @@ async fn scenario_initial_snapshot_then_steady_state_diffs() {
     assert_eq!(lsn, Lsn::new(100));
 
     let mut cursor = VecCursor::new([RawDiff {
+        table: None,
         row: smallvec![Datum::I64(3), Datum::I64(9)],
         lsn: Lsn::new(110),
         diff: 1,
@@ -279,6 +280,7 @@ async fn scenario_channel_saturation_emits_resync() {
 
     // Capacity 1, Initial already queued — the next pump must saturate.
     let mut cursor = VecCursor::new([RawDiff {
+        table: None,
         row: smallvec![Datum::I64(2), Datum::I64(8)],
         lsn: Lsn::new(110),
         diff: 1,

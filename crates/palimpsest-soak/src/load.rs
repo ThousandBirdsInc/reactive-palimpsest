@@ -111,6 +111,7 @@ async fn main() -> ExitCode {
         let pump_start = Instant::now();
         for (sub_id, _) in &subs {
             let mut cursor = VecCursor::new([RawDiff {
+                table: None,
                 row: row.clone(),
                 lsn,
                 diff: 1,

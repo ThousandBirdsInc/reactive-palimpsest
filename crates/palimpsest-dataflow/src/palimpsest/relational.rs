@@ -1,5 +1,6 @@
 //! Relational operator facade for Palimpsest query execution.
 
+use palimpsest_wal::Datum;
 use timely::dataflow::Scope;
 
 use serde::{Deserialize, Serialize};
@@ -151,6 +152,189 @@ where
     })
 }
 
+/// Typed aggregate evaluators for [`aggregate_datums`]. The MIR
+/// compiler picks a variant from the SQL function and its argument's
+/// inferred type; `distinct` collapses multiplicities to one per
+/// value before evaluating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatumAggregate {
+    /// `COUNT`: number of non-null values (`COUNT(*)` feeds a
+    /// non-null placeholder so every row counts).
+    Count {
+        /// Count each distinct value once.
+        distinct: bool,
+    },
+    /// `SUM` over integer inputs → integer result; `NULL` when no
+    /// numeric value contributed.
+    SumInt {
+        /// Sum each distinct value once.
+        distinct: bool,
+    },
+    /// `SUM` over floating-point (or unknown-typed) inputs → float
+    /// result; `NULL` when no numeric value contributed.
+    SumFloat {
+        /// Sum each distinct value once.
+        distinct: bool,
+    },
+    /// `MIN` by SQL ordering, over any datum type.
+    Min,
+    /// `MAX` by SQL ordering, over any datum type.
+    Max,
+    /// `AVG` over numeric inputs → float result; `NULL` when no
+    /// numeric value contributed.
+    Avg {
+        /// Average each distinct value once.
+        distinct: bool,
+    },
+}
+
+/// Grouped typed aggregates: each input row carries one `Datum` per
+/// aggregate (in function order) and `funcs[i]` is evaluated over
+/// column `i`. Nulls are skipped, matching SQL aggregate semantics.
+pub fn aggregate_datums<G, K>(
+    input: &VecCollection<G, (K, Vec<Datum>), isize>,
+    funcs: Vec<DatumAggregate>,
+) -> VecCollection<G, (K, Vec<Datum>), isize>
+where
+    G: Scope<Timestamp: Lattice + Ord>,
+    K: ExchangeData + Hashable,
+{
+    input.reduce(move |_key, values, output| {
+        let aggregates = funcs
+            .iter()
+            .enumerate()
+            .map(|(index, func)| {
+                // The reduce input is consolidated per value *vector*,
+                // so one datum can appear across several entries.
+                // Re-consolidate the single column before evaluating —
+                // MIN / MAX / DISTINCT inspect per-value multiplicity
+                // signs and would otherwise see phantom positives.
+                let mut merged = std::collections::BTreeMap::<&Datum, isize>::new();
+                for (row, diff) in values {
+                    if let Some(datum) = row.get(index) {
+                        *merged.entry(datum).or_default() += *diff;
+                    }
+                }
+                merged.retain(|_, diff| *diff > 0);
+                evaluate_datum_aggregate(*func, &merged)
+            })
+            .collect();
+        output.push((aggregates, 1));
+    })
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn evaluate_datum_aggregate(
+    func: DatumAggregate,
+    column: &std::collections::BTreeMap<&Datum, isize>,
+) -> Datum {
+    use crate::palimpsest::eval::compare_datums_sort;
+
+    fn as_i128(datum: &Datum) -> Option<i128> {
+        match datum {
+            Datum::I64(v) => Some(i128::from(*v)),
+            Datum::I32(v) => Some(i128::from(*v)),
+            Datum::I16(v) => Some(i128::from(*v)),
+            _ => None,
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    fn as_f64(datum: &Datum) -> Option<f64> {
+        match datum {
+            Datum::F64(bits) => Some(f64::from_bits(*bits)),
+            Datum::F32(bits) => Some(f64::from(f32::from_bits(*bits))),
+            Datum::I64(v) => Some(*v as f64),
+            Datum::I32(v) => Some(f64::from(*v)),
+            Datum::I16(v) => Some(f64::from(*v)),
+            _ => None,
+        }
+    }
+    fn saturate(total: i128) -> i64 {
+        if total > i128::from(i64::MAX) {
+            i64::MAX
+        } else if total < i128::from(i64::MIN) {
+            i64::MIN
+        } else {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                total as i64
+            }
+        }
+    }
+    let non_null = || column.iter().filter(|(d, _)| !matches!(d, Datum::Null));
+
+    match func {
+        DatumAggregate::Count { distinct } => {
+            let count: i128 = non_null()
+                .map(|(_, diff)| {
+                    if distinct {
+                        1
+                    } else {
+                        i128::from(*diff as i64)
+                    }
+                })
+                .sum();
+            Datum::I64(saturate(count))
+        }
+        DatumAggregate::SumInt { distinct } => {
+            let mut any = false;
+            let mut total: i128 = 0;
+            for (datum, diff) in non_null() {
+                if let Some(value) = as_i128(datum) {
+                    any = true;
+                    total += value * if distinct { 1 } else { *diff as i128 };
+                }
+            }
+            if any {
+                Datum::I64(saturate(total))
+            } else {
+                Datum::Null
+            }
+        }
+        DatumAggregate::SumFloat { distinct } => {
+            let mut any = false;
+            let mut total = 0.0_f64;
+            for (datum, diff) in non_null() {
+                if let Some(value) = as_f64(datum) {
+                    any = true;
+                    total += value * if distinct { 1.0 } else { *diff as f64 };
+                }
+            }
+            if any {
+                Datum::F64(total.to_bits())
+            } else {
+                Datum::Null
+            }
+        }
+        DatumAggregate::Min => non_null()
+            .map(|(datum, _)| *datum)
+            .min_by(|a, b| compare_datums_sort(a, b))
+            .cloned()
+            .unwrap_or(Datum::Null),
+        DatumAggregate::Max => non_null()
+            .map(|(datum, _)| *datum)
+            .max_by(|a, b| compare_datums_sort(a, b))
+            .cloned()
+            .unwrap_or(Datum::Null),
+        DatumAggregate::Avg { distinct } => {
+            let mut count = 0.0_f64;
+            let mut total = 0.0_f64;
+            for (datum, diff) in non_null() {
+                if let Some(value) = as_f64(datum) {
+                    let weight = if distinct { 1.0 } else { *diff as f64 };
+                    count += weight;
+                    total += value * weight;
+                }
+            }
+            if count == 0.0 {
+                Datum::Null
+            } else {
+                Datum::F64((total / count).to_bits())
+            }
+        }
+    }
+}
+
 fn evaluate_i64_aggregate(func: AggregateFunc, values: &[(&i64, isize)]) -> AggregateValue {
     let positive_values = values
         .iter()
@@ -226,6 +410,100 @@ where
             }
         })
         .map(|(_key, value)| value)
+}
+
+/// Global TopK ordered by a caller-supplied comparator. Like [`topk`]
+/// but the sort order is not the value's natural `Ord` — used for
+/// multi-column `ORDER BY` with per-key directions and SQL null
+/// placement.
+pub fn topk_by<G, D, F>(
+    input: &VecCollection<G, D, isize>,
+    compare: F,
+    limit: usize,
+    offset: usize,
+) -> VecCollection<G, D, isize>
+where
+    G: Scope<Timestamp: Lattice + Ord>,
+    D: ExchangeData + Hashable,
+    F: Fn(&D, &D) -> std::cmp::Ordering + 'static,
+{
+    input
+        .map(|value| ((), value))
+        .reduce(move |_key, values, output| {
+            let mut expanded = Vec::new();
+            for (value, diff) in values {
+                if let Ok(count) = usize::try_from(*diff) {
+                    expanded.extend(std::iter::repeat_with(|| (*value).clone()).take(count));
+                }
+            }
+            expanded.sort_by(|left, right| compare(left, right));
+            for value in expanded.into_iter().skip(offset).take(limit) {
+                output.push((value, 1));
+            }
+        })
+        .map(|(_key, value)| value)
+}
+
+/// Keeps the first value per key, ranked by `compare` (ties keep the
+/// comparator's first minimum). SQL `SELECT DISTINCT ON (...)`.
+pub fn distinct_on_first<G, K, D, F>(
+    input: &VecCollection<G, (K, D), isize>,
+    compare: F,
+) -> VecCollection<G, D, isize>
+where
+    G: Scope<Timestamp: Lattice + Ord>,
+    K: ExchangeData + Hashable,
+    D: ExchangeData,
+    F: Fn(&D, &D) -> std::cmp::Ordering + 'static,
+{
+    input
+        .reduce(move |_key, values, output| {
+            let first = values
+                .iter()
+                .filter(|(_, diff)| *diff > 0)
+                .map(|(value, _)| (*value).clone())
+                .min_by(|left, right| compare(left, right));
+            if let Some(value) = first {
+                output.push((value, 1));
+            }
+        })
+        .map(|(_key, value)| value)
+}
+
+/// Bag-algebra set operation: for each distinct row, emits it with
+/// multiplicity `combine(left_count, right_count)` (non-positive
+/// results emit nothing). `EXCEPT [ALL]` and `INTERSECT [ALL]` are
+/// thin wrappers over this.
+pub fn bag_set_op<G, D, F>(
+    left: &VecCollection<G, D, isize>,
+    right: &VecCollection<G, D, isize>,
+    combine: F,
+) -> VecCollection<G, D, isize>
+where
+    G: Scope<Timestamp: Lattice + Ord>,
+    D: ExchangeData + Hashable,
+    F: Fn(isize, isize) -> isize + 'static,
+{
+    let tagged = left
+        .map(|row| (row, false))
+        .concat(&right.map(|row| (row, true)));
+    tagged
+        .reduce(move |_row, sides, output| {
+            let mut left_count = 0;
+            let mut right_count = 0;
+            for (is_right, diff) in sides {
+                if **is_right {
+                    right_count += *diff;
+                } else {
+                    left_count += *diff;
+                }
+            }
+            let multiplicity = combine(left_count, right_count);
+            if multiplicity > 0 {
+                output.push(((), multiplicity));
+            }
+        })
+        .map(|(row, ())| row)
 }
 
 /// Applies differential's `concat` operator as SQL `UNION ALL`.

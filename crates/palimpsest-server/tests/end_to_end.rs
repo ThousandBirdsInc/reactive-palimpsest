@@ -111,6 +111,7 @@ async fn lifecycle_subscribe_pump_ack_unsubscribe() {
 
     // Push an insert at LSN 110.
     let mut cursor = VecCursor::new([RawDiff {
+        table: None,
         row: smallvec![Datum::I64(3), Datum::I64(9)],
         lsn: Lsn::new(110),
         diff: 1,
@@ -181,6 +182,7 @@ async fn saturated_channel_emits_resync_and_drains() {
     // Capacity is 1 — Initial is already queued. Pump another batch
     // to force saturation.
     let mut cursor = VecCursor::new([RawDiff {
+        table: None,
         row: smallvec![Datum::I64(3), Datum::I64(9)],
         lsn: Lsn::new(110),
         diff: 1,

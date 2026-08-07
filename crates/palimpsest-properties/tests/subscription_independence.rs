@@ -129,11 +129,17 @@ async fn parallel_subscriptions_receive_same_sequence() {
         let lsn = Lsn::new(200 + round);
         let row = smallvec![Datum::I64(round as i64), Datum::I64(7)];
         let mut cursor_a = VecCursor::new([RawDiff {
+            table: None,
             row: row.clone(),
             lsn,
             diff: 1,
         }]);
-        let mut cursor_b = VecCursor::new([RawDiff { row, lsn, diff: 1 }]);
+        let mut cursor_b = VecCursor::new([RawDiff {
+            table: None,
+            row,
+            lsn,
+            diff: 1,
+        }]);
         router
             .pump_cursor(sub_a.subscription_id, &mut cursor_a, &[0])
             .unwrap();

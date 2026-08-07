@@ -287,7 +287,7 @@ mod tests {
             .graph
             .graph()
             .edge_weights()
-            .filter(|edge| matches!(edge, MirEdgeKind::Input))
+            .filter(|edge| matches!(edge, MirEdgeKind::Input(_)))
             .count();
         assert!(input_edge_count >= 2);
     }

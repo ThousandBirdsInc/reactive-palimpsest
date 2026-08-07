@@ -89,11 +89,12 @@ pub struct SubscribeRequest<'a> {
     pub resume_lsn: Option<Lsn>,
     /// Compiled dataflow plan for the (permission-rewritten) query
     /// graph. When present, the router runs the snapshot through the
-    /// dataflow and emits the aggregate result rather than the raw
-    /// table data. Absent for queries the compiler couldn't lower
-    /// (e.g. `Join`, set ops) — those still ship via the v1
-    /// pass-through path **unless row-visibility rules apply to the
-    /// query's tables**, in which case `subscribe` fails closed with
+    /// dataflow and emits the query result rather than the raw table
+    /// data. Absent for the few query shapes the compiler still can't
+    /// lower (`DISTINCT ON`, `EXCEPT` / `INTERSECT`, `WITH RECURSIVE`)
+    /// — those still ship via the v1 pass-through path **unless
+    /// row-visibility rules apply to the query's tables**, in which
+    /// case `subscribe` fails closed with
     /// [`RouterError::PermissionUnenforceable`] (pass-through cannot
     /// enforce the filters).
     ///
@@ -854,11 +855,13 @@ mod tests {
 
         let mut cursor = VecCursor::new([
             RawDiff {
+                table: None,
                 row: smallvec![Datum::I64(1), Datum::I64(99)],
                 lsn: Lsn::new(60),
                 diff: -1,
             },
             RawDiff {
+                table: None,
                 row: smallvec![Datum::I64(1), Datum::I64(100)],
                 lsn: Lsn::new(60),
                 diff: 1,
@@ -1035,6 +1038,97 @@ mod tests {
             )
             .unwrap();
         assert_eq!(response.permission_stats.filters_inserted, 1);
+    }
+
+    /// Schema lookup covering the demo `posts` + `authors` tables, for
+    /// compiling permission-rewritten join plans in tests.
+    fn join_lookup(
+        table: &str,
+    ) -> Option<(TableId, palimpsest_dataflow::palimpsest::eval::ScalarSchema)> {
+        match table {
+            "posts" => posts_lookup(table),
+            "authors" => Some((
+                TableId::new(2),
+                palimpsest_dataflow::palimpsest::eval::ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("name".to_owned(), ColumnType::Text),
+                ]),
+            )),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn join_subscribe_with_visibility_rules_serves_filtered_rows() {
+        // The board-shaped case: a join query on a rule-guarded table.
+        // With the dataflow able to compile joins, the subscribe must
+        // be accepted (no `permission_unenforceable`) and the Initial
+        // must carry only the joined rows the rule admits.
+        let router = SubscriptionRouter::new(RouterConfig::default());
+        let provider = StubProvider {
+            responses: RefCell::new(vec![SnapshotBatch {
+                snapshot_lsn: Lsn::new(50),
+                rows: vec![
+                    SnapshotTableRows {
+                        table: TableId::new(1),
+                        rows: vec![
+                            // (id, author_id): author 7 is ours, 8 is not.
+                            smallvec![Datum::I64(1), Datum::I64(7)],
+                            smallvec![Datum::I64(2), Datum::I64(8)],
+                        ],
+                    },
+                    SnapshotTableRows {
+                        table: TableId::new(2),
+                        rows: vec![
+                            smallvec![Datum::I64(7), Datum::Text("Ada".into())],
+                            smallvec![Datum::I64(8), Datum::Text("Bo".into())],
+                        ],
+                    },
+                ],
+            }]),
+        };
+        let graph = parse_and_lower(
+            "SELECT posts.id, authors.name
+             FROM posts JOIN authors ON posts.author_id = authors.id",
+        )
+        .unwrap();
+        let rules = owner_rules();
+        router.set_rules(rules.clone());
+
+        let user_ctx = UserContext::new([("id".to_owned(), UserValue::Int(7))]);
+        let rewritten = palimpsest_permissions::rewrite(&graph, &rules, &user_ctx)
+            .unwrap()
+            .graph;
+        let plan = palimpsest_dataflow::palimpsest::compile_mir(&rewritten, &join_lookup)
+            .expect("join queries must compile onto the dataflow");
+
+        let response = router
+            .subscribe(
+                SubscribeRequest {
+                    connection: ConnectionId::new(1),
+                    subscription_id: router.allocate_subscription_id(),
+                    client_id: ClientSubscriptionId::new("board"),
+                    query: QueryId::new("board"),
+                    query_graph: &graph,
+                    user_ctx,
+                    schema: schema(),
+                    resume_lsn: None,
+                    compiled_plan: Some(plan),
+                    prerun_initial: None,
+                },
+                &provider,
+            )
+            .expect("join subscribe with compiled plan must not fail closed");
+        assert_eq!(response.permission_stats.filters_inserted, 1);
+
+        let mut stream = response.stream;
+        let event = stream.next().await.expect("initial event");
+        let DiffEvent::Initial { rows, .. } = event else {
+            panic!("expected initial");
+        };
+        let expected: Vec<palimpsest_dataflow::palimpsest::Row> =
+            vec![smallvec![Datum::I64(1), Datum::Text("Ada".into())]];
+        assert_eq!(rows, expected, "only the rule-admitted joined row ships");
     }
 
     #[tokio::test]

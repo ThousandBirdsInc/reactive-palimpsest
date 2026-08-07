@@ -13,6 +13,7 @@
 //! [`batch_by_lsn`] can group them per logical clock tick.
 
 use palimpsest_dataflow::palimpsest::{Lsn, Row};
+use palimpsest_wal::TableId;
 
 use crate::error::RouterError;
 
@@ -23,6 +24,12 @@ use crate::error::RouterError;
 /// `differential-dataflow` exposes through `Cursor::map_times`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawDiff {
+    /// Source table for WAL-derived diffs. `None` for cursors that
+    /// serve a single table (the consumer falls back to the plan's
+    /// sole input) and for dataflow-output deltas, which no longer
+    /// belong to any one base table. Multi-table compiled plans need
+    /// this set to route each diff to the right dataflow input.
+    pub table: Option<TableId>,
     /// Differential row payload.
     pub row: Row,
     /// Logical clock at which the diff occurred.
@@ -214,6 +221,7 @@ mod tests {
 
     fn diff(lsn: u64, value: i64, weight: i64) -> RawDiff {
         RawDiff {
+            table: None,
             row: smallvec![Datum::I64(value)],
             lsn: Lsn::new(lsn),
             diff: weight,

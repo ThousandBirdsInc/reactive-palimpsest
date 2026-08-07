@@ -51,7 +51,7 @@ MirGraph {
             },
             6: Project {
                 columns: [
-                    "post_id",
+                    "recent_posts.id AS post_id",
                     "authors.name",
                 ],
             },
@@ -67,13 +67,25 @@ MirGraph {
             },
         },
         edge weights: {
-            0: Input,
-            1: Input,
+            0: Input(
+                0,
+            ),
+            1: Input(
+                0,
+            ),
             2: CteExpansion,
-            3: Input,
-            4: Input,
-            5: Input,
-            6: Input,
+            3: Input(
+                0,
+            ),
+            4: Input(
+                1,
+            ),
+            5: Input(
+                0,
+            ),
+            6: Input(
+                0,
+            ),
         },
     },
     root: NodeIndex(7),

@@ -11,9 +11,9 @@ query:
              FROM posts JOIN authors ON posts.author_id = authors.id
 
 canonical_before:
-  project:posts.id[input:join:Inner:[(ColumnRef { relation: Some("posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input:base:authors:[][],input:base:posts:[][]]]
+  project:posts.id[input000:join:Inner:[(ColumnRef { relation: Some("posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input000:base:posts:[][],input001:base:authors:[][]]]
 
 canonical_after:
-  project:posts.id[input:join:Inner:[(ColumnRef { relation: Some("posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input:filter:id = 42[input:base:authors:[][]],input:filter:author_id = 42[input:base:posts:[][]]]]
+  project:posts.id[input000:join:Inner:[(ColumnRef { relation: Some("posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input000:filter:author_id = 42[input000:base:posts:[][]],input001:filter:id = 42[input000:base:authors:[][]]]]
 
 stats: RewriteStats { base_tables_visited: 2, filters_inserted: 2, rules_elided: 0 }

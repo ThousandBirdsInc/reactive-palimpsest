@@ -120,7 +120,14 @@ pub enum MirNodeKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MirEdgeKind {
-    Input,
+    /// Dataflow input edge. The payload is the input's position on the
+    /// consuming node (`0` = first/left input), assigned by
+    /// [`MirGraph::add_input`] in call order. Positions — not petgraph
+    /// edge indices, which get recycled by [`MirGraph::splice_above`]'s
+    /// edge removal — are what executors must use to tell a join's
+    /// left side from its right (and a fixpoint's base term from its
+    /// step term).
+    Input(u8),
     CteExpansion,
 }
 
@@ -167,7 +174,16 @@ impl MirGraph {
     }
 
     pub fn add_input(&mut self, from: NodeIndex, to: NodeIndex) {
-        self.graph.add_edge(from, to, MirEdgeKind::Input);
+        let ordinal = self
+            .graph
+            .edges_directed(to, Direction::Incoming)
+            .filter(|edge| matches!(edge.weight(), MirEdgeKind::Input(_)))
+            .count();
+        self.graph.add_edge(
+            from,
+            to,
+            MirEdgeKind::Input(u8::try_from(ordinal).unwrap_or(u8::MAX)),
+        );
     }
 
     pub fn add_cte_expansion(&mut self, from: NodeIndex, to: NodeIndex) {
@@ -226,13 +242,33 @@ impl MirGraph {
             self.graph.add_edge(inserted, consumer, weight);
         }
 
-        self.graph.add_edge(target, inserted, MirEdgeKind::Input);
+        self.graph.add_edge(target, inserted, MirEdgeKind::Input(0));
 
         if self.root == target {
             self.root = inserted;
         }
 
         inserted
+    }
+
+    /// Returns the node's `Input` sources in position order (`0`
+    /// first). This is the only correct way to identify a join's left
+    /// vs right input (or a fixpoint's base vs step term): petgraph
+    /// edge indices are recycled by [`Self::splice_above`]'s edge
+    /// removal, and node indices of spliced filters exceed both
+    /// original inputs'.
+    #[must_use]
+    pub fn ordered_inputs(&self, node: NodeIndex) -> Vec<NodeIndex> {
+        let mut inputs: Vec<(u8, NodeIndex)> = self
+            .graph
+            .edges_directed(node, Direction::Incoming)
+            .filter_map(|edge| match edge.weight() {
+                MirEdgeKind::Input(ordinal) => Some((*ordinal, edge.source())),
+                MirEdgeKind::CteExpansion => None,
+            })
+            .collect();
+        inputs.sort_by_key(|(ordinal, _)| *ordinal);
+        inputs.into_iter().map(|(_, source)| source).collect()
     }
 
     /// Returns every node index whose payload is a `BaseTable`.
@@ -253,5 +289,49 @@ impl MirGraph {
     /// Mutable access to the kind stored at `index`.
     pub fn node_kind_mut(&mut self, index: NodeIndex) -> &mut MirNodeKind {
         &mut self.graph[index]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JoinKind, MirGraph, MirNodeKind};
+
+    fn base(table: &str) -> MirNodeKind {
+        MirNodeKind::BaseTable {
+            table: table.to_owned(),
+            project: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ordered_inputs_survive_splice_above_left_input() {
+        // splice_above removes edges, which recycles petgraph edge
+        // indices, and adds a node with a higher index than either
+        // join input — neither may disturb left/right identity.
+        let mut graph = MirGraph::new(base("left"));
+        let left = graph.root();
+        let right = graph.add_node(base("right"));
+        let join = graph.add_node(MirNodeKind::Join {
+            kind: JoinKind::Left,
+            on: Vec::new(),
+        });
+        graph.add_input(left, join);
+        graph.add_input(right, join);
+        graph.set_root(join);
+
+        assert_eq!(graph.ordered_inputs(join), vec![left, right]);
+
+        let filter = graph.splice_above(
+            left,
+            MirNodeKind::Filter {
+                predicate: "visible = true".to_owned(),
+            },
+        );
+        assert_eq!(
+            graph.ordered_inputs(join),
+            vec![filter, right],
+            "spliced filter must take the left slot"
+        );
+        assert_eq!(graph.ordered_inputs(filter), vec![left]);
     }
 }

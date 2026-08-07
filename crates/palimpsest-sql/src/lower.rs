@@ -163,6 +163,12 @@ fn apply_order_limit(graph: &mut MirGraph, query: &Query) -> Result<(), SqlError
         })
         .collect();
 
+    // ORDER BY may reference columns the projection dropped
+    // (Postgres allows it). When that happens, extend the projection
+    // with hidden sort-key columns and re-project the visible columns
+    // above the TopK.
+    let visible = extend_projection_with_order_keys(graph, &order_by);
+
     let root = graph.root();
     if let MirNodeKind::DistinctOn {
         on,
@@ -191,7 +197,90 @@ fn apply_order_limit(graph: &mut MirGraph, query: &Query) -> Result<(), SqlError
             offset,
         },
     );
+    if let Some(columns) = visible {
+        push_unary(graph, MirNodeKind::Project { columns });
+    }
     Ok(())
+}
+
+/// When an ORDER BY key is not among the projected columns, appends it
+/// to the query's output projection as a hidden column (so downstream
+/// sort operators can read it) and returns the visible column names to
+/// re-project above the sort. `None` when nothing was hidden — or when
+/// the projection's output names cannot be recomputed (wildcards,
+/// unaliased expressions), in which case the caller keeps today's
+/// behaviour.
+fn extend_projection_with_order_keys(
+    graph: &mut MirGraph,
+    order_by: &[OrderKey],
+) -> Option<Vec<String>> {
+    let root = graph.root();
+    let project_node = match graph.node_kind(root) {
+        MirNodeKind::Project { .. } => root,
+        // `SELECT DISTINCT ON` sits directly above its projection and
+        // passes columns through unchanged.
+        MirNodeKind::DistinctOn { .. } => {
+            let input = *graph.ordered_inputs(root).first()?;
+            matches!(graph.node_kind(input), MirNodeKind::Project { .. }).then_some(input)?
+        }
+        _ => return None,
+    };
+    let MirNodeKind::Project { columns } = graph.node_kind(project_node).clone() else {
+        return None;
+    };
+
+    let provided: Vec<Option<String>> = columns.iter().map(|entry| visible_name(entry)).collect();
+    let mut missing: Vec<String> = Vec::new();
+    for key in order_by {
+        let present = columns.contains(&key.expression)
+            || provided
+                .iter()
+                .any(|name| name.as_deref() == Some(key.expression.as_str()));
+        if !present && !missing.contains(&key.expression) {
+            missing.push(key.expression.clone());
+        }
+    }
+    if missing.is_empty() {
+        return None;
+    }
+
+    let visible: Option<Vec<String>> = provided.into_iter().collect();
+    let visible = visible?;
+
+    let MirNodeKind::Project { columns } = graph.node_kind_mut(project_node) else {
+        unreachable!("checked above");
+    };
+    columns.extend(missing);
+    Some(visible)
+}
+
+/// Output name of a projection entry, when it can be recomputed from
+/// the entry text alone: plain identifiers name themselves, qualified
+/// identifiers their trailing segment, and `expr AS alias` entries
+/// their alias. `None` for wildcards and unaliased expression
+/// entries, whose output names are assigned during dataflow
+/// compilation.
+fn visible_name(entry: &str) -> Option<String> {
+    let is_ident = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '"')
+    };
+    if let Some((expr, alias)) = entry.rsplit_once(" AS ") {
+        if is_ident(alias) && !expr.trim().is_empty() {
+            return Some(alias.to_owned());
+        }
+    }
+    if is_ident(entry) {
+        return Some(entry.to_owned());
+    }
+    if let Some((relation, bare)) = entry.split_once('.') {
+        if is_ident(relation) && is_ident(bare) {
+            return Some(bare.to_owned());
+        }
+    }
+    None
 }
 
 #[derive(Debug, Default)]
@@ -295,9 +384,31 @@ fn lower_select_body(select: &Select, context: &LowerContext) -> Result<MirGraph
     }
 
     let group_by = group_by_columns(&select.group_by)?;
-    let aggs = aggregate_exprs(&select.projection)?;
+    let mut aggs = aggregate_exprs(&select.projection)?;
+
+    // HAVING filters the aggregate's output. Aggregate calls inside
+    // the predicate are replaced by references to (possibly hidden)
+    // aggregate output columns, so the filter compiles like any other
+    // — the projection above then drops the hidden columns.
+    let having_predicate = if let Some(having) = &select.having {
+        if contains_exists(having) {
+            return Err(SqlError::UnsupportedFeature("EXISTS inside HAVING"));
+        }
+        let rewritten = rewrite_having_aggregates(having, &mut aggs)?;
+        Some(canonical_predicate(&rewritten))
+    } else {
+        None
+    };
+
     if !group_by.is_empty() || !aggs.is_empty() {
         push_unary(&mut graph, MirNodeKind::Aggregate { group_by, aggs });
+    } else if having_predicate.is_some() {
+        return Err(SqlError::UnsupportedFeature(
+            "HAVING without aggregates or GROUP BY",
+        ));
+    }
+    if let Some(predicate) = having_predicate {
+        push_unary(&mut graph, MirNodeKind::Filter { predicate });
     }
 
     push_unary(
@@ -327,9 +438,6 @@ fn lower_select_body(select: &Select, context: &LowerContext) -> Result<MirGraph
 }
 
 fn reject_select_features_not_lowered(select: &Select) -> Result<(), SqlError> {
-    if select.having.is_some() {
-        return Err(SqlError::UnsupportedFeature("HAVING"));
-    }
     if has_group_by_modifiers(&select.group_by) {
         return Err(SqlError::UnsupportedFeature("GROUP BY modifiers"));
     }
@@ -535,6 +643,83 @@ fn split_exists_terms(expr: &Expr) -> (Vec<ExistsTerm<'_>>, Option<Expr>) {
     (terms, scalar)
 }
 
+/// Rewrites a HAVING predicate so every aggregate call becomes an
+/// identifier naming an aggregate output column. Aggregates that
+/// already appear in the projection with an alias reuse it; anything
+/// else is appended to `aggs` under a synthetic `__having_N` alias
+/// (the projection above the filter drops those hidden columns).
+fn rewrite_having_aggregates(expr: &Expr, aggs: &mut Vec<AggExpr>) -> Result<Expr, SqlError> {
+    fn rewrite(expr: &Expr, aggs: &mut Vec<AggExpr>, hidden: &mut usize) -> Result<Expr, SqlError> {
+        Ok(match expr {
+            Expr::Function(function) => {
+                let Some(mut agg) = aggregate_expr(function, None)? else {
+                    // Non-aggregate call (`coalesce`, ...): keep as-is.
+                    return Ok(expr.clone());
+                };
+                let existing = aggs
+                    .iter()
+                    .find(|candidate| {
+                        candidate.function == agg.function
+                            && candidate.args == agg.args
+                            && candidate.alias.is_some()
+                    })
+                    .and_then(|candidate| candidate.alias.clone());
+                let alias = if let Some(alias) = existing {
+                    alias
+                } else {
+                    *hidden += 1;
+                    let alias = format!("__having_{hidden}");
+                    agg.alias = Some(alias.clone());
+                    aggs.push(agg);
+                    alias
+                };
+                Expr::Identifier(Ident::new(alias))
+            }
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(rewrite(left, aggs, hidden)?),
+                op: op.clone(),
+                right: Box::new(rewrite(right, aggs, hidden)?),
+            },
+            Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(rewrite(inner, aggs, hidden)?),
+            },
+            Expr::Nested(inner) => Expr::Nested(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::IsTrue(inner) => Expr::IsTrue(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::IsFalse(inner) => Expr::IsFalse(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::Between {
+                expr: inner,
+                negated,
+                low,
+                high,
+            } => Expr::Between {
+                expr: Box::new(rewrite(inner, aggs, hidden)?),
+                negated: *negated,
+                low: Box::new(rewrite(low, aggs, hidden)?),
+                high: Box::new(rewrite(high, aggs, hidden)?),
+            },
+            Expr::InList {
+                expr: inner,
+                list,
+                negated,
+            } => Expr::InList {
+                expr: Box::new(rewrite(inner, aggs, hidden)?),
+                list: list
+                    .iter()
+                    .map(|element| rewrite(element, aggs, hidden))
+                    .collect::<Result<_, _>>()?,
+                negated: *negated,
+            },
+            other => other.clone(),
+        })
+    }
+
+    let mut hidden = 0;
+    rewrite(expr, aggs, &mut hidden)
+}
+
 fn contains_exists(expr: &Expr) -> bool {
     struct ExistsFinder;
     impl Visitor for ExistsFinder {
@@ -583,6 +768,11 @@ fn lower_exists_subquery(
                 "GROUP BY inside EXISTS subqueries",
             ));
         }
+    }
+    if select.having.is_some() {
+        return Err(SqlError::UnsupportedFeature(
+            "HAVING inside EXISTS subqueries",
+        ));
     }
 
     let inner_names = relation_names(select);
@@ -862,6 +1052,24 @@ fn canonical_expr(expr: &Expr) -> String {
         Expr::BinaryOp { left, op, right } => {
             format!("{} {op} {}", canonical_expr(left), canonical_expr(right))
         }
+        // The parser reads IS [NOT] DISTINCT FROM's right side as a
+        // *full* expression, so re-parsing `a IS DISTINCT FROM b AND c`
+        // would swallow ` AND c` into the comparison. Self-parenthesize
+        // so canonical conjuncts stay reorderable.
+        Expr::IsDistinctFrom(a, b) => {
+            format!(
+                "({} IS DISTINCT FROM {})",
+                canonical_expr(a),
+                canonical_expr(b)
+            )
+        }
+        Expr::IsNotDistinctFrom(a, b) => {
+            format!(
+                "({} IS NOT DISTINCT FROM {})",
+                canonical_expr(a),
+                canonical_expr(b)
+            )
+        }
         _ => expr.to_string(),
     }
 }
@@ -999,7 +1207,10 @@ fn function_args(args: &FunctionArguments) -> Result<Vec<String>, SqlError> {
 fn select_item_name(item: &SelectItem) -> String {
     match item {
         SelectItem::UnnamedExpr(expr) => expr.to_string(),
-        SelectItem::ExprWithAlias { alias, .. } => alias.to_string(),
+        // Keep the full `expr AS alias` form: the alias alone would
+        // sever the output column from the expression that computes
+        // it. Downstream resolvers split on the trailing ` AS `.
+        SelectItem::ExprWithAlias { expr, alias } => format!("{expr} AS {alias}"),
         SelectItem::QualifiedWildcard(name, _) => format!("{name}.*"),
         SelectItem::Wildcard(_) => "*".to_owned(),
     }
@@ -1071,7 +1282,8 @@ mod tests {
         )));
         assert!(graph.node_kinds().any(|node| matches!(
             node,
-            MirNodeKind::Project { columns } if columns == &vec!["id".to_owned(), "post_title".to_owned()]
+            MirNodeKind::Project { columns }
+                if columns == &vec!["id".to_owned(), "title AS post_title".to_owned()]
         )));
         assert!(graph
             .node_kinds()
@@ -1154,6 +1366,42 @@ mod tests {
                         },
                     ]
         )));
+    }
+
+    #[test]
+    fn lowers_having_to_filter_above_aggregate() {
+        // Aliased aggregates are referenced by alias; aggregates that
+        // appear only in HAVING become hidden output columns.
+        let graph = parse_and_lower(
+            "SELECT author_id, count(*) AS n
+             FROM posts
+             GROUP BY author_id
+             HAVING count(*) > 5 AND sum(id) > 10",
+        )
+        .expect("HAVING should lower");
+
+        let aggregate = graph
+            .node_kinds()
+            .find_map(|node| match node {
+                MirNodeKind::Aggregate { aggs, .. } => Some(aggs.clone()),
+                _ => None,
+            })
+            .expect("aggregate node");
+        assert_eq!(aggregate.len(), 2, "count(*) plus hidden sum(id)");
+        assert_eq!(aggregate[1].alias.as_deref(), Some("__having_1"));
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Filter { predicate }
+                if predicate.contains('n') && predicate.contains("__having_1")
+        )));
+    }
+
+    #[test]
+    fn rejects_having_without_aggregates_or_group_by() {
+        let err = parse_and_lower("SELECT id FROM posts HAVING true")
+            .expect_err("HAVING without aggregates or grouping is rejected");
+        assert!(err.to_string().contains("HAVING"));
     }
 
     #[test]
@@ -1364,9 +1612,40 @@ mod tests {
                         },
                     ]
         )));
+        // `created_at` is not projected, so the projection grows a
+        // hidden sort column and a visible re-projection sits above
+        // the TopK.
         assert!(matches!(
             graph.root_kind(),
-            MirNodeKind::TopK { limit: 5, .. }
+            MirNodeKind::Project { columns }
+                if columns == &vec!["id".to_owned(), "author_id".to_owned()]
+        ));
+        assert!(graph
+            .node_kinds()
+            .any(|node| matches!(node, MirNodeKind::TopK { limit: 5, .. })));
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Project { columns }
+                if columns
+                    == &vec!["id".to_owned(), "author_id".to_owned(), "created_at".to_owned()]
+        )));
+    }
+
+    #[test]
+    fn lowers_hidden_order_keys_for_unprojected_columns() {
+        let graph = parse_and_lower("SELECT id FROM posts ORDER BY created_at DESC LIMIT 3")
+            .expect("ORDER BY over a non-projected column should lower");
+
+        // Inner projection carries the hidden key; the root
+        // re-projects the visible column above the TopK.
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Project { columns }
+                if columns == &vec!["id".to_owned(), "created_at".to_owned()]
+        )));
+        assert!(matches!(
+            graph.root_kind(),
+            MirNodeKind::Project { columns } if columns == &vec!["id".to_owned()]
         ));
     }
 

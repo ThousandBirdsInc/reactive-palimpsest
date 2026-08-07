@@ -180,11 +180,9 @@ impl ReferenceExecutor {
                 sort_records(&mut records, order_by);
                 records.into_iter().skip(*offset).take(*limit).collect()
             }
-            MirNodeKind::CteRef { .. } => {
-                self.single_input_by_edge(graph, node, MirEdgeKind::CteExpansion, env)
-            }
+            MirNodeKind::CteRef { .. } => self.cte_expansion_input(graph, node, env),
             MirNodeKind::Fixpoint { cte, union_all } => {
-                let inputs = input_nodes(graph, node, MirEdgeKind::Input);
+                let inputs = graph.ordered_inputs(node);
                 let [base, step] = inputs.as_slice() else {
                     return Vec::new();
                 };
@@ -261,21 +259,25 @@ impl ReferenceExecutor {
     }
 
     fn single_input(&self, graph: &MirGraph, node: NodeIndex, env: &RecursiveEnv) -> Vec<Record> {
-        let inputs = input_nodes(graph, node, MirEdgeKind::Input);
+        let inputs = graph.ordered_inputs(node);
         let [input] = inputs.as_slice() else {
             return Vec::new();
         };
         self.execute_records(graph, *input, env)
     }
 
-    fn single_input_by_edge(
+    fn cte_expansion_input(
         &self,
         graph: &MirGraph,
         node: NodeIndex,
-        edge: MirEdgeKind,
         env: &RecursiveEnv,
     ) -> Vec<Record> {
-        let inputs = input_nodes(graph, node, edge);
+        let inputs: Vec<NodeIndex> = graph
+            .graph()
+            .edges_directed(node, Direction::Incoming)
+            .filter(|edge| matches!(edge.weight(), MirEdgeKind::CteExpansion))
+            .map(|edge| edge.source())
+            .collect();
         let [input] = inputs.as_slice() else {
             return Vec::new();
         };
@@ -288,7 +290,7 @@ impl ReferenceExecutor {
         node: NodeIndex,
         env: &RecursiveEnv,
     ) -> [Vec<Record>; 2] {
-        let inputs = input_nodes(graph, node, MirEdgeKind::Input);
+        let inputs = graph.ordered_inputs(node);
         let [left, right] = inputs.as_slice() else {
             return [Vec::new(), Vec::new()];
         };
@@ -386,36 +388,56 @@ pub fn fixture_line_count_within_budget(contents: &str, max_lines: usize) -> boo
     contents.lines().count() <= max_lines
 }
 
-fn input_nodes(graph: &MirGraph, node: NodeIndex, edge: MirEdgeKind) -> Vec<NodeIndex> {
-    let mut nodes = graph
-        .graph()
-        .edges_directed(node, Direction::Incoming)
-        .filter(|candidate| *candidate.weight() == edge)
-        .map(|candidate| candidate.source())
-        .collect::<Vec<_>>();
-    nodes.sort_by_key(|node| node.index());
-    nodes
-}
-
 fn project_record(record: &Record, columns: &[String]) -> Record {
-    let values = columns
-        .iter()
-        .map(|column| value_for_expr(record, column).unwrap_or_default())
-        .collect::<Vec<_>>();
+    let mut values = Vec::with_capacity(columns.len());
     let mut attrs = BTreeMap::new();
-    for (column, value) in columns.iter().zip(&values) {
-        // A projection starts a fresh (anonymous) relation: a
-        // projected `relation.column` is addressable downstream only
-        // by its output name (the trailing segment), matching SQL.
-        // Keeping source-qualified keys would leak stale bindings into
-        // later joins against the same base relation (e.g. recursive
-        // steps).
-        let name = column
-            .rsplit_once('.')
-            .map_or(column.as_str(), |(_, bare)| bare);
+    for column in columns {
+        // `expr AS alias` entries: the alias names the output; the
+        // value comes from the alias attribute when the input already
+        // carries it (aggregate outputs) or from the expression.
+        let (name, value) = match split_alias(column) {
+            // Aliased entries: the alias attribute wins when the input
+            // already carries it (aggregate outputs), else the
+            // expression computes the value.
+            Some((expr, alias)) => {
+                let value = record
+                    .attrs
+                    .get(alias)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| value_for_expr(record, expr));
+                (alias, value)
+            }
+            // A projection starts a fresh (anonymous) relation: a
+            // projected `relation.column` is addressable downstream
+            // only by its output name (the trailing segment), matching
+            // SQL. Keeping source-qualified keys would leak stale
+            // bindings into later joins against the same base relation
+            // (e.g. recursive steps).
+            None => (
+                column
+                    .rsplit_once('.')
+                    .map_or(column.as_str(), |(_, bare)| bare),
+                value_for_expr(record, column),
+            ),
+        };
+        let value = value.unwrap_or_default();
         attrs.insert(name.to_owned(), Some(value.clone()));
+        values.push(value);
     }
     Record { values, attrs }
+}
+
+/// Splits the lowering's `expr AS alias` projection form (the alias is
+/// always a plain identifier and ` AS ` cannot occur at an
+/// expression's top level, so the last occurrence separates).
+fn split_alias(entry: &str) -> Option<(&str, &str)> {
+    let (expr, alias) = entry.rsplit_once(" AS ")?;
+    let ident = !alias.is_empty()
+        && alias
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '"');
+    (ident && !expr.trim().is_empty()).then_some((expr.trim(), alias))
 }
 
 fn join_records(
@@ -476,17 +498,42 @@ fn aggregate_records(
     groups
         .into_iter()
         .map(|(key, rows)| {
-            let mut values = key
-                .into_iter()
-                .map(std::option::Option::unwrap_or_default)
-                .collect::<Row>();
-            values.extend(aggs.iter().map(|agg| eval_agg(agg, &rows)));
-            Record {
-                values,
-                attrs: BTreeMap::new(),
+            // Expose named attributes so downstream operators (a
+            // HAVING filter, projections referencing aggregate output
+            // columns) can resolve values by name.
+            let mut attrs = BTreeMap::new();
+            let mut values = Row::new();
+            for (column, value) in group_by.iter().zip(&key) {
+                values.push(value.clone().unwrap_or_default());
+                attrs.insert(column.name.clone(), value.clone());
+                if let Some(relation) = &column.relation {
+                    attrs.insert(format!("{relation}.{}", column.name), value.clone());
+                }
             }
+            for agg in aggs {
+                let value = eval_agg(agg, &rows);
+                attrs.insert(aggregate_output_name(agg), Some(value.clone()));
+                values.push(value);
+            }
+            Record { values, attrs }
         })
         .collect()
+}
+
+/// Output-column name for an aggregate: its alias when present,
+/// otherwise its display text (`count(*)`), matching the dataflow
+/// compiler's naming.
+fn aggregate_output_name(agg: &AggExpr) -> String {
+    if let Some(alias) = &agg.alias {
+        return alias.clone();
+    }
+    let distinct = agg.args.first().is_some_and(|arg| arg == "DISTINCT");
+    let args = &agg.args[usize::from(distinct)..];
+    if distinct {
+        format!("{}(DISTINCT {})", agg.function, args.join(", "))
+    } else {
+        format!("{}({})", agg.function, args.join(", "))
+    }
 }
 
 fn distinct_records(records: Vec<Record>) -> Vec<Record> {
