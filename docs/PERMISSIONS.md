@@ -116,12 +116,14 @@ literals), equi-joins (inner / left / semi / anti), `DISTINCT` and
 `DISTINCT ON`, all set operations, aggregates (multi- and zero-column
 `GROUP BY`, `HAVING`, `DISTINCT` aggregates, typed `SUM`/`MIN`/`MAX`),
 multi-key ordering with hidden sort columns, and recursive CTEs
-(`UNION` and `UNION ALL`). The pass-through path remains only as a
-safety net for scalar operators outside the expression evaluator
-(e.g. `LIKE` — see `supported-sql.md`), and it cannot enforce
-filters. When a row-visibility rule applies to any table such a query
-reads, the subscribe **fails closed**: the server rejects it with
-`permission_unenforceable` rather than serving unfiltered rows.
+(`UNION` and `UNION ALL`). Scalar operators the evaluator does not
+implement are rejected at parse time (see `supported-sql.md`), so an
+accepted query always carries a compiled — and therefore
+filter-enforcing — plan. The pass-through path survives only as a
+defensive fail-safe: if a query ever reached it while a
+row-visibility rule applies to any table it reads, the subscribe
+**fails closed** with `permission_unenforceable` rather than serving
+unfiltered rows.
 Tautological rules (`predicate = "true"`) and `mode = "subscribe"`
 rules splice no filter, so they don't block pass-through.
 

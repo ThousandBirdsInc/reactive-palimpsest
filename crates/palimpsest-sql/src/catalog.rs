@@ -33,6 +33,42 @@ pub enum ColumnType {
 }
 
 impl ColumnType {
+    /// Maps a SQL cast target onto the engine's coarse type taxonomy.
+    /// `None` for types the expression evaluator can't produce — the
+    /// parser rejects those casts up front, and the evaluator uses the
+    /// same mapping to build the conversion.
+    #[must_use]
+    pub fn from_cast_target(data_type: &sqlparser::ast::DataType) -> Option<Self> {
+        use sqlparser::ast::DataType;
+        Some(match data_type {
+            DataType::Text
+            | DataType::String(_)
+            | DataType::Varchar(_)
+            | DataType::CharVarying(_)
+            | DataType::CharacterVarying(_)
+            | DataType::Char(_)
+            | DataType::Character(_) => Self::Text,
+            DataType::TinyInt(_)
+            | DataType::SmallInt(_)
+            | DataType::Int2(_)
+            | DataType::Int(_)
+            | DataType::Int4(_)
+            | DataType::Integer(_)
+            | DataType::BigInt(_)
+            | DataType::Int8(_) => Self::Int,
+            DataType::Real
+            | DataType::Float4
+            | DataType::Float8
+            | DataType::Float(_)
+            | DataType::Double
+            | DataType::DoublePrecision => Self::Float,
+            DataType::Bool | DataType::Boolean => Self::Bool,
+            DataType::Uuid => Self::Uuid,
+            DataType::JSON | DataType::JSONB => Self::Jsonb,
+            _ => return None,
+        })
+    }
+
     /// True for [`Self::Int`] and [`Self::Float`].
     #[must_use]
     pub const fn is_numeric(self) -> bool {

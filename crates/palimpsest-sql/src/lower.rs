@@ -229,9 +229,14 @@ fn extend_projection_with_order_keys(
         return None;
     };
 
+    let provided: Vec<Option<String>> = columns.iter().map(|entry| visible_name(entry)).collect();
     let mut missing: Vec<String> = Vec::new();
     for key in order_by {
-        if !columns.contains(&key.expression) && !missing.contains(&key.expression) {
+        let present = columns.contains(&key.expression)
+            || provided
+                .iter()
+                .any(|name| name.as_deref() == Some(key.expression.as_str()));
+        if !present && !missing.contains(&key.expression) {
             missing.push(key.expression.clone());
         }
     }
@@ -239,7 +244,7 @@ fn extend_projection_with_order_keys(
         return None;
     }
 
-    let visible: Option<Vec<String>> = columns.iter().map(|entry| visible_name(entry)).collect();
+    let visible: Option<Vec<String>> = provided.into_iter().collect();
     let visible = visible?;
 
     let MirNodeKind::Project { columns } = graph.node_kind_mut(project_node) else {
@@ -251,9 +256,10 @@ fn extend_projection_with_order_keys(
 
 /// Output name of a projection entry, when it can be recomputed from
 /// the entry text alone: plain identifiers name themselves, qualified
-/// identifiers their trailing segment, aliased entries already carry
-/// the alias. `None` for wildcards and expression entries, whose
-/// output names are assigned during dataflow compilation.
+/// identifiers their trailing segment, and `expr AS alias` entries
+/// their alias. `None` for wildcards and unaliased expression
+/// entries, whose output names are assigned during dataflow
+/// compilation.
 fn visible_name(entry: &str) -> Option<String> {
     let is_ident = |part: &str| {
         !part.is_empty()
@@ -261,6 +267,11 @@ fn visible_name(entry: &str) -> Option<String> {
                 .chars()
                 .all(|c| c.is_alphanumeric() || c == '_' || c == '"')
     };
+    if let Some((expr, alias)) = entry.rsplit_once(" AS ") {
+        if is_ident(alias) && !expr.trim().is_empty() {
+            return Some(alias.to_owned());
+        }
+    }
     if is_ident(entry) {
         return Some(entry.to_owned());
     }
@@ -1041,6 +1052,24 @@ fn canonical_expr(expr: &Expr) -> String {
         Expr::BinaryOp { left, op, right } => {
             format!("{} {op} {}", canonical_expr(left), canonical_expr(right))
         }
+        // The parser reads IS [NOT] DISTINCT FROM's right side as a
+        // *full* expression, so re-parsing `a IS DISTINCT FROM b AND c`
+        // would swallow ` AND c` into the comparison. Self-parenthesize
+        // so canonical conjuncts stay reorderable.
+        Expr::IsDistinctFrom(a, b) => {
+            format!(
+                "({} IS DISTINCT FROM {})",
+                canonical_expr(a),
+                canonical_expr(b)
+            )
+        }
+        Expr::IsNotDistinctFrom(a, b) => {
+            format!(
+                "({} IS NOT DISTINCT FROM {})",
+                canonical_expr(a),
+                canonical_expr(b)
+            )
+        }
         _ => expr.to_string(),
     }
 }
@@ -1178,7 +1207,10 @@ fn function_args(args: &FunctionArguments) -> Result<Vec<String>, SqlError> {
 fn select_item_name(item: &SelectItem) -> String {
     match item {
         SelectItem::UnnamedExpr(expr) => expr.to_string(),
-        SelectItem::ExprWithAlias { alias, .. } => alias.to_string(),
+        // Keep the full `expr AS alias` form: the alias alone would
+        // sever the output column from the expression that computes
+        // it. Downstream resolvers split on the trailing ` AS `.
+        SelectItem::ExprWithAlias { expr, alias } => format!("{expr} AS {alias}"),
         SelectItem::QualifiedWildcard(name, _) => format!("{name}.*"),
         SelectItem::Wildcard(_) => "*".to_owned(),
     }
@@ -1250,7 +1282,8 @@ mod tests {
         )));
         assert!(graph.node_kinds().any(|node| matches!(
             node,
-            MirNodeKind::Project { columns } if columns == &vec!["id".to_owned(), "post_title".to_owned()]
+            MirNodeKind::Project { columns }
+                if columns == &vec!["id".to_owned(), "title AS post_title".to_owned()]
         )));
         assert!(graph
             .node_kinds()

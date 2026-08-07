@@ -20,16 +20,14 @@ column for each:
   MIR compiler) can execute the lowered MIR, so results are computed
   server-side and updated by WAL diffs.
 
-The two are **not** the same surface. A query that parses but does not
-compile onto the dataflow is served by the v1 *pass-through* path: the
-server ships the referenced base tables' snapshot rows and raw WAL
-diffs verbatim, **without applying the query's operators server-side**.
-Every relational shape the frontend accepts now compiles; the fallback
-remains only as a safety net for scalar expressions outside the
-evaluator's operator surface (e.g. `LIKE`, which the evaluator does
-not implement — see the `WHERE` row for the supported operators) and
-for a projection wildcard combined with an expression-valued `ORDER BY`
-key that the projection does not carry. Server-side permission row filters are part
+The two surfaces are now **aligned**: the frontend rejects — at parse
+time, with a named error — every scalar operator and function the
+expression evaluator does not implement, so a query that is accepted
+always compiles onto the dataflow. The v1 *pass-through* path (raw
+snapshot rows and WAL diffs, no server-side operators) is no longer
+reachable from an accepted query; it survives in the code as a
+defensive fail-safe only, and rule-guarded queries reaching it would
+still fail closed. Server-side permission row filters are part
 of the compiled dataflow, so pass-through cannot enforce them — for
 that reason a subscribe **fails closed** when row-visibility rules
 apply to any table the query reads and no compiled plan exists: the
@@ -37,12 +35,13 @@ server rejects it with the `permission_unenforceable` error code
 instead of serving unfiltered rows. "Parses: yes / Evaluates: no" rows
 are therefore only reachable for tables with no row-visibility rules.
 
-Scalar functions are the one place the two surfaces are forced to
-agree at parse time: any function call outside the evaluable
-allowlist (`count`, `sum`, `min`, `max`, `avg`, `coalesce`,
-`cardinality`) is rejected by the frontend with
-`SqlError::UnsupportedFunction` instead of being accepted and never
-evaluated.
+The alignment is enforced in `parse_select`'s expression validator:
+function calls outside the evaluable allowlist (`count`, `sum`,
+`min`, `max`, `avg`, `coalesce`, `cardinality`) are rejected with
+`SqlError::UnsupportedFunction`, and operator forms outside the
+evaluator's surface (regex matches, `SIMILAR TO`, `INTERVAL`
+literals, bitwise operators, ...) with named `UnsupportedFeature`
+errors — instead of being accepted and never evaluated.
 
 ## Support Table
 
@@ -54,7 +53,7 @@ above). A dash means the row never reaches that gate.
 | Single `SELECT` query | Yes | Yes | Non-query statements and multi-statement inputs are rejected. |
 | `WITH name AS (...)` | Yes | Yes | Non-recursive CTEs lower to `CteRef` placeholders plus expansion edges. |
 | `WITH RECURSIVE` | Yes | Yes | Self-referential CTEs must be `base UNION [ALL] step` with exactly one self-reference in the step term (linear recursion). `UNION` recursion converges on the distinct set; `UNION ALL` recursion circulates per-iteration waves and accumulates them — over cyclic data it does not terminate, exactly as in Postgres. An earlier recursive CTE may be used inside a later recursive step; it is hoisted out of the iteration as a loop-invariant input. |
-| Projection expressions | Yes | Yes | Column references, aliases, casts, arithmetic, `coalesce`, `cardinality`, and literals (including bare `NULL`) evaluate. Output types are inferred; a column whose type cannot be inferred is advertised permissively and its datums describe themselves on the wire. |
+| Projection expressions | Yes | Yes | Column references, aliases (including aliased expressions — `CASE ... AS state`, `expr::text AS x`), casts, arithmetic, `||` concatenation, `CASE`, `coalesce`, `cardinality`, and literals (including bare `NULL`) evaluate. Output types are inferred; a column whose type cannot be inferred is advertised permissively and its datums describe themselves on the wire. |
 | `*` and `relation.*` | Yes | Yes | Expanded at compile time against the input schema; `relation.*` resolves through per-column provenance, so it also works on join outputs. |
 | `FROM table` | Yes | Yes | Table names lower to `BaseTable` MIR nodes. |
 | Derived tables | Yes | Partial | Subqueries in `FROM (...) AS alias` lower through the nested query path; they evaluate when every lowered operator is a compiled one. |
@@ -67,7 +66,7 @@ above). A dash means the row never reaches that gate.
 | `JOIN ... USING`, natural joins, joins without `ON` | Rejected during lowering | — | The parser validator permits some forms, but MIR lowering requires `ON`. |
 | `CROSS JOIN` | Rejected during lowering | — | Cross products are not in the Phase 1 MIR subset. |
 | Theta joins | Rejected | — | Join predicates must be equality predicates over column references. |
-| `WHERE` | Yes | Yes | Predicates are retained as canonicalized strings and compiled by the expression evaluator (boolean logic, comparisons, arithmetic, `[NOT] IN (list)`, `[NOT] BETWEEN`, `IS [NOT] NULL`, `ANY(array)`, casts, `coalesce`, `cardinality`). |
+| `WHERE` | Yes | Yes | Predicates are retained as canonicalized strings and compiled by the expression evaluator: boolean logic, comparisons, arithmetic, `||`, `[NOT] IN (list)`, `[NOT] BETWEEN`, `[NOT] [I]LIKE` (with `%` / `_` and escape characters), `IS [NOT] NULL`, `IS [NOT] DISTINCT FROM`, `CASE`, `ANY(array)` (both `ARRAY[...]` and `'{...}'` literal forms), casts, `coalesce`, `cardinality`. Operators outside this set are rejected at parse time. |
 | `[NOT] EXISTS (...)` | Yes | Yes | Correlated `EXISTS` conjuncts in `WHERE` lower to semi/anti joins on the correlation columns and compile onto the dataflow (each left row emitted at most once, regardless of match count); uncorrelated `EXISTS` and `EXISTS` under `OR` are rejected. |
 | Scalar and `IN` subqueries | Rejected | — | Subquery expressions are rejected as unbounded scalar subqueries. |
 | Window functions | Rejected | — | Any function with an `OVER` clause is rejected. |

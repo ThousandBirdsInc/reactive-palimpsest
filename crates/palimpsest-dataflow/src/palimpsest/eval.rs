@@ -213,6 +213,7 @@ fn infer_type(expr: &Expr, schema: &ScalarSchema) -> ColumnType {
                     _ => ColumnType::Unknown,
                 }
             }
+            BinaryOperator::StringConcat => ColumnType::Text,
             _ => ColumnType::Unknown,
         },
         Expr::UnaryOp { op, expr: inner } => match op {
@@ -224,9 +225,23 @@ fn infer_type(expr: &Expr, schema: &ScalarSchema) -> ColumnType {
         | Expr::IsNotNull(_)
         | Expr::IsTrue(_)
         | Expr::IsFalse(_)
+        | Expr::IsDistinctFrom(..)
+        | Expr::IsNotDistinctFrom(..)
         | Expr::AnyOp { .. }
         | Expr::InList { .. }
-        | Expr::Between { .. } => ColumnType::Bool,
+        | Expr::Between { .. }
+        | Expr::Like { .. }
+        | Expr::ILike { .. } => ColumnType::Bool,
+        Expr::Case {
+            results,
+            else_result,
+            ..
+        } => results
+            .iter()
+            .chain(else_result.as_deref())
+            .map(|branch| infer_type(branch, schema))
+            .find(|ty| *ty != ColumnType::Unknown)
+            .unwrap_or(ColumnType::Unknown),
         Expr::Cast { data_type, .. } => cast_target_type(data_type).unwrap_or(ColumnType::Unknown),
         Expr::Function(function) => {
             let name = function.name.to_string().to_ascii_lowercase();
@@ -421,9 +436,232 @@ fn compile_inner(expr: &Expr, schema: &ScalarSchema) -> Result<ScalarFn, EvalErr
                 Datum::Bool(within != negated)
             }))
         }
+        Expr::Like {
+            negated,
+            any: false,
+            expr: subject,
+            pattern,
+            escape_char,
+        } => like_scalar(
+            subject,
+            pattern,
+            escape_char.as_deref(),
+            *negated,
+            false,
+            schema,
+        ),
+        Expr::ILike {
+            negated,
+            any: false,
+            expr: subject,
+            pattern,
+            escape_char,
+        } => like_scalar(
+            subject,
+            pattern,
+            escape_char.as_deref(),
+            *negated,
+            true,
+            schema,
+        ),
+        Expr::IsDistinctFrom(left, right) => {
+            let l = compile_inner(left, schema)?;
+            let r = compile_inner(right, schema)?;
+            Ok(Box::new(move |row| {
+                Datum::Bool(!null_safe_eq(&l(row), &r(row)))
+            }))
+        }
+        Expr::IsNotDistinctFrom(left, right) => {
+            let l = compile_inner(left, schema)?;
+            let r = compile_inner(right, schema)?;
+            Ok(Box::new(move |row| {
+                Datum::Bool(null_safe_eq(&l(row), &r(row)))
+            }))
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => case_scalar(
+            operand.as_deref(),
+            conditions,
+            results,
+            else_result.as_deref(),
+            schema,
+        ),
+        Expr::Array(array) => {
+            let elements: Vec<ScalarFn> = array
+                .elem
+                .iter()
+                .map(|element| compile_inner(element, schema))
+                .collect::<Result<_, _>>()?;
+            Ok(Box::new(move |row| {
+                Datum::Array(elements.iter().map(|element| element(row)).collect())
+            }))
+        }
         Expr::Function(function) => function_scalar(function, schema),
         other => Err(EvalError::Unsupported(format!("{other:?}"))),
     }
+}
+
+/// SQL `IS [NOT] DISTINCT FROM`: null-safe equality — two NULLs are
+/// "not distinct", a NULL and a value are distinct.
+fn null_safe_eq(a: &Datum, b: &Datum) -> bool {
+    match (matches!(a, Datum::Null), matches!(b, Datum::Null)) {
+        (true, true) => true,
+        (true, false) | (false, true) => false,
+        (false, false) => datum_eq(a, b),
+    }
+}
+
+/// `[NOT] [I]LIKE` with `%` / `_` wildcards and an escape character
+/// (Postgres defaults to backslash). NULL subject or pattern filters
+/// the row, matching WHERE semantics.
+fn like_scalar(
+    subject: &Expr,
+    pattern: &Expr,
+    escape_char: Option<&str>,
+    negated: bool,
+    case_insensitive: bool,
+    schema: &ScalarSchema,
+) -> Result<ScalarFn, EvalError> {
+    let subject = compile_inner(subject, schema)?;
+    let pattern = compile_inner(pattern, schema)?;
+    let escape = match escape_char {
+        None => Some('\\'),
+        Some(text) => {
+            let mut chars = text.chars();
+            let first = chars.next();
+            if chars.next().is_some() {
+                return Err(EvalError::Unsupported(format!(
+                    "multi-character LIKE escape {text:?}"
+                )));
+            }
+            // `ESCAPE ''` disables escaping in Postgres.
+            first
+        }
+    };
+    Ok(Box::new(move |row| {
+        let (Datum::Text(subject), Datum::Text(pattern)) = (subject(row), pattern(row)) else {
+            return Datum::Bool(false);
+        };
+        let (Ok(subject), Ok(pattern)) =
+            (std::str::from_utf8(&subject), std::str::from_utf8(&pattern))
+        else {
+            return Datum::Bool(false);
+        };
+        let matched = if case_insensitive {
+            like_match(&subject.to_lowercase(), &pattern.to_lowercase(), escape)
+        } else {
+            like_match(subject, pattern, escape)
+        };
+        Datum::Bool(matched != negated)
+    }))
+}
+
+/// SQL LIKE matching: `%` matches any sequence, `_` any single
+/// character, and `escape` makes the following character literal.
+fn like_match(subject: &str, pattern: &str, escape: Option<char>) -> bool {
+    #[derive(PartialEq)]
+    enum Token {
+        AnyRun,
+        AnyOne,
+        Literal(char),
+    }
+    let mut tokens = Vec::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if Some(c) == escape {
+            match chars.next() {
+                Some(escaped) => tokens.push(Token::Literal(escaped)),
+                // Trailing escape matches nothing in Postgres; treat
+                // it as a literal escape character.
+                None => tokens.push(Token::Literal(c)),
+            }
+        } else if c == '%' {
+            if tokens.last() != Some(&Token::AnyRun) {
+                tokens.push(Token::AnyRun);
+            }
+        } else if c == '_' {
+            tokens.push(Token::AnyOne);
+        } else {
+            tokens.push(Token::Literal(c));
+        }
+    }
+
+    // Classic two-pointer wildcard match with backtracking on `%`.
+    let subject: Vec<char> = subject.chars().collect();
+    let (mut s, mut p) = (0_usize, 0_usize);
+    let (mut star, mut star_s) = (None::<usize>, 0_usize);
+    while s < subject.len() {
+        match tokens.get(p) {
+            Some(Token::Literal(c)) if *c == subject[s] => {
+                s += 1;
+                p += 1;
+            }
+            Some(Token::AnyOne) => {
+                s += 1;
+                p += 1;
+            }
+            Some(Token::AnyRun) => {
+                star = Some(p);
+                star_s = s;
+                p += 1;
+            }
+            _ => {
+                let Some(star_p) = star else { return false };
+                star_s += 1;
+                s = star_s;
+                p = star_p + 1;
+            }
+        }
+    }
+    while tokens.get(p) == Some(&Token::AnyRun) {
+        p += 1;
+    }
+    p == tokens.len()
+}
+
+/// `CASE` in both forms: `CASE x WHEN v THEN ...` compares the operand
+/// against each branch value; `CASE WHEN cond THEN ...` evaluates each
+/// condition as a predicate. No matching branch yields the ELSE value
+/// or NULL.
+fn case_scalar(
+    operand: Option<&Expr>,
+    conditions: &[Expr],
+    results: &[Expr],
+    else_result: Option<&Expr>,
+    schema: &ScalarSchema,
+) -> Result<ScalarFn, EvalError> {
+    let operand = operand
+        .map(|expr| compile_inner(expr, schema))
+        .transpose()?;
+    let conditions: Vec<ScalarFn> = conditions
+        .iter()
+        .map(|expr| compile_inner(expr, schema))
+        .collect::<Result<_, _>>()?;
+    let results: Vec<ScalarFn> = results
+        .iter()
+        .map(|expr| compile_inner(expr, schema))
+        .collect::<Result<_, _>>()?;
+    let else_result = else_result
+        .map(|expr| compile_inner(expr, schema))
+        .transpose()?;
+    Ok(Box::new(move |row| {
+        for (condition, result) in conditions.iter().zip(&results) {
+            let hit = match &operand {
+                Some(operand) => datum_eq(&operand(row), &condition(row)),
+                None => matches!(condition(row), Datum::Bool(true)),
+            };
+            if hit {
+                return result(row);
+            }
+        }
+        else_result
+            .as_ref()
+            .map_or(Datum::Null, |result| result(row))
+    }))
 }
 
 /// SQL `ORDER BY` comparison across datums. `NULL` compares greater
@@ -477,35 +715,10 @@ pub fn compare_datums_sort(a: &Datum, b: &Datum) -> std::cmp::Ordering {
 }
 
 /// Maps a SQL cast target onto the engine's coarse [`ColumnType`]
-/// taxonomy. `None` for types the evaluator can't produce.
+/// taxonomy — shared with the parser's expression gate so the
+/// accepted cast surface and the evaluable one stay identical.
 fn cast_target_type(data_type: &DataType) -> Option<ColumnType> {
-    Some(match data_type {
-        DataType::Text
-        | DataType::String(_)
-        | DataType::Varchar(_)
-        | DataType::CharVarying(_)
-        | DataType::CharacterVarying(_)
-        | DataType::Char(_)
-        | DataType::Character(_) => ColumnType::Text,
-        DataType::TinyInt(_)
-        | DataType::SmallInt(_)
-        | DataType::Int2(_)
-        | DataType::Int(_)
-        | DataType::Int4(_)
-        | DataType::Integer(_)
-        | DataType::BigInt(_)
-        | DataType::Int8(_) => ColumnType::Int,
-        DataType::Real
-        | DataType::Float4
-        | DataType::Float8
-        | DataType::Float(_)
-        | DataType::Double
-        | DataType::DoublePrecision => ColumnType::Float,
-        DataType::Bool | DataType::Boolean => ColumnType::Bool,
-        DataType::Uuid => ColumnType::Uuid,
-        DataType::JSON | DataType::JSONB => ColumnType::Jsonb,
-        _ => return None,
-    })
+    ColumnType::from_cast_target(data_type)
 }
 
 /// Runtime cast with Postgres-flavoured conversions. Total: values a
@@ -619,6 +832,14 @@ fn any_scalar(
             .iter()
             .map(|element| compile_inner(element, schema))
             .collect::<Result<_, _>>()?,
+        // Postgres array-literal text: `ANY('{1,2,3}')`.
+        Expr::Value(SqlValue::SingleQuotedString(text)) => parse_array_literal(text)?
+            .into_iter()
+            .map(|datum| {
+                let scalar: ScalarFn = Box::new(move |_| datum.clone());
+                Ok(scalar)
+            })
+            .collect::<Result<_, EvalError>>()?,
         other => {
             return Err(EvalError::Unsupported(format!(
                 "ANY over non-array expression {other:?}"
@@ -636,6 +857,65 @@ fn any_scalar(
             .any(|element| compare_datums(&op, &lv, &element(row)) == Some(true));
         Datum::Bool(hit)
     }))
+}
+
+/// Parses a Postgres array-literal string (`{1,2,3}`, `{a,"b c"}`)
+/// into constant datums: integers, floats, booleans, NULLs, or text.
+fn parse_array_literal(text: &str) -> Result<Vec<Datum>, EvalError> {
+    let inner = text
+        .trim()
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .ok_or_else(|| EvalError::Parse(format!("array literal {text:?}")))?;
+    let mut elements = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = inner.chars();
+    let mut quoted = false;
+    let flush = |current: &mut String, quoted: &mut bool, elements: &mut Vec<Datum>| {
+        let raw = current.trim();
+        if raw.is_empty() && !*quoted {
+            return;
+        }
+        let datum = if *quoted {
+            Datum::Text(current.clone().into_bytes().into())
+        } else if raw.eq_ignore_ascii_case("null") {
+            Datum::Null
+        } else if let Ok(v) = raw.parse::<i64>() {
+            Datum::I64(v)
+        } else if let Ok(v) = raw.parse::<f64>() {
+            Datum::F64(v.to_bits())
+        } else if raw.eq_ignore_ascii_case("true") || raw == "t" {
+            Datum::Bool(true)
+        } else if raw.eq_ignore_ascii_case("false") || raw == "f" {
+            Datum::Bool(false)
+        } else {
+            Datum::Text(raw.to_owned().into_bytes().into())
+        };
+        elements.push(datum);
+        current.clear();
+        *quoted = false;
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                quoted = true;
+            }
+            '\\' if in_quotes => {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            ',' if !in_quotes => flush(&mut current, &mut quoted, &mut elements),
+            _ => current.push(c),
+        }
+    }
+    if in_quotes {
+        return Err(EvalError::Parse(format!("array literal {text:?}")));
+    }
+    flush(&mut current, &mut quoted, &mut elements);
+    Ok(elements)
 }
 
 /// Scalar function calls. The SQL frontend rejects functions outside
@@ -758,7 +1038,11 @@ fn value_scalar(value: &SqlValue) -> Result<ScalarFn, EvalError> {
                 Err(EvalError::Parse(format!("number literal '{n}'")))
             }
         }
-        SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => {
+        SqlValue::SingleQuotedString(s)
+        | SqlValue::DoubleQuotedString(s)
+        | SqlValue::EscapedStringLiteral(s)
+        | SqlValue::UnicodeStringLiteral(s)
+        | SqlValue::NationalStringLiteral(s) => {
             let bytes: bytes::Bytes = s.clone().into_bytes().into();
             Ok(Box::new(move |_| Datum::Text(bytes.clone())))
         }
@@ -813,7 +1097,41 @@ fn binary_scalar(
         | BinaryOperator::Modulo => Ok(Box::new(move |row| {
             arithmetic_datums(&op, &l(row), &r(row))
         })),
+        // Postgres `text || anynonarray`: either side coerces to text;
+        // NULL on either side yields NULL.
+        BinaryOperator::StringConcat => Ok(Box::new(move |row| {
+            let (left, right) = (l(row), r(row));
+            if matches!(left, Datum::Null) || matches!(right, Datum::Null) {
+                return Datum::Null;
+            }
+            match (datum_display_text(&left), datum_display_text(&right)) {
+                (Some(mut text), Some(rest)) => {
+                    text.push_str(&rest);
+                    Datum::Text(text.into_bytes().into())
+                }
+                _ => Datum::Null,
+            }
+        })),
         other => Err(EvalError::Unsupported(format!("binary op {other:?}"))),
+    }
+}
+
+/// Text rendering shared by `||` and text casts.
+fn datum_display_text(datum: &Datum) -> Option<String> {
+    match datum {
+        Datum::Text(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
+        Datum::I64(v) => Some(v.to_string()),
+        Datum::I32(v) => Some(v.to_string()),
+        Datum::I16(v) => Some(v.to_string()),
+        Datum::F64(bits) => Some(f64::from_bits(*bits).to_string()),
+        Datum::F32(bits) => Some(f32::from_bits(*bits).to_string()),
+        Datum::Bool(v) => Some(v.to_string()),
+        Datum::Uuid(v) => Some(v.to_string()),
+        Datum::Numeric(v) => Some(v.as_str().to_owned()),
+        Datum::Jsonb(bytes) | Datum::Json(bytes) => {
+            std::str::from_utf8(bytes).ok().map(str::to_owned)
+        }
+        _ => None,
     }
 }
 

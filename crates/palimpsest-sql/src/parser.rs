@@ -181,10 +181,32 @@ struct UnsupportedExprVisitor;
 impl Visitor for UnsupportedExprVisitor {
     type Break = SqlError;
 
+    /// Gate every scalar expression to the surface the dataflow's
+    /// expression evaluator implements, so an accepted query always
+    /// compiles onto the dataflow instead of silently degrading to the
+    /// pass-through path. Sub-expressions of allowed forms are visited
+    /// by the caller's traversal, so each arm only vets its own node.
+    #[allow(clippy::too_many_lines)]
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        use sqlparser::ast::{CastKind, UnaryOperator};
         match expr {
             Expr::Function(function) if function.over.is_some() => {
                 ControlFlow::Break(SqlError::UnsupportedFeature("window functions"))
+            }
+            // Aggregates fold in the dataflow's aggregate operator;
+            // `coalesce` / `cardinality` evaluate per-row. Anything
+            // else would be accepted and never evaluated, so it is
+            // rejected here with a named error.
+            Expr::Function(function) => {
+                let name = function.name.to_string().to_ascii_lowercase();
+                if matches!(
+                    name.as_str(),
+                    "count" | "sum" | "min" | "max" | "avg" | "coalesce" | "cardinality"
+                ) {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(SqlError::UnsupportedFunction { name })
+                }
             }
             // EXISTS subqueries are boolean (bounded) — supported, but
             // their relational structure gets the same validation as
@@ -196,7 +218,110 @@ impl Visitor for UnsupportedExprVisitor {
             Expr::InSubquery { .. } | Expr::Subquery(_) => ControlFlow::Break(
                 SqlError::UnsupportedFeature("scalar subqueries with unbounded result"),
             ),
-            _ => ControlFlow::Continue(()),
+            Expr::Identifier(_)
+            | Expr::CompoundIdentifier(_)
+            | Expr::Nested(_)
+            | Expr::IsNull(_)
+            | Expr::IsNotNull(_)
+            | Expr::IsTrue(_)
+            | Expr::IsFalse(_)
+            | Expr::IsDistinctFrom(..)
+            | Expr::IsNotDistinctFrom(..)
+            | Expr::Between { .. }
+            | Expr::InList { .. }
+            | Expr::Case { .. }
+            | Expr::Array(_) => ControlFlow::Continue(()),
+            Expr::Value(value) => match value {
+                Value::Boolean(_)
+                | Value::Number(..)
+                | Value::SingleQuotedString(_)
+                | Value::DoubleQuotedString(_)
+                | Value::EscapedStringLiteral(_)
+                | Value::UnicodeStringLiteral(_)
+                | Value::NationalStringLiteral(_)
+                | Value::Null => ControlFlow::Continue(()),
+                _ => ControlFlow::Break(SqlError::UnsupportedFeature("unsupported literal form")),
+            },
+            Expr::BinaryOp { op, .. } => match op {
+                BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq
+                | BinaryOperator::And
+                | BinaryOperator::Or
+                | BinaryOperator::Plus
+                | BinaryOperator::Minus
+                | BinaryOperator::Multiply
+                | BinaryOperator::Divide
+                | BinaryOperator::Modulo
+                | BinaryOperator::StringConcat => ControlFlow::Continue(()),
+                _ => {
+                    ControlFlow::Break(SqlError::UnsupportedFeature("unsupported binary operator"))
+                }
+            },
+            Expr::UnaryOp { op, .. } => match op {
+                UnaryOperator::Not | UnaryOperator::Minus | UnaryOperator::Plus => {
+                    ControlFlow::Continue(())
+                }
+                _ => ControlFlow::Break(SqlError::UnsupportedFeature("unsupported unary operator")),
+            },
+            Expr::Like { any: false, .. } | Expr::ILike { any: false, .. } => {
+                ControlFlow::Continue(())
+            }
+            Expr::Like { .. } | Expr::ILike { .. } => {
+                ControlFlow::Break(SqlError::UnsupportedFeature("LIKE ANY"))
+            }
+            Expr::AnyOp {
+                compare_op, right, ..
+            } => {
+                let comparison = matches!(
+                    compare_op,
+                    BinaryOperator::Eq
+                        | BinaryOperator::NotEq
+                        | BinaryOperator::Lt
+                        | BinaryOperator::LtEq
+                        | BinaryOperator::Gt
+                        | BinaryOperator::GtEq
+                );
+                let array_like = matches!(
+                    right.as_ref(),
+                    Expr::Array(_) | Expr::Value(Value::SingleQuotedString(_))
+                );
+                if comparison && array_like {
+                    ControlFlow::Continue(())
+                } else if matches!(right.as_ref(), Expr::Subquery(_)) {
+                    ControlFlow::Break(SqlError::UnsupportedFeature(
+                        "ANY over subqueries with unbounded result",
+                    ))
+                } else {
+                    ControlFlow::Break(SqlError::UnsupportedFeature(
+                        "ANY over non-array expressions",
+                    ))
+                }
+            }
+            Expr::Cast {
+                kind: CastKind::Cast | CastKind::DoubleColon,
+                data_type,
+                format: None,
+                ..
+            } => {
+                if crate::catalog::ColumnType::from_cast_target(data_type).is_some() {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(SqlError::UnsupportedFeature("unsupported cast target"))
+                }
+            }
+            Expr::Cast { .. } => ControlFlow::Break(SqlError::UnsupportedFeature(
+                "TRY_CAST / SAFE_CAST / CAST ... FORMAT",
+            )),
+            Expr::Interval(_) => {
+                ControlFlow::Break(SqlError::UnsupportedFeature("INTERVAL literals"))
+            }
+            _ => ControlFlow::Break(SqlError::UnsupportedFeature(
+                "unsupported scalar expression",
+            )),
         }
     }
 }
@@ -256,11 +381,59 @@ mod tests {
     fn parses_postgres_cte() {
         parse_select(
             "WITH recent_posts AS (
-                SELECT id, author_id FROM posts WHERE created_at > now() - interval '1 day'
+                SELECT id, author_id FROM posts WHERE created_at > '2026-01-01'
              )
              SELECT id FROM recent_posts ORDER BY id LIMIT 10",
         )
         .expect("CTE query should parse");
+    }
+
+    #[test]
+    fn rejects_functions_outside_the_evaluable_allowlist() {
+        // Every accepted function must be one the engine evaluates —
+        // a query that parses but never computes would silently
+        // degrade to the pass-through path.
+        let err =
+            parse_select("SELECT upper(title) FROM posts").expect_err("upper() is not evaluable");
+        assert!(
+            matches!(&err, crate::SqlError::UnsupportedFunction { name } if name == "upper"),
+            "got {err:?}"
+        );
+
+        let err = parse_select("SELECT id FROM posts WHERE created_at > now()")
+            .expect_err("now() is not evaluable (and not deterministic)");
+        assert!(
+            matches!(&err, crate::SqlError::UnsupportedFunction { name } if name == "now"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_unevaluable_operators() {
+        let err = parse_select("SELECT id FROM posts WHERE title ~ 'x'")
+            .expect_err("regex match is not evaluable");
+        assert!(err.to_string().contains("binary operator"), "got {err}");
+
+        let err = parse_select("SELECT id FROM posts WHERE title SIMILAR TO 'x%'")
+            .expect_err("SIMILAR TO is not evaluable");
+        assert!(
+            err.to_string().contains("unsupported scalar expression"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_like_case_concat_and_distinctness() {
+        parse_select(
+            "SELECT id,
+                    CASE WHEN published THEN 'live' ELSE 'draft' END,
+                    title || '!'
+             FROM posts
+             WHERE title LIKE 'a%'
+               AND title NOT ILIKE '%zzz%'
+               AND author_id IS DISTINCT FROM 7",
+        )
+        .expect("evaluable operator forms should parse");
     }
 
     #[test]

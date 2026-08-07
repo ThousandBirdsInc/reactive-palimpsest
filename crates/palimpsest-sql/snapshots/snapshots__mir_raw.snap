@@ -51,7 +51,7 @@ MirGraph {
             },
             6: Project {
                 columns: [
-                    "post_id",
+                    "recent_posts.id AS post_id",
                     "authors.name",
                 ],
             },

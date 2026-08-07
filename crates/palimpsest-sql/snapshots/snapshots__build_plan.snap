@@ -8,5 +8,5 @@ expression: render_build_plan(&mir)
 3: Project { columns: ["id", "author_id", "created_at"] } <- [2:Input(0)]
 4: BaseTable { table: "authors", project: [] } <- []
 5: Join { kind: Inner, on: [(ColumnRef { relation: Some("recent_posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })] } <- [4:Input(1), 0:Input(0)]
-6: Project { columns: ["post_id", "authors.name"] } <- [5:Input(0)]
+6: Project { columns: ["recent_posts.id AS post_id", "authors.name"] } <- [5:Input(0)]
 7: TopK { order_by: [OrderKey { expression: "post_id", descending: false }], limit: 10, offset: 0 } <- [6:Input(0)]

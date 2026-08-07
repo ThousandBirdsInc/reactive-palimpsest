@@ -3,7 +3,7 @@ source: crates/palimpsest-sql/tests/snapshots.rs
 expression: "format!(\"canonical_form:\\n{}\\n\\ncollapsed_mir:\\n{canonicalized:#?}\",\ncanonical_form(&canonicalized))"
 ---
 canonical_form:
-topk:[OrderKey { expression: "post_id", descending: false }]:10:0[input000:project:post_id,authors.name[input000:join:Inner:[(ColumnRef { relation: Some("recent_posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input000:cte-ref[cte:project:id,author_id,created_at[input000:filter:author_id IN (42, 7) AND created_at IS NOT NULL[input000:base:posts:[][]]]],input001:base:authors:[][]]]]
+topk:[OrderKey { expression: "post_id", descending: false }]:10:0[input000:project:recent_posts.id AS post_id,authors.name[input000:join:Inner:[(ColumnRef { relation: Some("recent_posts"), name: "author_id" }, ColumnRef { relation: Some("authors"), name: "id" })][input000:cte-ref[cte:project:id,author_id,created_at[input000:filter:author_id IN (42, 7) AND created_at IS NOT NULL[input000:base:posts:[][]]]],input001:base:authors:[][]]]]
 
 collapsed_mir:
 MirGraph {
@@ -55,7 +55,7 @@ MirGraph {
             },
             6: Project {
                 columns: [
-                    "post_id",
+                    "recent_posts.id AS post_id",
                     "authors.name",
                 ],
             },

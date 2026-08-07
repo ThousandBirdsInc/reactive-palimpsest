@@ -496,6 +496,39 @@ fn compile_project(
     for entry in columns {
         let entry = entry.trim();
 
+        // `expr AS alias` — the lowering keeps aliased select items in
+        // full so the computing expression survives. Resolve the
+        // expression side first (so `title AS id` reads `title`, not
+        // the input's `id`); an alias that names an input column
+        // directly covers aggregate outputs, which are keyed by alias.
+        if let Some((expr_text, alias)) = split_alias(entry) {
+            if let Some(index) = resolve_entry_column(&input_schema, &input_prov, expr_text) {
+                push_index(
+                    index,
+                    alias.to_owned(),
+                    &mut outputs,
+                    &mut output_pairs,
+                    &mut output_prov,
+                );
+                continue;
+            }
+            if let Some(index) = input_schema.index_of(alias) {
+                push_index(
+                    index,
+                    alias.to_owned(),
+                    &mut outputs,
+                    &mut output_pairs,
+                    &mut output_prov,
+                );
+                continue;
+            }
+            let (scalar, ty) = compile_typed_scalar(expr_text, &input_schema)?;
+            outputs.push(OutputColumn::Scalar(Arc::from(scalar)));
+            output_pairs.push((alias.to_owned(), ty));
+            output_prov.push(None);
+            continue;
+        }
+
         // `SELECT *` — every input column, in order.
         if entry == "*" {
             for (index, (name, _)) in input_schema.columns().iter().enumerate() {
@@ -624,13 +657,53 @@ fn compile_project(
 /// `None` for anything with operators, calls, casts, or extra dots.
 fn split_qualified(entry: &str) -> Option<(&str, &str)> {
     let (relation, bare) = entry.split_once('.')?;
-    let is_ident = |part: &str| {
-        !part.is_empty()
-            && part
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '"')
-    };
-    (is_ident(relation) && is_ident(bare)).then_some((relation, bare))
+    (is_bare_ident(relation) && is_bare_ident(bare)).then_some((relation, bare))
+}
+
+fn is_bare_ident(part: &str) -> bool {
+    !part.is_empty()
+        && part
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '"')
+}
+
+/// Splits the lowering's `expr AS alias` projection form. The alias is
+/// always a plain identifier, and ` AS ` cannot occur at the top level
+/// of an expression, so the *last* occurrence is the separator; a
+/// last-segment that isn't identifier-shaped (e.g. inside a string
+/// literal) means the entry carries no alias.
+fn split_alias(entry: &str) -> Option<(&str, &str)> {
+    let (expr_text, alias) = entry.rsplit_once(" AS ")?;
+    (is_bare_ident(alias) && !expr_text.trim().is_empty()).then_some((expr_text.trim(), alias))
+}
+
+/// Resolves a projection entry as an input column: exact name,
+/// provenance-qualified `rel.column`, or a case-insensitive match
+/// (aggregate outputs are named by their lowercased display text).
+fn resolve_entry_column(
+    schema: &ScalarSchema,
+    provenance: &[Option<String>],
+    entry: &str,
+) -> Option<usize> {
+    if let Some(index) = schema.index_of(entry) {
+        return Some(index);
+    }
+    if let Some((relation, bare)) = split_qualified(entry) {
+        let attributed = schema
+            .columns()
+            .iter()
+            .enumerate()
+            .position(|(i, (name, _))| {
+                name == bare && provenance.get(i).and_then(Option::as_deref) == Some(relation)
+            });
+        if let Some(index) = attributed.or_else(|| schema.index_of(bare)) {
+            return Some(index);
+        }
+    }
+    schema
+        .columns()
+        .iter()
+        .position(|(name, _)| name.eq_ignore_ascii_case(entry))
 }
 
 fn compile_aggregate(
@@ -2756,6 +2829,56 @@ mod tests {
             &plan,
             vec![(TableId::new(1), seed)],
             vec![datum_row(vec![Datum::I64(2), text("zeta")])],
+        );
+    }
+
+    #[test]
+    fn like_case_concat_and_distinctness_evaluate() {
+        let graph = parse_and_lower(
+            "SELECT id,
+                    CASE WHEN published THEN 'live' ELSE 'draft' END AS state,
+                    title || '!' AS shout
+             FROM posts
+             WHERE title LIKE 'a%'
+               AND title NOT ILIKE '%ZZZ%'
+               AND id IS DISTINCT FROM 99",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        assert_eq!(
+            plan.output_schema.column_type("state"),
+            Some(ColumnType::Text)
+        );
+        assert_eq!(
+            plan.output_schema.column_type("shout"),
+            Some(ColumnType::Text)
+        );
+
+        let rows = vec![
+            datum_row(vec![Datum::I64(1), text("alpha"), Datum::Bool(true)]),
+            datum_row(vec![Datum::I64(2), text("beta"), Datum::Bool(false)]),
+            datum_row(vec![Datum::I64(3), text("azzz"), Datum::Bool(true)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(TableId::new(1), rows)],
+            vec![datum_row(vec![Datum::I64(1), text("live"), text("alpha!")])],
+        );
+    }
+
+    #[test]
+    fn any_over_postgres_array_literal_evaluates() {
+        let graph =
+            parse_and_lower("SELECT id FROM events WHERE category_id = ANY('{7, 11}')").unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![
+                datum_row(vec![Datum::I64(1)]),
+                datum_row(vec![Datum::I64(2)]),
+                datum_row(vec![Datum::I64(3)]),
+            ],
         );
     }
 

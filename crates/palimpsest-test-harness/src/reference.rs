@@ -389,24 +389,55 @@ pub fn fixture_line_count_within_budget(contents: &str, max_lines: usize) -> boo
 }
 
 fn project_record(record: &Record, columns: &[String]) -> Record {
-    let values = columns
-        .iter()
-        .map(|column| value_for_expr(record, column).unwrap_or_default())
-        .collect::<Vec<_>>();
+    let mut values = Vec::with_capacity(columns.len());
     let mut attrs = BTreeMap::new();
-    for (column, value) in columns.iter().zip(&values) {
-        // A projection starts a fresh (anonymous) relation: a
-        // projected `relation.column` is addressable downstream only
-        // by its output name (the trailing segment), matching SQL.
-        // Keeping source-qualified keys would leak stale bindings into
-        // later joins against the same base relation (e.g. recursive
-        // steps).
-        let name = column
-            .rsplit_once('.')
-            .map_or(column.as_str(), |(_, bare)| bare);
+    for column in columns {
+        // `expr AS alias` entries: the alias names the output; the
+        // value comes from the alias attribute when the input already
+        // carries it (aggregate outputs) or from the expression.
+        let (name, value) = match split_alias(column) {
+            // Aliased entries: the alias attribute wins when the input
+            // already carries it (aggregate outputs), else the
+            // expression computes the value.
+            Some((expr, alias)) => {
+                let value = record
+                    .attrs
+                    .get(alias)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| value_for_expr(record, expr));
+                (alias, value)
+            }
+            // A projection starts a fresh (anonymous) relation: a
+            // projected `relation.column` is addressable downstream
+            // only by its output name (the trailing segment), matching
+            // SQL. Keeping source-qualified keys would leak stale
+            // bindings into later joins against the same base relation
+            // (e.g. recursive steps).
+            None => (
+                column
+                    .rsplit_once('.')
+                    .map_or(column.as_str(), |(_, bare)| bare),
+                value_for_expr(record, column),
+            ),
+        };
+        let value = value.unwrap_or_default();
         attrs.insert(name.to_owned(), Some(value.clone()));
+        values.push(value);
     }
     Record { values, attrs }
+}
+
+/// Splits the lowering's `expr AS alias` projection form (the alias is
+/// always a plain identifier and ` AS ` cannot occur at an
+/// expression's top level, so the last occurrence separates).
+fn split_alias(entry: &str) -> Option<(&str, &str)> {
+    let (expr, alias) = entry.rsplit_once(" AS ")?;
+    let ident = !alias.is_empty()
+        && alias
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '"');
+    (ident && !expr.trim().is_empty()).then_some((expr.trim(), alias))
 }
 
 fn join_records(
