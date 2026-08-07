@@ -151,6 +151,42 @@ where
     })
 }
 
+/// Grouped aggregates where every function reads its own value column:
+/// each input row carries one `i64` per aggregate (in function order),
+/// and `funcs[i]` is evaluated over column `i` of the value vectors.
+pub fn aggregate_multi<G, K>(
+    input: &VecCollection<G, (K, Vec<i64>), isize>,
+    funcs: Vec<AggregateFunc>,
+) -> VecCollection<G, (K, Vec<AggregateValue>), isize>
+where
+    G: Scope<Timestamp: Lattice + Ord>,
+    K: ExchangeData + Hashable,
+{
+    input.reduce(move |_key, values, output| {
+        let aggregates = funcs
+            .iter()
+            .enumerate()
+            .map(|(index, func)| {
+                // The reduce input is consolidated per value *vector*,
+                // so one scalar can appear across several entries.
+                // Re-consolidate the single column before evaluating —
+                // MIN / MAX / COUNT DISTINCT inspect per-value signs
+                // and would otherwise see phantom positives.
+                let mut merged = std::collections::BTreeMap::<i64, isize>::new();
+                for (row, diff) in values {
+                    *merged.entry(*row.get(index).unwrap_or(&0)).or_default() += *diff;
+                }
+                let merged: Vec<(i64, isize)> =
+                    merged.into_iter().filter(|(_, diff)| *diff != 0).collect();
+                let column: Vec<(&i64, isize)> =
+                    merged.iter().map(|(value, diff)| (value, *diff)).collect();
+                evaluate_i64_aggregate(*func, &column)
+            })
+            .collect();
+        output.push((aggregates, 1));
+    })
+}
+
 fn evaluate_i64_aggregate(func: AggregateFunc, values: &[(&i64, isize)]) -> AggregateValue {
     let positive_values = values
         .iter()
@@ -226,6 +262,100 @@ where
             }
         })
         .map(|(_key, value)| value)
+}
+
+/// Global TopK ordered by a caller-supplied comparator. Like [`topk`]
+/// but the sort order is not the value's natural `Ord` — used for
+/// multi-column `ORDER BY` with per-key directions and SQL null
+/// placement.
+pub fn topk_by<G, D, F>(
+    input: &VecCollection<G, D, isize>,
+    compare: F,
+    limit: usize,
+    offset: usize,
+) -> VecCollection<G, D, isize>
+where
+    G: Scope<Timestamp: Lattice + Ord>,
+    D: ExchangeData + Hashable,
+    F: Fn(&D, &D) -> std::cmp::Ordering + 'static,
+{
+    input
+        .map(|value| ((), value))
+        .reduce(move |_key, values, output| {
+            let mut expanded = Vec::new();
+            for (value, diff) in values {
+                if let Ok(count) = usize::try_from(*diff) {
+                    expanded.extend(std::iter::repeat_with(|| (*value).clone()).take(count));
+                }
+            }
+            expanded.sort_by(|left, right| compare(left, right));
+            for value in expanded.into_iter().skip(offset).take(limit) {
+                output.push((value, 1));
+            }
+        })
+        .map(|(_key, value)| value)
+}
+
+/// Keeps the first value per key, ranked by `compare` (ties keep the
+/// comparator's first minimum). SQL `SELECT DISTINCT ON (...)`.
+pub fn distinct_on_first<G, K, D, F>(
+    input: &VecCollection<G, (K, D), isize>,
+    compare: F,
+) -> VecCollection<G, D, isize>
+where
+    G: Scope<Timestamp: Lattice + Ord>,
+    K: ExchangeData + Hashable,
+    D: ExchangeData,
+    F: Fn(&D, &D) -> std::cmp::Ordering + 'static,
+{
+    input
+        .reduce(move |_key, values, output| {
+            let first = values
+                .iter()
+                .filter(|(_, diff)| *diff > 0)
+                .map(|(value, _)| (*value).clone())
+                .min_by(|left, right| compare(left, right));
+            if let Some(value) = first {
+                output.push((value, 1));
+            }
+        })
+        .map(|(_key, value)| value)
+}
+
+/// Bag-algebra set operation: for each distinct row, emits it with
+/// multiplicity `combine(left_count, right_count)` (non-positive
+/// results emit nothing). `EXCEPT [ALL]` and `INTERSECT [ALL]` are
+/// thin wrappers over this.
+pub fn bag_set_op<G, D, F>(
+    left: &VecCollection<G, D, isize>,
+    right: &VecCollection<G, D, isize>,
+    combine: F,
+) -> VecCollection<G, D, isize>
+where
+    G: Scope<Timestamp: Lattice + Ord>,
+    D: ExchangeData + Hashable,
+    F: Fn(isize, isize) -> isize + 'static,
+{
+    let tagged = left
+        .map(|row| (row, false))
+        .concat(&right.map(|row| (row, true)));
+    tagged
+        .reduce(move |_row, sides, output| {
+            let mut left_count = 0;
+            let mut right_count = 0;
+            for (is_right, diff) in sides {
+                if **is_right {
+                    right_count += *diff;
+                } else {
+                    left_count += *diff;
+                }
+            }
+            let multiplicity = combine(left_count, right_count);
+            if multiplicity > 0 {
+                output.push(((), multiplicity));
+            }
+        })
+        .map(|(row, ())| row)
 }
 
 /// Applies differential's `concat` operator as SQL `UNION ALL`.

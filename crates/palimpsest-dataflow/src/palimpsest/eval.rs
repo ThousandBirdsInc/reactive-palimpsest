@@ -202,7 +202,7 @@ fn infer_type(expr: &Expr, schema: &ScalarSchema) -> ColumnType {
         Expr::Value(SqlValue::SingleQuotedString(_) | SqlValue::DoubleQuotedString(_)) => {
             ColumnType::Text
         }
-        Expr::BinaryOp { op, .. } => match op {
+        Expr::BinaryOp { left, op, right } => match op {
             BinaryOperator::Eq
             | BinaryOperator::NotEq
             | BinaryOperator::Lt
@@ -211,6 +211,17 @@ fn infer_type(expr: &Expr, schema: &ScalarSchema) -> ColumnType {
             | BinaryOperator::GtEq
             | BinaryOperator::And
             | BinaryOperator::Or => ColumnType::Bool,
+            BinaryOperator::Plus
+            | BinaryOperator::Minus
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide
+            | BinaryOperator::Modulo => {
+                match (infer_type(left, schema), infer_type(right, schema)) {
+                    (ColumnType::Int, ColumnType::Int) => ColumnType::Int,
+                    (l, r) if l.is_numeric() && r.is_numeric() => ColumnType::Float,
+                    _ => ColumnType::Unknown,
+                }
+            }
             _ => ColumnType::Unknown,
         },
         Expr::UnaryOp { op, expr: inner } => match op {
@@ -222,7 +233,9 @@ fn infer_type(expr: &Expr, schema: &ScalarSchema) -> ColumnType {
         | Expr::IsNotNull(_)
         | Expr::IsTrue(_)
         | Expr::IsFalse(_)
-        | Expr::AnyOp { .. } => ColumnType::Bool,
+        | Expr::AnyOp { .. }
+        | Expr::InList { .. }
+        | Expr::Between { .. } => ColumnType::Bool,
         Expr::Cast { data_type, .. } => cast_target_type(data_type).unwrap_or(ColumnType::Unknown),
         Expr::Function(function) => {
             let name = function.name.to_string().to_ascii_lowercase();
@@ -348,8 +361,127 @@ fn compile_inner(expr: &Expr, schema: &ScalarSchema) -> Result<ScalarFn, EvalErr
             let source = compile_inner(inner, schema)?;
             Ok(Box::new(move |row| cast_datum(source(row), target)))
         }
+        Expr::InList {
+            expr: needle,
+            list,
+            negated,
+        } => {
+            let needle = compile_inner(needle, schema)?;
+            let elements: Vec<ScalarFn> = list
+                .iter()
+                .map(|element| compile_inner(element, schema))
+                .collect::<Result<_, _>>()?;
+            let negated = *negated;
+            Ok(Box::new(move |row| {
+                let value = needle(row);
+                // SQL three-valued logic collapsed onto WHERE
+                // semantics: a NULL needle (or, for NOT IN, a NULL
+                // list element) yields UNKNOWN, which filters the row.
+                if matches!(value, Datum::Null) {
+                    return Datum::Bool(false);
+                }
+                let mut saw_null = false;
+                let mut hit = false;
+                for element in &elements {
+                    let candidate = element(row);
+                    if matches!(candidate, Datum::Null) {
+                        saw_null = true;
+                    } else if datum_eq(&value, &candidate) {
+                        hit = true;
+                        break;
+                    }
+                }
+                if negated {
+                    Datum::Bool(!hit && !saw_null)
+                } else {
+                    Datum::Bool(hit)
+                }
+            }))
+        }
+        Expr::Between {
+            expr: needle,
+            negated,
+            low,
+            high,
+        } => {
+            let needle = compile_inner(needle, schema)?;
+            let low = compile_inner(low, schema)?;
+            let high = compile_inner(high, schema)?;
+            let negated = *negated;
+            Ok(Box::new(move |row| {
+                let value = needle(row);
+                let low_value = low(row);
+                let high_value = high(row);
+                // A NULL anywhere makes the comparison UNKNOWN → the
+                // row is filtered whether or not the test is negated.
+                if matches!(value, Datum::Null)
+                    || matches!(low_value, Datum::Null)
+                    || matches!(high_value, Datum::Null)
+                {
+                    return Datum::Bool(false);
+                }
+                let within = matches!(
+                    datum_cmp_bool(&low_value, &value, |o| o.is_le()),
+                    Datum::Bool(true)
+                ) && matches!(
+                    datum_cmp_bool(&value, &high_value, |o| o.is_le()),
+                    Datum::Bool(true)
+                );
+                Datum::Bool(within != negated)
+            }))
+        }
         Expr::Function(function) => function_scalar(function, schema),
         other => Err(EvalError::Unsupported(format!("{other:?}"))),
+    }
+}
+
+/// SQL `ORDER BY` comparison across datums. `NULL` compares greater
+/// than everything (so ascending order puts NULLs last and a reversed
+/// comparison puts them first — Postgres' defaults for `ASC` / `DESC`).
+/// Numerics compare across widths; other cross-type pairs fall back to
+/// the derived `Ord`, which is arbitrary but total and deterministic.
+#[must_use]
+pub fn compare_datums_sort(a: &Datum, b: &Datum) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    use Datum::{Null, Text, Uuid};
+
+    fn as_i128(datum: &Datum) -> Option<i128> {
+        match datum {
+            Datum::I64(v) => Some(i128::from(*v)),
+            Datum::I32(v) => Some(i128::from(*v)),
+            Datum::I16(v) => Some(i128::from(*v)),
+            _ => None,
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    fn as_f64(datum: &Datum) -> Option<f64> {
+        match datum {
+            Datum::F64(bits) => Some(f64::from_bits(*bits)),
+            Datum::F32(bits) => Some(f64::from(f32::from_bits(*bits))),
+            Datum::I64(v) => Some(*v as f64),
+            Datum::I32(v) => Some(f64::from(*v)),
+            Datum::I16(v) => Some(f64::from(*v)),
+            _ => None,
+        }
+    }
+
+    match (a, b) {
+        (Null, Null) => Ordering::Equal,
+        (Null, _) => Ordering::Greater,
+        (_, Null) => Ordering::Less,
+        _ => {
+            if let (Some(x), Some(y)) = (as_i128(a), as_i128(b)) {
+                return x.cmp(&y);
+            }
+            if let (Some(x), Some(y)) = (as_f64(a), as_f64(b)) {
+                return x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+            }
+            match (a, b) {
+                (Text(x), Text(y)) => x.cmp(y),
+                (Uuid(x), Uuid(y)) => x.as_bytes().cmp(&y.as_bytes()),
+                _ => a.cmp(b),
+            }
+        }
     }
 }
 
@@ -683,8 +815,75 @@ fn binary_scalar(
             }
             Datum::Bool(matches!(r(row), Datum::Bool(true)))
         })),
+        BinaryOperator::Plus
+        | BinaryOperator::Minus
+        | BinaryOperator::Multiply
+        | BinaryOperator::Divide
+        | BinaryOperator::Modulo => Ok(Box::new(move |row| {
+            arithmetic_datums(&op, &l(row), &r(row))
+        })),
         other => Err(EvalError::Unsupported(format!("binary op {other:?}"))),
     }
+}
+
+/// Numeric arithmetic with SQL semantics: integer op integer stays
+/// integer (Postgres integer division truncates), any float operand
+/// promotes to float, NULL / non-numeric operands and division by
+/// zero yield `NULL` (the evaluator's stand-in for a runtime error).
+fn arithmetic_datums(op: &BinaryOperator, a: &Datum, b: &Datum) -> Datum {
+    fn as_i64(datum: &Datum) -> Option<i64> {
+        match datum {
+            Datum::I64(v) => Some(*v),
+            Datum::I32(v) => Some(i64::from(*v)),
+            Datum::I16(v) => Some(i64::from(*v)),
+            _ => None,
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    fn as_f64(datum: &Datum) -> Option<f64> {
+        match datum {
+            Datum::F64(bits) => Some(f64::from_bits(*bits)),
+            Datum::F32(bits) => Some(f64::from(f32::from_bits(*bits))),
+            Datum::I64(v) => Some(*v as f64),
+            Datum::I32(v) => Some(f64::from(*v)),
+            Datum::I16(v) => Some(f64::from(*v)),
+            _ => None,
+        }
+    }
+
+    if let (Some(x), Some(y)) = (as_i64(a), as_i64(b)) {
+        let result = match op {
+            BinaryOperator::Plus => x.checked_add(y),
+            BinaryOperator::Minus => x.checked_sub(y),
+            BinaryOperator::Multiply => x.checked_mul(y),
+            BinaryOperator::Divide => x.checked_div(y),
+            BinaryOperator::Modulo => x.checked_rem(y),
+            _ => None,
+        };
+        return result.map_or(Datum::Null, Datum::I64);
+    }
+    if let (Some(x), Some(y)) = (as_f64(a), as_f64(b)) {
+        let result = match op {
+            BinaryOperator::Plus => x + y,
+            BinaryOperator::Minus => x - y,
+            BinaryOperator::Multiply => x * y,
+            BinaryOperator::Divide => {
+                if y == 0.0 {
+                    return Datum::Null;
+                }
+                x / y
+            }
+            BinaryOperator::Modulo => {
+                if y == 0.0 {
+                    return Datum::Null;
+                }
+                x % y
+            }
+            _ => return Datum::Null,
+        };
+        return Datum::F64(result.to_bits());
+    }
+    Datum::Null
 }
 
 fn unary_scalar(

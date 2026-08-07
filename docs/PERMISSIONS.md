@@ -110,11 +110,14 @@ posture, add `predicate = "false"` for tables you haven't reviewed.
 ## Enforcement requires the dataflow
 
 Row-visibility filters are compiled into the query's dataflow plan.
-The dataflow executes filters, projections (including `*` wildcards
-and casts), equi-joins (inner / left / semi / anti), `DISTINCT`,
-`UNION [ALL]`, aggregates, and top-K; the few query shapes it cannot
-execute yet (`DISTINCT ON`, `EXCEPT` / `INTERSECT`, recursive CTEs —
-see `supported-sql.md`) fall back to a raw pass-through path, which
+The dataflow executes filters, projections (including `*` wildcards,
+casts, and arithmetic), equi-joins (inner / left / semi / anti),
+`DISTINCT` and `DISTINCT ON`, all set operations, aggregates (multi-
+and zero-column `GROUP BY`, `HAVING`, `COUNT(DISTINCT)`), multi-key
+ordering, and `UNION`-distinct recursive CTEs. The few shapes it
+cannot execute (recursive `UNION ALL`, uninferable projection
+expression types, non-integer `SUM`/`MIN`/`MAX`/`AVG` — see
+`supported-sql.md`) fall back to a raw pass-through path, which
 cannot enforce filters. When a
 row-visibility rule applies to any table such a query reads, the
 subscribe **fails closed**: the server rejects it with

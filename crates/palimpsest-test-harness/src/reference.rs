@@ -467,17 +467,42 @@ fn aggregate_records(
     groups
         .into_iter()
         .map(|(key, rows)| {
-            let mut values = key
-                .into_iter()
-                .map(std::option::Option::unwrap_or_default)
-                .collect::<Row>();
-            values.extend(aggs.iter().map(|agg| eval_agg(agg, &rows)));
-            Record {
-                values,
-                attrs: BTreeMap::new(),
+            // Expose named attributes so downstream operators (a
+            // HAVING filter, projections referencing aggregate output
+            // columns) can resolve values by name.
+            let mut attrs = BTreeMap::new();
+            let mut values = Row::new();
+            for (column, value) in group_by.iter().zip(&key) {
+                values.push(value.clone().unwrap_or_default());
+                attrs.insert(column.name.clone(), value.clone());
+                if let Some(relation) = &column.relation {
+                    attrs.insert(format!("{relation}.{}", column.name), value.clone());
+                }
             }
+            for agg in aggs {
+                let value = eval_agg(agg, &rows);
+                attrs.insert(aggregate_output_name(agg), Some(value.clone()));
+                values.push(value);
+            }
+            Record { values, attrs }
         })
         .collect()
+}
+
+/// Output-column name for an aggregate: its alias when present,
+/// otherwise its display text (`count(*)`), matching the dataflow
+/// compiler's naming.
+fn aggregate_output_name(agg: &AggExpr) -> String {
+    if let Some(alias) = &agg.alias {
+        return alias.clone();
+    }
+    let distinct = agg.args.first().is_some_and(|arg| arg == "DISTINCT");
+    let args = &agg.args[usize::from(distinct)..];
+    if distinct {
+        format!("{}(DISTINCT {})", agg.function, args.join(", "))
+    } else {
+        format!("{}({})", agg.function, args.join(", "))
+    }
 }
 
 fn distinct_records(records: Vec<Record>) -> Vec<Record> {

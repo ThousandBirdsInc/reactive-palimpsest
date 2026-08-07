@@ -45,9 +45,9 @@ use thiserror::Error;
 
 use crate::operators::Join as _;
 use crate::palimpsest::eval::{compile_predicate, compile_typed_scalar, EvalError, ScalarSchema};
-use crate::palimpsest::relational::{self, AggregateFunc, AggregateValue, SortDirection};
+use crate::palimpsest::relational::{self, AggregateFunc, AggregateValue};
 use crate::palimpsest::wal::Row;
-use crate::{lattice::Lattice, VecCollection};
+use crate::{lattice::Lattice, AsCollection, VecCollection};
 
 // -----------------------------------------------------------------------------
 // Public types
@@ -125,34 +125,68 @@ pub enum NodeRecipe {
         /// `true` for `UNION ALL` (bag semantics).
         all: bool,
     },
-    /// Group-by aggregate. Group key is the value of one column (a
-    /// single-column grouping is all we wire today); each aggregate
-    /// function reads the same value column. The compiler emits a
-    /// `Project` upstream if a richer extraction is needed.
+    /// Group-by aggregate over zero or more group columns. Group keys
+    /// keep their original `Datum` types end-to-end; each aggregate
+    /// function reads its own `i64`-coerced value expression.
     Aggregate {
-        /// Closure that reads the group-by column out of the input
-        /// row. Returns a `Datum` so the original column type is
-        /// preserved end-to-end — `aggregate_i64`'s key parameter is
-        /// generic, so we use the full `Datum` rather than coercing
-        /// `Bool` / `Text` group keys onto `i64`.
-        group_extract: Arc<dyn Fn(&Row) -> Datum + Send + Sync>,
-        /// Closure that reads the aggregate value column. For
-        /// `COUNT(*)`-only aggregates this is the constant zero
-        /// extractor (the operator only counts diffs).
-        value_extract: Arc<dyn Fn(&Row) -> i64 + Send + Sync>,
+        /// Closure that reads the group-key datums out of the input
+        /// row (empty vector for a global aggregate).
+        group_extract: Arc<dyn Fn(&Row) -> Vec<Datum> + Send + Sync>,
+        /// One value extractor per aggregate function, in projection
+        /// order. `COUNT(*)` uses a constant-zero extractor (the
+        /// operator only counts diffs).
+        value_extracts: Vec<Arc<dyn Fn(&Row) -> i64 + Send + Sync>>,
         /// One entry per aggregate function in projection order.
         funcs: Vec<AggregateFunc>,
+        /// For global (no `GROUP BY`) aggregates: the row to emit when
+        /// the input is empty — SQL still returns one row there
+        /// (`COUNT` = 0, other aggregates NULL). `None` for grouped
+        /// aggregates, which produce no rows for no groups.
+        empty_default: Option<Row>,
     },
-    /// Global TopK with a single-column sort key.
+    /// Global TopK ordered by one or more typed sort keys.
     TopK {
-        /// Closure that reads the sort key out of each row.
-        sort_key_extract: Arc<dyn Fn(&Row) -> i64 + Send + Sync>,
-        /// Ascending vs descending order.
-        direction: SortDirection,
+        /// Closure that reads the sort-key datums out of each row.
+        sort_extract: Arc<dyn Fn(&Row) -> Vec<Datum> + Send + Sync>,
+        /// Per-key descending flags, aligned with the extractor.
+        descending: Vec<bool>,
         /// Limit (max rows retained).
         limit: usize,
         /// Offset (rows skipped from the head of the sorted slice).
         offset: usize,
+    },
+    /// Postgres `DISTINCT ON`: first row per `on`-group, ranked by the
+    /// sort keys (arbitrary-but-deterministic when no order was given).
+    DistinctOn {
+        /// Closure that reads the grouping datums out of each row.
+        on_extract: Arc<dyn Fn(&Row) -> Vec<Datum> + Send + Sync>,
+        /// Closure that reads the ranking datums out of each row.
+        sort_extract: Arc<dyn Fn(&Row) -> Vec<Datum> + Send + Sync>,
+        /// Per-key descending flags for the ranking keys.
+        descending: Vec<bool>,
+    },
+    /// `EXCEPT [ALL]` / `INTERSECT [ALL]` over the node's two ordered
+    /// inputs, with SQL bag semantics per quantifier.
+    SetOp {
+        /// `true` for INTERSECT, `false` for EXCEPT.
+        intersect: bool,
+        /// `true` for the `ALL` quantifier (bag counts), `false` for
+        /// set semantics.
+        all: bool,
+    },
+    /// `WITH RECURSIVE` fixpoint (UNION-distinct recursion): iterate
+    /// the step term over the working table until no new rows appear.
+    /// Ordered inputs are the base term then the step term; the step
+    /// subgraph reads the working table through a [`Self::RecursiveRef`].
+    Fixpoint {
+        /// CTE name the step's `RecursiveRef` binds against.
+        cte: String,
+    },
+    /// Reference to the enclosing fixpoint's working table. Resolved
+    /// at install time from the iteration's variable binding.
+    RecursiveRef {
+        /// CTE name, matching the enclosing [`Self::Fixpoint`].
+        cte: String,
     },
     /// CTE reference: forwards to another node in the same graph.
     CteRef {
@@ -225,7 +259,10 @@ pub fn compile_mir<L: TableSchemaLookup>(
     graph: &MirGraph,
     tables: &L,
 ) -> Result<CompiledPlan, CompileError> {
-    let topo = petgraph::algo::toposort(graph.graph(), None).map_err(|_| CompileError::Cycle)?;
+    // Cycle check up front; the walk itself is a demand-driven DFS so
+    // a `RecursiveRef` can pull its fixpoint's *base* subtree (its
+    // schema source) before the topological position would reach it.
+    petgraph::algo::toposort(graph.graph(), None).map_err(|_| CompileError::Cycle)?;
 
     let mut state = CompileState {
         node_schemas: HashMap::new(),
@@ -235,8 +272,8 @@ pub fn compile_mir<L: TableSchemaLookup>(
         input_schemas: HashMap::new(),
     };
 
-    for node in topo {
-        compile_node(graph, node, tables, &mut state)?;
+    for node in graph.graph().node_indices() {
+        ensure_compiled(graph, node, tables, &mut state)?;
     }
 
     let root = graph.root();
@@ -251,6 +288,31 @@ pub fn compile_mir<L: TableSchemaLookup>(
         node_schemas: state.node_schemas,
         recipes: state.recipes,
     })
+}
+
+/// Compiles `node` after its inputs (dataflow and CTE-expansion
+/// alike), memoized through `state.recipes`. Safe against repeated
+/// visits; the acyclicity check in [`compile_mir`] rules out
+/// non-termination.
+fn ensure_compiled<L: TableSchemaLookup>(
+    graph: &MirGraph,
+    node: NodeIndex,
+    tables: &L,
+    state: &mut CompileState,
+) -> Result<(), CompileError> {
+    if state.recipes.contains_key(&node) {
+        return Ok(());
+    }
+    use petgraph::visit::EdgeRef;
+    let dependencies: Vec<NodeIndex> = graph
+        .graph()
+        .edges_directed(node, Direction::Incoming)
+        .map(|edge| edge.source())
+        .collect();
+    for dependency in dependencies {
+        ensure_compiled(graph, dependency, tables, state)?;
+    }
+    compile_node(graph, node, tables, state)
 }
 
 struct CompileState {
@@ -292,14 +354,20 @@ fn compile_node<L: TableSchemaLookup>(
         MirNodeKind::CteRef { cte } => compile_cte_ref(graph, node, cte, state),
         MirNodeKind::Join { kind, on } => compile_join(graph, node, *kind, on, state),
         MirNodeKind::Distinct => compile_distinct(graph, node, state),
-        MirNodeKind::DistinctOn { .. } => Err(CompileError::Unsupported("DistinctOn".to_owned())),
-        MirNodeKind::Union { quantifier } => compile_union(graph, node, *quantifier, state),
-        MirNodeKind::Except { .. } => Err(CompileError::Unsupported("Except".to_owned())),
-        MirNodeKind::Intersect { .. } => Err(CompileError::Unsupported("Intersect".to_owned())),
-        MirNodeKind::Fixpoint { .. } => Err(CompileError::Unsupported("Fixpoint".to_owned())),
-        MirNodeKind::RecursiveRef { .. } => {
-            Err(CompileError::Unsupported("RecursiveRef".to_owned()))
+        MirNodeKind::DistinctOn { on, order_by } => {
+            compile_distinct_on(graph, node, on, order_by, state)
         }
+        MirNodeKind::Union { quantifier } => compile_union(graph, node, *quantifier, state),
+        MirNodeKind::Except { quantifier } => {
+            compile_set_op(graph, node, false, *quantifier, state)
+        }
+        MirNodeKind::Intersect { quantifier } => {
+            compile_set_op(graph, node, true, *quantifier, state)
+        }
+        MirNodeKind::Fixpoint { cte, union_all } => {
+            compile_fixpoint(graph, node, cte, *union_all, state)
+        }
+        MirNodeKind::RecursiveRef { cte } => compile_recursive_ref(graph, node, cte, tables, state),
         MirNodeKind::Leaf { .. } => Err(CompileError::Unsupported("Leaf".to_owned())),
     }
 }
@@ -497,6 +565,26 @@ fn compile_project(
             return Err(CompileError::Unknown(format!("project column {entry}")));
         }
 
+        // Aggregate outputs are named by their display text
+        // (`count(*)`); the select item may differ only in case
+        // (`COUNT(*)`), so try a case-insensitive match before
+        // treating the entry as a fresh expression.
+        if let Some(index) = input_schema
+            .columns()
+            .iter()
+            .position(|(name, _)| name.eq_ignore_ascii_case(entry))
+        {
+            let name = input_schema.columns()[index].0.clone();
+            push_index(
+                index,
+                name,
+                &mut outputs,
+                &mut output_pairs,
+                &mut output_prov,
+            );
+            continue;
+        }
+
         // Anything else is a scalar expression (cast, coalesce, ...).
         let (scalar, ty) = compile_typed_scalar(entry, &input_schema)?;
         let name = crate::palimpsest::eval::cast_label(entry).unwrap_or_else(|| entry.to_owned());
@@ -552,81 +640,91 @@ fn compile_aggregate(
         .get(&input_node)
         .ok_or_else(|| CompileError::Unknown("aggregate input schema".to_owned()))?
         .clone();
+    let input_prov = state
+        .node_provenance
+        .get(&input_node)
+        .cloned()
+        .unwrap_or_else(|| vec![None; input_schema.len()]);
 
-    if group_by.len() != 1 {
-        return Err(CompileError::MultiColumnGroupBy);
-    }
-    let group_col = &group_by[0].name;
-    let group_idx = input_schema
-        .index_of(group_col)
-        .ok_or_else(|| CompileError::Unknown(format!("group column {group_col}")))?;
-    let group_type = input_schema
-        .column_type(group_col)
-        .expect("type for known column");
-
-    // Return the raw `Datum` so the operator key preserves the
-    // column's original SQL type. `aggregate_i64` is generic over
-    // `K`, so passing `Datum` works directly — and the schema we
-    // advertise to clients (group_col with its original `group_type`)
-    // round-trips end-to-end.
-    let group_extract: Arc<dyn Fn(&Row) -> Datum + Send + Sync> =
-        Arc::new(move |row: &Row| row.get(group_idx).cloned().unwrap_or(Datum::Null));
-
-    // `aggregate_i64` reads one input column per call, with each
-    // `AggregateFunc` evaluating against the same value stream.
-    // Enforce that all aggregates either reference the same column
-    // or are `COUNT(*)` (which ignores its argument).
-    let mut value_column: Option<String> = None;
-    let mut funcs = Vec::with_capacity(aggs.len());
+    // Resolve every group column (zero or more) to a row index; the
+    // group key is the vector of those datums, preserving each
+    // column's original SQL type end-to-end.
+    let mut group_indices = Vec::with_capacity(group_by.len());
     let mut output_pairs = Vec::with_capacity(group_by.len() + aggs.len());
-    output_pairs.push((group_col.clone(), group_type));
+    for group_col in group_by {
+        let index = resolve_column(&input_schema, &input_prov, group_col, true)
+            .or_else(|| resolve_column(&input_schema, &input_prov, group_col, false))
+            .ok_or_else(|| CompileError::Unknown(format!("group column {}", group_col.name)))?;
+        let (name, ty) = input_schema.columns()[index].clone();
+        group_indices.push(index);
+        output_pairs.push((name, ty));
+    }
+    let group_extract: Arc<dyn Fn(&Row) -> Vec<Datum> + Send + Sync> = {
+        let indices = group_indices;
+        Arc::new(move |row: &Row| {
+            indices
+                .iter()
+                .map(|&i| row.get(i).cloned().unwrap_or(Datum::Null))
+                .collect()
+        })
+    };
 
+    // Each aggregate reads its own value expression, `i64`-coerced.
+    let mut funcs = Vec::with_capacity(aggs.len());
+    let mut value_extracts: Vec<Arc<dyn Fn(&Row) -> i64 + Send + Sync>> =
+        Vec::with_capacity(aggs.len());
     for agg in aggs {
-        let func = parse_agg_func(&agg.function)?;
+        let (func, arg) = parse_agg_call(agg)?;
         funcs.push(func);
 
-        // Validate the value column. `*` is the wildcard for COUNT.
-        let arg_text = agg.args.first().map(String::as_str).unwrap_or("*");
-        let arg_col = arg_text.trim();
-        if arg_col != "*" && !matches!(func, AggregateFunc::Count) {
-            match &value_column {
-                None => value_column = Some(arg_col.to_owned()),
-                Some(prev) if prev == arg_col => {}
-                Some(prev) => {
-                    return Err(CompileError::HeterogeneousAggregateColumns(format!(
-                        "{prev} vs {arg_col}"
-                    )));
-                }
+        let extractor: Arc<dyn Fn(&Row) -> i64 + Send + Sync> = if arg == "*" {
+            // COUNT(*): the operator only reads the diff multiplicity.
+            Arc::new(|_row: &Row| 0)
+        } else {
+            let (scalar, ty) = compile_typed_scalar(&arg, &input_schema)?;
+            // SUM / MIN / MAX / AVG results are advertised as
+            // integers; a non-integer input column would silently
+            // aggregate as zeros, so reject it instead of computing
+            // wrong numbers. COUNT variants only test presence.
+            if !matches!(func, AggregateFunc::Count | AggregateFunc::CountDistinct)
+                && ty != ColumnType::Int
+            {
+                return Err(CompileError::Unsupported(format!(
+                    "aggregate {}({arg}) over non-integer column",
+                    agg.function
+                )));
             }
-        }
+            Arc::new(move |row: &Row| match scalar(row) {
+                Datum::I64(v) => v,
+                Datum::I32(v) => i64::from(v),
+                Datum::I16(v) => i64::from(v),
+                _ => 0,
+            })
+        };
+        value_extracts.push(extractor);
 
-        let alias = agg
+        let name = agg
             .alias
             .clone()
-            .unwrap_or_else(|| format!("{}_{}", agg.function.to_lowercase(), output_pairs.len()));
+            .unwrap_or_else(|| aggregate_display_name(agg));
         let output_type = match func {
             AggregateFunc::Avg => ColumnType::Float,
             _ => ColumnType::Int,
         };
-        output_pairs.push((alias, output_type));
+        output_pairs.push((name, output_type));
     }
 
-    // If every agg is COUNT(*), there's no value column — pass a
-    // zero extractor; aggregate_i64 only reads diffs in that case.
-    let value_extract: Arc<dyn Fn(&Row) -> i64 + Send + Sync> = match value_column {
-        None => Arc::new(|_row: &Row| 0),
-        Some(col) => {
-            let value_idx = input_schema
-                .index_of(&col)
-                .ok_or_else(|| CompileError::Unknown(format!("aggregate column {col}")))?;
-            Arc::new(move |row: &Row| match row.get(value_idx) {
-                Some(Datum::I64(v)) => *v,
-                Some(Datum::I32(v)) => i64::from(*v),
-                Some(Datum::I16(v)) => i64::from(*v),
-                _ => 0,
+    // A global aggregate (no GROUP BY) still returns one row over an
+    // empty input: COUNT = 0, everything else NULL.
+    let empty_default: Option<Row> = group_by.is_empty().then(|| {
+        funcs
+            .iter()
+            .map(|func| match func {
+                AggregateFunc::Count | AggregateFunc::CountDistinct => Datum::I64(0),
+                _ => Datum::Null,
             })
-        }
-    };
+            .collect()
+    });
 
     let output_schema = ScalarSchema::from_pairs(output_pairs);
 
@@ -638,11 +736,49 @@ fn compile_aggregate(
         node,
         NodeRecipe::Aggregate {
             group_extract,
-            value_extract,
+            value_extracts,
             funcs,
+            empty_default,
         },
     );
     Ok(())
+}
+
+/// Splits an [`AggExpr`] into its dataflow function and value-argument
+/// text. The lowering marks `COUNT(DISTINCT x)` by prepending a
+/// `DISTINCT` sentinel to the argument list.
+fn parse_agg_call(agg: &AggExpr) -> Result<(AggregateFunc, String), CompileError> {
+    let distinct = agg.args.first().is_some_and(|arg| arg == "DISTINCT");
+    let arg = agg
+        .args
+        .get(usize::from(distinct))
+        .map(|arg| arg.trim().to_owned())
+        .unwrap_or_else(|| "*".to_owned());
+    let func = parse_agg_func(&agg.function)?;
+    if distinct {
+        if func == AggregateFunc::Count {
+            return Ok((AggregateFunc::CountDistinct, arg));
+        }
+        return Err(CompileError::Unsupported(format!(
+            "{}(DISTINCT ...)",
+            agg.function
+        )));
+    }
+    Ok((func, arg))
+}
+
+/// Output-column name for an unaliased aggregate, matching how the
+/// select item renders (`count(*)`, `max(created_at)`) so projections
+/// referencing the aggregate by its display text resolve — modulo
+/// case, which the projection resolver ignores.
+fn aggregate_display_name(agg: &AggExpr) -> String {
+    let distinct = agg.args.first().is_some_and(|arg| arg == "DISTINCT");
+    let args = &agg.args[usize::from(distinct)..];
+    if distinct {
+        format!("{}(DISTINCT {})", agg.function, args.join(", "))
+    } else {
+        format!("{}({})", agg.function, args.join(", "))
+    }
 }
 
 fn compile_join(
@@ -867,6 +1003,44 @@ fn parse_agg_func(name: &str) -> Result<AggregateFunc, CompileError> {
     }
 }
 
+/// Compiles one key-expression string (an `ORDER BY` key or a
+/// `DISTINCT ON` expression) into a datum extractor: plain and
+/// qualified column references resolve by index (provenance-aware),
+/// anything else compiles through the expression evaluator.
+fn compile_key_extractor(
+    entry: &str,
+    schema: &ScalarSchema,
+    provenance: &[Option<String>],
+) -> Result<Arc<dyn Fn(&Row) -> Datum + Send + Sync>, CompileError> {
+    let entry = entry.trim();
+    let index = schema.index_of(entry).or_else(|| {
+        split_qualified(entry).and_then(|(relation, bare)| {
+            schema
+                .columns()
+                .iter()
+                .enumerate()
+                .position(|(i, (name, _))| {
+                    name == bare && provenance.get(i).and_then(Option::as_deref) == Some(relation)
+                })
+                .or_else(|| schema.index_of(bare))
+        })
+    });
+    if let Some(index) = index {
+        return Ok(Arc::new(move |row: &Row| {
+            row.get(index).cloned().unwrap_or(Datum::Null)
+        }));
+    }
+    let scalar = crate::palimpsest::eval::compile_scalar(entry, schema)?;
+    Ok(Arc::from(scalar))
+}
+
+/// Builds a `Vec<Datum>`-keyed extractor from per-key extractors.
+fn combine_key_extractors(
+    extractors: Vec<Arc<dyn Fn(&Row) -> Datum + Send + Sync>>,
+) -> Arc<dyn Fn(&Row) -> Vec<Datum> + Send + Sync> {
+    Arc::new(move |row: &Row| extractors.iter().map(|extract| extract(row)).collect())
+}
+
 fn compile_topk(
     graph: &MirGraph,
     node: NodeIndex,
@@ -881,43 +1055,246 @@ fn compile_topk(
         .get(&input_node)
         .ok_or_else(|| CompileError::Unknown("topk input schema".to_owned()))?
         .clone();
-
-    if order_by.len() != 1 {
-        return Err(CompileError::MultiColumnOrderBy);
-    }
-    let key = &order_by[0];
-    let sort_idx = input_schema
-        .index_of(&key.expression)
-        .ok_or_else(|| CompileError::Unknown(format!("order column {}", key.expression)))?;
-
-    let sort_key_extract: Arc<dyn Fn(&Row) -> i64 + Send + Sync> =
-        Arc::new(move |row: &Row| match row.get(sort_idx) {
-            Some(Datum::I64(v)) => *v,
-            Some(Datum::I32(v)) => i64::from(*v),
-            Some(Datum::I16(v)) => i64::from(*v),
-            _ => 0,
-        });
-
-    let direction = if key.descending {
-        SortDirection::Descending
-    } else {
-        SortDirection::Ascending
-    };
-
     let provenance = state
         .node_provenance
         .get(&input_node)
         .cloned()
         .unwrap_or_else(|| vec![None; input_schema.len()]);
+
+    let mut extractors = Vec::with_capacity(order_by.len());
+    let mut descending = Vec::with_capacity(order_by.len());
+    for key in order_by {
+        extractors.push(compile_key_extractor(
+            &key.expression,
+            &input_schema,
+            &provenance,
+        )?);
+        descending.push(key.descending);
+    }
+    let sort_extract = combine_key_extractors(extractors);
+
     state.node_provenance.insert(node, provenance);
     state.node_schemas.insert(node, input_schema);
     state.recipes.insert(
         node,
         NodeRecipe::TopK {
-            sort_key_extract,
-            direction,
+            sort_extract,
+            descending,
             limit,
             offset,
+        },
+    );
+    Ok(())
+}
+
+fn compile_distinct_on(
+    graph: &MirGraph,
+    node: NodeIndex,
+    on: &[String],
+    order_by: &[OrderKey],
+    state: &mut CompileState,
+) -> Result<(), CompileError> {
+    let input_node = single_input(graph, node)?;
+    let input_schema = state
+        .node_schemas
+        .get(&input_node)
+        .ok_or_else(|| CompileError::Unknown("distinct-on input schema".to_owned()))?
+        .clone();
+    let provenance = state
+        .node_provenance
+        .get(&input_node)
+        .cloned()
+        .unwrap_or_else(|| vec![None; input_schema.len()]);
+
+    let mut on_extractors = Vec::with_capacity(on.len());
+    for expression in on {
+        on_extractors.push(compile_key_extractor(
+            expression,
+            &input_schema,
+            &provenance,
+        )?);
+    }
+    let mut sort_extractors = Vec::with_capacity(order_by.len());
+    let mut descending = Vec::with_capacity(order_by.len());
+    for key in order_by {
+        sort_extractors.push(compile_key_extractor(
+            &key.expression,
+            &input_schema,
+            &provenance,
+        )?);
+        descending.push(key.descending);
+    }
+
+    state.node_provenance.insert(node, provenance);
+    state.node_schemas.insert(node, input_schema);
+    state.recipes.insert(
+        node,
+        NodeRecipe::DistinctOn {
+            on_extract: combine_key_extractors(on_extractors),
+            sort_extract: combine_key_extractors(sort_extractors),
+            descending,
+        },
+    );
+    Ok(())
+}
+
+fn compile_set_op(
+    graph: &MirGraph,
+    node: NodeIndex,
+    intersect: bool,
+    quantifier: SetQuantifierKind,
+    state: &mut CompileState,
+) -> Result<(), CompileError> {
+    let inputs = graph.ordered_inputs(node);
+    let [left, right] = inputs.as_slice() else {
+        return Err(CompileError::Unsupported(format!(
+            "set operation with {} inputs",
+            inputs.len()
+        )));
+    };
+    let left_schema = state
+        .node_schemas
+        .get(left)
+        .ok_or_else(|| CompileError::Unknown("set-op left schema".to_owned()))?
+        .clone();
+    let right_schema = state
+        .node_schemas
+        .get(right)
+        .ok_or_else(|| CompileError::Unknown("set-op right schema".to_owned()))?;
+    if left_schema.len() != right_schema.len() {
+        return Err(CompileError::Unsupported(format!(
+            "set-operation branches with {} vs {} columns",
+            left_schema.len(),
+            right_schema.len()
+        )));
+    }
+
+    state
+        .node_provenance
+        .insert(node, vec![None; left_schema.len()]);
+    state.node_schemas.insert(node, left_schema);
+    state.recipes.insert(
+        node,
+        NodeRecipe::SetOp {
+            intersect,
+            all: quantifier == SetQuantifierKind::All,
+        },
+    );
+    Ok(())
+}
+
+fn compile_fixpoint(
+    graph: &MirGraph,
+    node: NodeIndex,
+    cte: &str,
+    union_all: bool,
+    state: &mut CompileState,
+) -> Result<(), CompileError> {
+    // UNION ALL recursion accumulates rows across iterations rather
+    // than converging on a set; there is no fixed point for the
+    // dataflow to reach, so only UNION (distinct) recursion compiles.
+    if union_all {
+        return Err(CompileError::Unsupported(
+            "recursive UNION ALL (no fixed point to converge on)".to_owned(),
+        ));
+    }
+    let inputs = graph.ordered_inputs(node);
+    let [base, step] = inputs.as_slice() else {
+        return Err(CompileError::Unsupported(format!(
+            "fixpoint with {} inputs",
+            inputs.len()
+        )));
+    };
+
+    // The installer runs the step term inside one iteration scope and
+    // cannot open another one within it (that would recurse the scope
+    // type without bound), so a fixpoint nested inside this step —
+    // or a reference to a *different* recursion — is rejected here.
+    let mut stack = vec![*step];
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        match graph.node_kind(current) {
+            MirNodeKind::Fixpoint { .. } => {
+                return Err(CompileError::Unsupported(
+                    "nested recursive CTEs".to_owned(),
+                ));
+            }
+            MirNodeKind::RecursiveRef { cte: name } if name != cte => {
+                return Err(CompileError::Unsupported(
+                    "mutually recursive CTEs".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        use petgraph::visit::EdgeRef;
+        stack.extend(
+            graph
+                .graph()
+                .edges_directed(current, Direction::Incoming)
+                .map(|edge| edge.source()),
+        );
+    }
+
+    let base_schema = state
+        .node_schemas
+        .get(base)
+        .ok_or_else(|| CompileError::Unknown("fixpoint base schema".to_owned()))?
+        .clone();
+
+    state
+        .node_provenance
+        .insert(node, vec![None; base_schema.len()]);
+    state.node_schemas.insert(node, base_schema);
+    state.recipes.insert(
+        node,
+        NodeRecipe::Fixpoint {
+            cte: cte.to_owned(),
+        },
+    );
+    Ok(())
+}
+
+fn compile_recursive_ref<L: TableSchemaLookup>(
+    graph: &MirGraph,
+    node: NodeIndex,
+    cte: &str,
+    tables: &L,
+    state: &mut CompileState,
+) -> Result<(), CompileError> {
+    // The working table's schema is the fixpoint's base-term schema.
+    // The base subtree is disjoint from this node (the frontend
+    // rejects self-references in the base term), so compiling it on
+    // demand cannot recurse back here.
+    let fixpoint = graph
+        .graph()
+        .node_indices()
+        .find(|index| {
+            matches!(
+                graph.node_kind(*index),
+                MirNodeKind::Fixpoint { cte: name, .. } if name == cte
+            )
+        })
+        .ok_or_else(|| CompileError::Unknown(format!("fixpoint for recursive CTE {cte}")))?;
+    let base = *graph
+        .ordered_inputs(fixpoint)
+        .first()
+        .ok_or_else(|| CompileError::Unknown(format!("fixpoint base for {cte}")))?;
+    ensure_compiled(graph, base, tables, state)?;
+    let schema = state
+        .node_schemas
+        .get(&base)
+        .cloned()
+        .ok_or_else(|| CompileError::Unknown(format!("recursive CTE schema {cte}")))?;
+
+    state.node_provenance.insert(node, vec![None; schema.len()]);
+    state.node_schemas.insert(node, schema);
+    state.recipes.insert(
+        node,
+        NodeRecipe::RecursiveRef {
+            cte: cte.to_owned(),
         },
     );
     Ok(())
@@ -1029,42 +1406,183 @@ where
             .get(table)
             .expect("install_plan caller wires every BaseTable input")
             .clone(),
-        NodeRecipe::Filter { predicate } => {
+        NodeRecipe::CteRef { target } => install_recursive(plan, scope, inputs, *target, cache),
+        NodeRecipe::RecursiveRef { cte } => {
+            unreachable!("RecursiveRef {cte} outside its fixpoint's step term")
+        }
+        NodeRecipe::Fixpoint { cte } => {
+            let fix_inputs = plan.graph.ordered_inputs(node);
+            let (base_node, step_node) = (fix_inputs[0], fix_inputs[1]);
+            let base = install_recursive(plan, scope, inputs, base_node, cache);
+
+            // UNION-distinct recursion: iterate the step over the
+            // working table, re-adding the base each round, until the
+            // distinct set stops changing. The closing `distinct`
+            // consolidates, which is also what guarantees the loop's
+            // differences dissipate.
+            use crate::operators::iterate::Iterate;
+            base.iterate(|working| {
+                let mut child = working.scope();
+                let entered: HashMap<TableId, VecCollection<_, Row, isize>> = inputs
+                    .iter()
+                    .map(|(table, collection)| (*table, collection.enter(&child)))
+                    .collect();
+                let base_in = base.enter(&child);
+                let mut step_cache = HashMap::new();
+                let step_out = install_step(
+                    plan,
+                    &mut child,
+                    &entered,
+                    step_node,
+                    &mut step_cache,
+                    (cte, working),
+                );
+                relational::distinct(&relational::union(&base_in, &step_out))
+            })
+        }
+        dual @ (NodeRecipe::Join { .. } | NodeRecipe::Union { .. } | NodeRecipe::SetOp { .. }) => {
+            let op_inputs = plan.graph.ordered_inputs(node);
+            let installed: Vec<_> = op_inputs
+                .into_iter()
+                .map(|input| install_recursive(plan, scope, inputs, input, cache))
+                .collect();
+            install_op(dual, &installed, scope)
+        }
+        unary => {
             let input_node = single_input(&plan.graph, node).expect("compile_mir validated");
-            let input = install_recursive(plan, scope, inputs, input_node, cache);
+            let installed = install_recursive(plan, scope, inputs, input_node, cache);
+            install_op(unary, &[installed], scope)
+        }
+    };
+
+    cache.insert(node, collection.clone());
+    collection
+}
+
+/// Installer used *inside* a fixpoint's iteration scope. Identical to
+/// [`install_recursive`] except that `RecursiveRef` resolves to the
+/// iteration's working collection and `Fixpoint` is unreachable
+/// (compile rejects nested recursions) — which is what keeps the
+/// iterative scope type from recursing without bound.
+fn install_step<G>(
+    plan: &CompiledPlan,
+    scope: &mut G,
+    inputs: &HashMap<TableId, VecCollection<G, Row, isize>>,
+    node: NodeIndex,
+    cache: &mut HashMap<NodeIndex, VecCollection<G, Row, isize>>,
+    recursive: (&str, &VecCollection<G, Row, isize>),
+) -> VecCollection<G, Row, isize>
+where
+    G: timely::dataflow::Scope,
+    G::Timestamp: Lattice + Ord,
+{
+    if let Some(c) = cache.get(&node) {
+        return c.clone();
+    }
+
+    let recipe = plan
+        .recipes
+        .get(&node)
+        .expect("compile_mir guarantees a recipe per node");
+    let collection = match recipe {
+        NodeRecipe::BaseTable { table } => inputs
+            .get(table)
+            .expect("install_plan caller wires every BaseTable input")
+            .clone(),
+        NodeRecipe::CteRef { target } => {
+            install_step(plan, scope, inputs, *target, cache, recursive)
+        }
+        NodeRecipe::RecursiveRef { cte } => {
+            debug_assert_eq!(cte, recursive.0, "compile_fixpoint validated the binding");
+            recursive.1.clone()
+        }
+        NodeRecipe::Fixpoint { .. } => {
+            unreachable!("compile_fixpoint rejects nested recursive CTEs")
+        }
+        dual @ (NodeRecipe::Join { .. } | NodeRecipe::Union { .. } | NodeRecipe::SetOp { .. }) => {
+            let op_inputs = plan.graph.ordered_inputs(node);
+            let installed: Vec<_> = op_inputs
+                .into_iter()
+                .map(|input| install_step(plan, scope, inputs, input, cache, recursive))
+                .collect();
+            install_op(dual, &installed, scope)
+        }
+        unary => {
+            let input_node = single_input(&plan.graph, node).expect("compile_mir validated");
+            let installed = install_step(plan, scope, inputs, input_node, cache, recursive);
+            install_op(unary, &[installed], scope)
+        }
+    };
+
+    cache.insert(node, collection.clone());
+    collection
+}
+
+/// Ordering over `(sort_keys, row)` pairs: componentwise SQL datum
+/// comparison with per-key direction, tie-broken by the row's natural
+/// order for determinism.
+fn sort_key_comparator(
+    descending: Vec<bool>,
+) -> impl Fn(&(Vec<Datum>, Row), &(Vec<Datum>, Row)) -> std::cmp::Ordering {
+    use crate::palimpsest::eval::compare_datums_sort;
+    move |a, b| {
+        for (index, desc) in descending.iter().enumerate() {
+            let left = a.0.get(index).unwrap_or(&Datum::Null);
+            let right = b.0.get(index).unwrap_or(&Datum::Null);
+            let ordering = compare_datums_sort(left, right);
+            let ordering = if *desc { ordering.reverse() } else { ordering };
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
+            }
+        }
+        a.1.cmp(&b.1)
+    }
+}
+
+/// Wires one non-source recipe over its already-installed inputs.
+/// Shared between the outer installer and the fixpoint-step installer.
+#[allow(clippy::too_many_lines)]
+fn install_op<G>(
+    recipe: &NodeRecipe,
+    ins: &[VecCollection<G, Row, isize>],
+    scope: &mut G,
+) -> VecCollection<G, Row, isize>
+where
+    G: timely::dataflow::Scope,
+    G::Timestamp: Lattice + Ord,
+{
+    match recipe {
+        NodeRecipe::Filter { predicate } => {
             let pred = Arc::clone(predicate);
-            relational::filter(&input, move |row: &Row| pred(row))
+            relational::filter(&ins[0], move |row: &Row| pred(row))
         }
         NodeRecipe::Project { extract } => {
-            let input_node = single_input(&plan.graph, node).expect("compile_mir validated");
-            let input = install_recursive(plan, scope, inputs, input_node, cache);
             let ext = Arc::clone(extract);
-            relational::project(&input, move |row: Row| ext(&row))
+            relational::project(&ins[0], move |row: Row| ext(&row))
         }
         NodeRecipe::Aggregate {
             group_extract,
-            value_extract,
+            value_extracts,
             funcs,
+            empty_default,
         } => {
-            let input_node = single_input(&plan.graph, node).expect("compile_mir validated");
-            let input = install_recursive(plan, scope, inputs, input_node, cache);
-
-            // Project Row → (group_key, value).
+            // Project Row → (group_keys, per-aggregate values).
             let ge = Arc::clone(group_extract);
-            let ve = Arc::clone(value_extract);
-            let projected = relational::project(&input, move |row: Row| (ge(&row), ve(&row)));
-            let funcs = funcs.clone();
-            let aggregated = relational::aggregate_i64(&projected, funcs);
+            let ves = value_extracts.clone();
+            let keyed = relational::project(&ins[0], move |row: Row| {
+                let values: Vec<i64> = ves.iter().map(|ve| ve(&row)).collect();
+                (ge(&row), values)
+            });
+            let aggregated = relational::aggregate_multi(&keyed, funcs.clone());
 
-            // Project (group_key, Vec<AggregateValue>) → Row. The
-            // group key keeps its original Datum type, so a Bool
-            // group column emits a Bool first column and matches the
-            // schema we advertised to clients.
-            relational::project(
+            // Project (group_keys, Vec<AggregateValue>) → Row. Group
+            // keys keep their original Datum types, so the row matches
+            // the schema advertised to clients.
+            let result = relational::project(
                 &aggregated,
-                |(group, aggs): (Datum, Vec<AggregateValue>)| {
-                    let mut row: Row = SmallVec::with_capacity(1 + aggs.len());
-                    row.push(group);
+                |(group, aggs): (Vec<Datum>, Vec<AggregateValue>)| {
+                    let mut row: Row = SmallVec::with_capacity(group.len() + aggs.len());
+                    row.extend(group);
                     for av in aggs {
                         let datum = match av {
                             AggregateValue::Integer(v) => Datum::I64(saturating_i128_to_i64(v)),
@@ -1081,25 +1599,66 @@ where
                     }
                     row
                 },
-            )
+            );
+
+            // A global aggregate still returns one row over an empty
+            // input. Reduce emits nothing for absent groups, so emit
+            // the default row exactly while the (single, unit) group
+            // key is absent from the input.
+            if let Some(default_row) = empty_default {
+                use timely::dataflow::operators::ToStream;
+                let default_row = default_row.clone();
+                let present = relational::distinct(&relational::project(
+                    &keyed,
+                    |(key, _values): (Vec<Datum>, Vec<i64>)| key,
+                ));
+                let unit: VecCollection<G, Vec<Datum>, isize> = vec![(
+                    Vec::new(),
+                    <G::Timestamp as timely::progress::Timestamp>::minimum(),
+                    1_isize,
+                )]
+                .to_stream(scope)
+                .as_collection();
+                let missing =
+                    relational::project(&unit, |key: Vec<Datum>| (key, ())).antijoin(&present);
+                result.concat(&relational::project(
+                    &missing,
+                    move |(_key, ()): (Vec<Datum>, ())| default_row.clone(),
+                ))
+            } else {
+                result
+            }
         }
         NodeRecipe::TopK {
-            sort_key_extract,
-            direction,
+            sort_extract,
+            descending,
             limit,
             offset,
         } => {
-            let input_node = single_input(&plan.graph, node).expect("compile_mir validated");
-            let input = install_recursive(plan, scope, inputs, input_node, cache);
-
-            // Use the input's natural Ord — Row's lexicographic order
-            // doesn't always match the desired key. Pre-project to
-            // (sort_key, row) so TopK sorts by `sort_key`, then strip
-            // the prefix once the slice is selected.
-            let extract = Arc::clone(sort_key_extract);
-            let with_key = relational::project(&input, move |row: Row| (extract(&row), row));
-            let sliced = relational::topk(&with_key, *direction, *limit, *offset);
-            relational::project(&sliced, |(_, row): (i64, Row)| row)
+            // Pre-project to (sort_keys, row); the comparator orders
+            // by the keys, then the slice is selected and the prefix
+            // stripped.
+            let extract = Arc::clone(sort_extract);
+            let with_key = relational::project(&ins[0], move |row: Row| (extract(&row), row));
+            let sliced = relational::topk_by(
+                &with_key,
+                sort_key_comparator(descending.clone()),
+                *limit,
+                *offset,
+            );
+            relational::project(&sliced, |(_, row): (Vec<Datum>, Row)| row)
+        }
+        NodeRecipe::DistinctOn {
+            on_extract,
+            sort_extract,
+            descending,
+        } => {
+            let on = Arc::clone(on_extract);
+            let sort = Arc::clone(sort_extract);
+            let keyed = relational::project(&ins[0], move |row: Row| (on(&row), (sort(&row), row)));
+            let picked =
+                relational::distinct_on_first(&keyed, sort_key_comparator(descending.clone()));
+            relational::project(&picked, |(_sort, row): (Vec<Datum>, Row)| row)
         }
         NodeRecipe::Join {
             kind,
@@ -1107,15 +1666,11 @@ where
             right_keys,
             right_width,
         } => {
-            let join_inputs = plan.graph.ordered_inputs(node);
-            let (left_node, right_node) = (join_inputs[0], join_inputs[1]);
-            let left = install_recursive(plan, scope, inputs, left_node, cache);
-            let right = install_recursive(plan, scope, inputs, right_node, cache);
-
             let lk = left_keys.clone();
             let rk = right_keys.clone();
-            let left_keyed = relational::project(&left, move |row: Row| (key_of(&row, &lk), row));
-            let right_keyed = relational::project(&right, move |row: Row| (key_of(&row, &rk), row));
+            let left_keyed = relational::project(&ins[0], move |row: Row| (key_of(&row, &lk), row));
+            let right_keyed =
+                relational::project(&ins[1], move |row: Row| (key_of(&row, &rk), row));
             // SQL equality: a NULL key never matches. Differential's
             // Rust equality would pair NULL with NULL, so strip
             // null-keyed rows from the right side — left rows then
@@ -1172,27 +1727,34 @@ where
                 }
             }
         }
-        NodeRecipe::Distinct => {
-            let input_node = single_input(&plan.graph, node).expect("compile_mir validated");
-            let input = install_recursive(plan, scope, inputs, input_node, cache);
-            relational::distinct(&input)
-        }
+        NodeRecipe::Distinct => relational::distinct(&ins[0]),
         NodeRecipe::Union { all } => {
-            let union_inputs = plan.graph.ordered_inputs(node);
-            let (left_node, right_node) = (union_inputs[0], union_inputs[1]);
-            let left = install_recursive(plan, scope, inputs, left_node, cache);
-            let right = install_recursive(plan, scope, inputs, right_node, cache);
             if *all {
-                relational::union(&left, &right)
+                relational::union(&ins[0], &ins[1])
             } else {
-                relational::union_distinct(&left, &right)
+                relational::union_distinct(&ins[0], &ins[1])
             }
         }
-        NodeRecipe::CteRef { target } => install_recursive(plan, scope, inputs, *target, cache),
-    };
-
-    cache.insert(node, collection.clone());
-    collection
+        NodeRecipe::SetOp { intersect, all } => {
+            let combine: fn(isize, isize) -> isize = match (intersect, all) {
+                // EXCEPT: distinct left rows with no right occurrence.
+                (false, false) => |l, r| isize::from(l > 0 && r <= 0),
+                // EXCEPT ALL: bag difference.
+                (false, true) => |l, r| (l - r).max(0),
+                // INTERSECT: distinct rows present on both sides.
+                (true, false) => |l, r| isize::from(l > 0 && r > 0),
+                // INTERSECT ALL: bag minimum.
+                (true, true) => |l, r| l.min(r).max(0),
+            };
+            relational::bag_set_op(&ins[0], &ins[1], combine)
+        }
+        NodeRecipe::BaseTable { .. }
+        | NodeRecipe::CteRef { .. }
+        | NodeRecipe::Fixpoint { .. }
+        | NodeRecipe::RecursiveRef { .. } => {
+            unreachable!("source recipes are handled by the install drivers")
+        }
+    }
 }
 
 /// Join key: the named columns' datums, in key order. `Vec<Datum>`
@@ -1404,9 +1966,17 @@ mod tests {
     const ARTICLES: TableId = TableId::new(10);
     const AUTHORS: TableId = TableId::new(11);
     const COMMENTS: TableId = TableId::new(12);
+    const EDGES: TableId = TableId::new(13);
 
     fn relational_lookup(table: &str) -> Option<(TableId, ScalarSchema)> {
         match table {
+            "edges" => Some((
+                EDGES,
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("parent".to_owned(), ColumnType::Int),
+                ]),
+            )),
             "articles" => Some((
                 ARTICLES,
                 ScalarSchema::from_pairs([
@@ -1679,6 +2249,327 @@ mod tests {
             &plan,
             vec![(TableId::new(1), seed)],
             vec![datum_row(vec![text("1")])],
+        );
+    }
+
+    fn events_seed() -> Vec<Row> {
+        vec![
+            datum_row(vec![Datum::I64(1), Datum::I64(7), Datum::I64(10)]),
+            datum_row(vec![Datum::I64(2), Datum::I64(7), Datum::I64(10)]),
+            datum_row(vec![Datum::I64(3), Datum::I64(7), Datum::I64(20)]),
+            datum_row(vec![Datum::I64(4), Datum::I64(9), Datum::I64(5)]),
+        ]
+    }
+
+    #[test]
+    fn distinct_on_keeps_ranked_row_per_group() {
+        let graph = parse_and_lower(
+            "SELECT DISTINCT ON (author_id) id, author_id
+             FROM articles
+             ORDER BY author_id, id DESC",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        let articles = vec![
+            datum_row(vec![Datum::I64(1), Datum::I64(42)]),
+            datum_row(vec![Datum::I64(2), Datum::I64(42)]),
+            datum_row(vec![Datum::I64(3), Datum::I64(7)]),
+        ];
+        // Per author, the highest id survives.
+        run_plan(
+            &plan,
+            vec![(ARTICLES, articles)],
+            vec![
+                datum_row(vec![Datum::I64(3), Datum::I64(7)]),
+                datum_row(vec![Datum::I64(2), Datum::I64(42)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn except_and_intersect_follow_bag_semantics() {
+        let seeds = || {
+            vec![
+                (
+                    ARTICLES,
+                    vec![
+                        datum_row(vec![Datum::I64(1), Datum::I64(42)]),
+                        datum_row(vec![Datum::I64(1), Datum::I64(42)]),
+                        datum_row(vec![Datum::I64(2), Datum::I64(7)]),
+                    ],
+                ),
+                (
+                    COMMENTS,
+                    vec![datum_row(vec![Datum::I64(10), Datum::I64(1)])],
+                ),
+            ]
+        };
+        let compile = |sql: &str| compile_mir(&parse_and_lower(sql).unwrap(), &relational_lookup);
+
+        // EXCEPT: distinct left rows absent from the right. Article
+        // ids {1, 1, 2} minus comment article_ids {1} → {2}.
+        let plan =
+            compile("SELECT id FROM articles EXCEPT SELECT article_id FROM comments").unwrap();
+        run_plan(&plan, seeds(), vec![datum_row(vec![Datum::I64(2)])]);
+
+        // EXCEPT ALL: bag difference keeps the surviving duplicate.
+        let plan =
+            compile("SELECT id FROM articles EXCEPT ALL SELECT article_id FROM comments").unwrap();
+        run_plan(
+            &plan,
+            seeds(),
+            vec![
+                datum_row(vec![Datum::I64(1)]),
+                datum_row(vec![Datum::I64(2)]),
+            ],
+        );
+
+        // INTERSECT: distinct rows on both sides.
+        let plan =
+            compile("SELECT id FROM articles INTERSECT SELECT article_id FROM comments").unwrap();
+        run_plan(&plan, seeds(), vec![datum_row(vec![Datum::I64(1)])]);
+
+        // INTERSECT ALL: bag minimum (1 occurrence on the right).
+        let plan = compile("SELECT id FROM articles INTERSECT ALL SELECT article_id FROM comments")
+            .unwrap();
+        run_plan(&plan, seeds(), vec![datum_row(vec![Datum::I64(1)])]);
+    }
+
+    #[test]
+    fn recursive_cte_reaches_fixpoint() {
+        let graph = parse_and_lower(
+            "WITH RECURSIVE reach AS (
+                SELECT id, parent FROM edges WHERE parent = 1
+                UNION
+                SELECT edges.id, edges.parent
+                FROM edges JOIN reach ON edges.parent = reach.id
+             )
+             SELECT id FROM reach",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &relational_lookup).unwrap();
+        let edges = vec![
+            datum_row(vec![Datum::I64(2), Datum::I64(1)]),
+            datum_row(vec![Datum::I64(3), Datum::I64(2)]),
+            datum_row(vec![Datum::I64(4), Datum::I64(3)]),
+            datum_row(vec![Datum::I64(9), Datum::I64(8)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(EDGES, edges)],
+            vec![
+                datum_row(vec![Datum::I64(2)]),
+                datum_row(vec![Datum::I64(3)]),
+                datum_row(vec![Datum::I64(4)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn recursive_union_all_still_falls_back() {
+        let graph = parse_and_lower(
+            "WITH RECURSIVE reach AS (
+                SELECT id, parent FROM edges WHERE parent = 1
+                UNION ALL
+                SELECT edges.id, edges.parent
+                FROM edges JOIN reach ON edges.parent = reach.id
+             )
+             SELECT id FROM reach",
+        )
+        .unwrap();
+        let Err(err) = compile_mir(&graph, &relational_lookup) else {
+            panic!("recursive UNION ALL must not compile");
+        };
+        assert!(err.to_string().contains("UNION ALL"), "got {err}");
+    }
+
+    #[test]
+    fn multi_column_group_by_keys_groups_by_all_columns() {
+        let graph = parse_and_lower(
+            "SELECT category_id, value, count(*) AS n
+             FROM events
+             GROUP BY category_id, value",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![
+                datum_row(vec![Datum::I64(7), Datum::I64(10), Datum::I64(2)]),
+                datum_row(vec![Datum::I64(7), Datum::I64(20), Datum::I64(1)]),
+                datum_row(vec![Datum::I64(9), Datum::I64(5), Datum::I64(1)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn scalar_aggregate_emits_one_row_even_for_empty_input() {
+        let graph =
+            parse_and_lower("SELECT count(*) AS n, sum(value) AS total FROM events").unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![datum_row(vec![Datum::I64(4), Datum::I64(45)])],
+        );
+
+        // SQL: aggregates over an empty input still return one row —
+        // COUNT is 0 and SUM is NULL.
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), Vec::new())],
+            vec![datum_row(vec![Datum::I64(0), Datum::Null])],
+        );
+    }
+
+    #[test]
+    fn aggregates_read_their_own_value_columns() {
+        let graph = parse_and_lower(
+            "SELECT category_id, sum(value) AS total, min(id) AS first_id
+             FROM events
+             GROUP BY category_id",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![
+                datum_row(vec![Datum::I64(7), Datum::I64(40), Datum::I64(1)]),
+                datum_row(vec![Datum::I64(9), Datum::I64(5), Datum::I64(4)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn count_distinct_counts_distinct_values() {
+        let graph = parse_and_lower(
+            "SELECT category_id, count(DISTINCT value) AS variants
+             FROM events
+             GROUP BY category_id",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![
+                datum_row(vec![Datum::I64(7), Datum::I64(2)]),
+                datum_row(vec![Datum::I64(9), Datum::I64(1)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn unaliased_aggregates_resolve_in_the_projection() {
+        let graph = parse_and_lower(
+            "SELECT category_id, COUNT(*)
+             FROM events
+             GROUP BY category_id",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        assert_eq!(
+            plan.output_schema.column_type("count(*)"),
+            Some(ColumnType::Int)
+        );
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![
+                datum_row(vec![Datum::I64(7), Datum::I64(3)]),
+                datum_row(vec![Datum::I64(9), Datum::I64(1)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn having_filters_aggregate_groups() {
+        // Aliased aggregate referenced by HAVING.
+        let graph = parse_and_lower(
+            "SELECT category_id, count(*) AS n
+             FROM events
+             GROUP BY category_id
+             HAVING count(*) > 1",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![datum_row(vec![Datum::I64(7), Datum::I64(3)])],
+        );
+
+        // Aggregate that appears only in HAVING — computed as a hidden
+        // column and dropped by the projection.
+        let graph = parse_and_lower(
+            "SELECT category_id
+             FROM events
+             GROUP BY category_id
+             HAVING sum(value) > 25",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        assert_eq!(plan.output_schema.len(), 1);
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![datum_row(vec![Datum::I64(7)])],
+        );
+    }
+
+    #[test]
+    fn multi_column_order_by_slices_with_mixed_directions() {
+        let graph = parse_and_lower(
+            "SELECT id, category_id FROM events
+             ORDER BY category_id ASC, id DESC
+             LIMIT 2",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        // Sorted: (3,7), (2,7), (1,7), (4,9) — the first two survive.
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![
+                datum_row(vec![Datum::I64(3), Datum::I64(7)]),
+                datum_row(vec![Datum::I64(2), Datum::I64(7)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn order_by_text_key_sorts_lexicographically() {
+        let graph =
+            parse_and_lower("SELECT id, title FROM posts ORDER BY title DESC LIMIT 1").unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        let seed = vec![
+            datum_row(vec![Datum::I64(1), text("alpha"), Datum::Bool(true)]),
+            datum_row(vec![Datum::I64(2), text("zeta"), Datum::Bool(true)]),
+        ];
+        run_plan(
+            &plan,
+            vec![(TableId::new(1), seed)],
+            vec![datum_row(vec![Datum::I64(2), text("zeta")])],
+        );
+    }
+
+    #[test]
+    fn in_between_and_arithmetic_evaluate_in_predicates() {
+        let graph = parse_and_lower(
+            "SELECT id FROM events
+             WHERE category_id IN (7, 9)
+               AND value BETWEEN 10 AND 20
+               AND id + 1 = 3",
+        )
+        .unwrap();
+        let plan = compile_mir(&graph, &lookup).unwrap();
+        run_plan(
+            &plan,
+            vec![(TableId::new(2), events_seed())],
+            vec![datum_row(vec![Datum::I64(2)])],
         );
     }
 

@@ -295,9 +295,31 @@ fn lower_select_body(select: &Select, context: &LowerContext) -> Result<MirGraph
     }
 
     let group_by = group_by_columns(&select.group_by)?;
-    let aggs = aggregate_exprs(&select.projection)?;
+    let mut aggs = aggregate_exprs(&select.projection)?;
+
+    // HAVING filters the aggregate's output. Aggregate calls inside
+    // the predicate are replaced by references to (possibly hidden)
+    // aggregate output columns, so the filter compiles like any other
+    // — the projection above then drops the hidden columns.
+    let having_predicate = if let Some(having) = &select.having {
+        if contains_exists(having) {
+            return Err(SqlError::UnsupportedFeature("EXISTS inside HAVING"));
+        }
+        let rewritten = rewrite_having_aggregates(having, &mut aggs)?;
+        Some(canonical_predicate(&rewritten))
+    } else {
+        None
+    };
+
     if !group_by.is_empty() || !aggs.is_empty() {
         push_unary(&mut graph, MirNodeKind::Aggregate { group_by, aggs });
+    } else if having_predicate.is_some() {
+        return Err(SqlError::UnsupportedFeature(
+            "HAVING without aggregates or GROUP BY",
+        ));
+    }
+    if let Some(predicate) = having_predicate {
+        push_unary(&mut graph, MirNodeKind::Filter { predicate });
     }
 
     push_unary(
@@ -327,9 +349,6 @@ fn lower_select_body(select: &Select, context: &LowerContext) -> Result<MirGraph
 }
 
 fn reject_select_features_not_lowered(select: &Select) -> Result<(), SqlError> {
-    if select.having.is_some() {
-        return Err(SqlError::UnsupportedFeature("HAVING"));
-    }
     if has_group_by_modifiers(&select.group_by) {
         return Err(SqlError::UnsupportedFeature("GROUP BY modifiers"));
     }
@@ -535,6 +554,83 @@ fn split_exists_terms(expr: &Expr) -> (Vec<ExistsTerm<'_>>, Option<Expr>) {
     (terms, scalar)
 }
 
+/// Rewrites a HAVING predicate so every aggregate call becomes an
+/// identifier naming an aggregate output column. Aggregates that
+/// already appear in the projection with an alias reuse it; anything
+/// else is appended to `aggs` under a synthetic `__having_N` alias
+/// (the projection above the filter drops those hidden columns).
+fn rewrite_having_aggregates(expr: &Expr, aggs: &mut Vec<AggExpr>) -> Result<Expr, SqlError> {
+    fn rewrite(expr: &Expr, aggs: &mut Vec<AggExpr>, hidden: &mut usize) -> Result<Expr, SqlError> {
+        Ok(match expr {
+            Expr::Function(function) => {
+                let Some(mut agg) = aggregate_expr(function, None)? else {
+                    // Non-aggregate call (`coalesce`, ...): keep as-is.
+                    return Ok(expr.clone());
+                };
+                let existing = aggs
+                    .iter()
+                    .find(|candidate| {
+                        candidate.function == agg.function
+                            && candidate.args == agg.args
+                            && candidate.alias.is_some()
+                    })
+                    .and_then(|candidate| candidate.alias.clone());
+                let alias = if let Some(alias) = existing {
+                    alias
+                } else {
+                    *hidden += 1;
+                    let alias = format!("__having_{hidden}");
+                    agg.alias = Some(alias.clone());
+                    aggs.push(agg);
+                    alias
+                };
+                Expr::Identifier(Ident::new(alias))
+            }
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(rewrite(left, aggs, hidden)?),
+                op: op.clone(),
+                right: Box::new(rewrite(right, aggs, hidden)?),
+            },
+            Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
+                op: *op,
+                expr: Box::new(rewrite(inner, aggs, hidden)?),
+            },
+            Expr::Nested(inner) => Expr::Nested(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::IsTrue(inner) => Expr::IsTrue(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::IsFalse(inner) => Expr::IsFalse(Box::new(rewrite(inner, aggs, hidden)?)),
+            Expr::Between {
+                expr: inner,
+                negated,
+                low,
+                high,
+            } => Expr::Between {
+                expr: Box::new(rewrite(inner, aggs, hidden)?),
+                negated: *negated,
+                low: Box::new(rewrite(low, aggs, hidden)?),
+                high: Box::new(rewrite(high, aggs, hidden)?),
+            },
+            Expr::InList {
+                expr: inner,
+                list,
+                negated,
+            } => Expr::InList {
+                expr: Box::new(rewrite(inner, aggs, hidden)?),
+                list: list
+                    .iter()
+                    .map(|element| rewrite(element, aggs, hidden))
+                    .collect::<Result<_, _>>()?,
+                negated: *negated,
+            },
+            other => other.clone(),
+        })
+    }
+
+    let mut hidden = 0;
+    rewrite(expr, aggs, &mut hidden)
+}
+
 fn contains_exists(expr: &Expr) -> bool {
     struct ExistsFinder;
     impl Visitor for ExistsFinder {
@@ -583,6 +679,11 @@ fn lower_exists_subquery(
                 "GROUP BY inside EXISTS subqueries",
             ));
         }
+    }
+    if select.having.is_some() {
+        return Err(SqlError::UnsupportedFeature(
+            "HAVING inside EXISTS subqueries",
+        ));
     }
 
     let inner_names = relation_names(select);
@@ -1154,6 +1255,42 @@ mod tests {
                         },
                     ]
         )));
+    }
+
+    #[test]
+    fn lowers_having_to_filter_above_aggregate() {
+        // Aliased aggregates are referenced by alias; aggregates that
+        // appear only in HAVING become hidden output columns.
+        let graph = parse_and_lower(
+            "SELECT author_id, count(*) AS n
+             FROM posts
+             GROUP BY author_id
+             HAVING count(*) > 5 AND sum(id) > 10",
+        )
+        .expect("HAVING should lower");
+
+        let aggregate = graph
+            .node_kinds()
+            .find_map(|node| match node {
+                MirNodeKind::Aggregate { aggs, .. } => Some(aggs.clone()),
+                _ => None,
+            })
+            .expect("aggregate node");
+        assert_eq!(aggregate.len(), 2, "count(*) plus hidden sum(id)");
+        assert_eq!(aggregate[1].alias.as_deref(), Some("__having_1"));
+
+        assert!(graph.node_kinds().any(|node| matches!(
+            node,
+            MirNodeKind::Filter { predicate }
+                if predicate.contains('n') && predicate.contains("__having_1")
+        )));
+    }
+
+    #[test]
+    fn rejects_having_without_aggregates_or_group_by() {
+        let err = parse_and_lower("SELECT id FROM posts HAVING true")
+            .expect_err("HAVING without aggregates or grouping is rejected");
+        assert!(err.to_string().contains("HAVING"));
     }
 
     #[test]
