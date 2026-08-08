@@ -1269,6 +1269,28 @@ fn resolve_params(
                         used: arg.name.clone(),
                     });
                 }
+                // The template's sqlc.arg/narg annotation is the
+                // author's nullability statement; a declaration that
+                // silently disagrees would either refuse a null the
+                // template allows or admit one it forbids.
+                if arg.nullable != decl.nullable {
+                    return Err(RegisterError::ParamDeclMismatch {
+                        query: query.to_owned(),
+                        param: format!("${position}"),
+                        declared: if decl.nullable {
+                            "nullable"
+                        } else {
+                            "non-nullable"
+                        }
+                        .to_owned(),
+                        used: if arg.nullable {
+                            "sqlc.narg (nullable)"
+                        } else {
+                            "sqlc.arg (non-nullable)"
+                        }
+                        .to_owned(),
+                    });
+                }
             }
             specs.push(ParamSpec {
                 position,
@@ -1631,28 +1653,43 @@ fn type_mismatch(query: &str, spec: &ParamSpec, value: &ParamValue) -> BindError
     }
 }
 
-/// Validates the canonical `8-4-4-4-12` hex uuid form (case
-/// insensitive) and returns the lowercased text.
+/// Validates a UUID value and returns the normalized lowercase
+/// hyphenated `8-4-4-4-12` form. Accepts the same surface as the
+/// user-context normalizer in `palimpsest-permissions`: hyphenated,
+/// plain 32 hex digits, and an optional surrounding `{...}` pair —
+/// so a value valid as user context is also valid as a query
+/// parameter.
 fn validate_uuid(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    if bytes.len() != 36 {
+    let trimmed = text.trim();
+    let trimmed = trimmed
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap_or(trimmed);
+
+    let hex: String = match trimmed.len() {
+        36 => {
+            let bytes = trimmed.as_bytes();
+            if bytes[8] != b'-' || bytes[13] != b'-' || bytes[18] != b'-' || bytes[23] != b'-' {
+                return None;
+            }
+            trimmed.chars().filter(|ch| *ch != '-').collect()
+        }
+        32 => trimmed.to_owned(),
+        _ => return None,
+    };
+    if hex.len() != 32 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
-    for (index, byte) in bytes.iter().enumerate() {
-        match index {
-            8 | 13 | 18 | 23 => {
-                if *byte != b'-' {
-                    return None;
-                }
-            }
-            _ => {
-                if !byte.is_ascii_hexdigit() {
-                    return None;
-                }
-            }
-        }
-    }
-    Some(text.to_ascii_lowercase())
+
+    let lower = hex.to_ascii_lowercase();
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &lower[0..8],
+        &lower[8..12],
+        &lower[12..16],
+        &lower[16..20],
+        &lower[20..32],
+    ))
 }
 
 impl fmt::Display for PreparedCardinality {
@@ -2058,6 +2095,58 @@ SELECT id, title FROM boards WHERE id = $1;
             )
             .expect("bind b");
         assert_eq!(a.sql, b.sql, "same name+params must share a canonical key");
+    }
+
+    #[test]
+    fn uuid_params_accept_all_user_context_forms() {
+        let mut registry = QueryRegistry::new();
+        registry
+            .register_sqlc_source(BOARD_SQLC, "board.sql", &boards_catalog())
+            .expect("register");
+        // Plain 32-hex and braced forms are accepted by the
+        // user-context normalizer; the bind path must accept the same
+        // surface, normalized to hyphenated lowercase.
+        for form in [
+            "67E55044-10B1-426F-9247-BB680E5FE0C8",
+            "67e5504410b1426f9247bb680e5fe0c8",
+            "{67e55044-10b1-426f-9247-bb680e5fe0c8}",
+        ] {
+            let bound = registry
+                .bind(
+                    "BoardCards",
+                    &params(&[("board_id", ParamValue::Text((*form).to_owned()))]),
+                )
+                .unwrap_or_else(|err| panic!("form {form} should bind: {err}"));
+            assert!(
+                bound.sql.contains("'67e55044-10b1-426f-9247-bb680e5fe0c8'"),
+                "{}",
+                bound.sql
+            );
+        }
+    }
+
+    #[test]
+    fn decl_nullability_must_match_sqlc_annotation() {
+        let mut registry = QueryRegistry::new();
+        let err = registry
+            .register(
+                "Q",
+                "SELECT id FROM boards WHERE title = sqlc.narg(title)",
+                &[ParamDecl::new("title", ColumnType::Text)],
+            )
+            .expect_err("non-nullable decl over sqlc.narg must be refused");
+        assert!(
+            matches!(err, RegisterError::ParamDeclMismatch { .. }),
+            "{err}"
+        );
+
+        registry
+            .register(
+                "Q",
+                "SELECT id FROM boards WHERE title = sqlc.narg(title)",
+                &[ParamDecl::new("title", ColumnType::Text).nullable()],
+            )
+            .expect("matching nullability registers");
     }
 
     #[test]

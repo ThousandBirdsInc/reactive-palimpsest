@@ -130,11 +130,21 @@ impl UserValue {
             // what `ANY($user.field)` tests, so `[2, 1, 1]` and `[1, 2]`
             // must produce the same canonical key (and therefore share a
             // dataflow) — only genuinely different sets fork.
+            //
+            // Each element repr is length-prefixed so a crafted element
+            // that *contains* the separator (e.g. `["1,text:2"]`) can
+            // never collide with a different list (`["1", "2"]`).
+            // Canonical keys decide dataflow sharing across users, so a
+            // collision would leak one user's permitted rows to another.
             Self::List(items) => {
                 let mut reprs: Vec<String> = items.iter().map(Self::canonical_repr).collect();
                 reprs.sort();
                 reprs.dedup();
-                format!("list:[{}]", reprs.join(","))
+                let framed: Vec<String> = reprs
+                    .iter()
+                    .map(|repr| format!("{}:{repr}", repr.len()))
+                    .collect();
+                format!("list:[{}]", framed.join(","))
             }
             Self::Null => "null".to_owned(),
         }
@@ -557,6 +567,20 @@ mod tests {
         let texts = UserValue::List(vec![UserValue::Text("o'brien".to_owned())]);
         assert_eq!(texts.to_sql_literal(), "ARRAY['o''brien']");
         assert_eq!(UserValue::List(Vec::new()).to_sql_literal(), "ARRAY[]");
+    }
+
+    #[test]
+    fn list_canonical_repr_resists_separator_injection() {
+        // Without element framing, ["1", "2"] and ["1,text:2"] would
+        // render identical reprs — and canonical keys decide dataflow
+        // sharing across users, so the collision would let a crafted
+        // context piggyback on another user's permission-filtered plan.
+        let honest = UserValue::List(vec![
+            UserValue::Text("1".to_owned()),
+            UserValue::Text("2".to_owned()),
+        ]);
+        let crafted = UserValue::List(vec![UserValue::Text("1,text:2".to_owned())]);
+        assert_ne!(honest.canonical_repr(), crafted.canonical_repr());
     }
 
     #[test]

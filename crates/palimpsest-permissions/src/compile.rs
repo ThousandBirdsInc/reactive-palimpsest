@@ -104,10 +104,16 @@ impl CompiledPredicate {
             let value = context
                 .get(field)
                 .ok_or_else(|| PermissionError::MissingUserValue(field.clone()))?;
+            // Length-prefix the value repr so a crafted value that
+            // contains the `|field=` separator cannot make two
+            // different contexts render the same key.
+            let repr = value.canonical_repr();
             bindings.push('|');
             bindings.push_str(field);
             bindings.push('=');
-            bindings.push_str(&value.canonical_repr());
+            bindings.push_str(&repr.len().to_string());
+            bindings.push(':');
+            bindings.push_str(&repr);
         }
         Ok(format!("{}{bindings}", self.canonical))
     }
@@ -625,6 +631,28 @@ mod tests {
             err,
             crate::PermissionError::PredicateTooDeep { rule, .. } if rule == "deep"
         ));
+    }
+
+    #[test]
+    fn canonical_with_context_resists_separator_injection() {
+        let predicate = CompiledPredicate {
+            canonical: "p".to_owned(),
+            user_fields: ["f1".to_owned(), "f2".to_owned()].into_iter().collect(),
+        };
+        // A crafted f1 value embedding the `|f2=` separator must not
+        // collide with an honest two-field binding.
+        let honest = UserContext::new([
+            ("f1".to_owned(), UserValue::Text("a".to_owned())),
+            ("f2".to_owned(), UserValue::Text("b".to_owned())),
+        ]);
+        let crafted = UserContext::new([
+            ("f1".to_owned(), UserValue::Text("a|f2=6:text:b".to_owned())),
+            ("f2".to_owned(), UserValue::Text("b".to_owned())),
+        ]);
+        assert_ne!(
+            predicate.canonical_with_context(&honest).unwrap(),
+            predicate.canonical_with_context(&crafted).unwrap(),
+        );
     }
 
     #[test]
