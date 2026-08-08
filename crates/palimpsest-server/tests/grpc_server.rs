@@ -10,7 +10,6 @@
 
 #![allow(clippy::significant_drop_tightening)]
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -44,16 +43,13 @@ impl ServerHarness {
     }
 
     async fn start_jwt(secret: &str) -> Self {
-        let secret = secret.to_owned();
-        Self::start_with(move |builder| {
-            builder.with_auth(JwtAuthenticator::new(JwtAuthConfig {
-                secret,
-                issuer: None,
-                audience: None,
-                claim_to_field: BTreeMap::new(),
-            }))
+        let auth = JwtAuthenticator::from_config(JwtAuthConfig {
+            secret: Some(secret.to_owned()),
+            ..JwtAuthConfig::default()
         })
         .await
+        .expect("jwt config");
+        Self::start_with(move |builder| builder.with_auth(auth)).await
     }
 
     async fn start_with<F>(configure: F) -> Self

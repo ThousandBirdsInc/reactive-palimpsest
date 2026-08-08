@@ -372,7 +372,11 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
 
     builder = match config.auth {
         AuthConfig::Anonymous => builder.with_auth(AnonymousAuthenticator),
-        AuthConfig::Jwt(jwt) => builder.with_auth(JwtAuthenticator::new(jwt)),
+        AuthConfig::Jwt(jwt) => builder.with_auth(
+            JwtAuthenticator::from_config(jwt)
+                .await
+                .map_err(|err| CliError::BuildServer(err.to_string()))?,
+        ),
     };
 
     let server = builder

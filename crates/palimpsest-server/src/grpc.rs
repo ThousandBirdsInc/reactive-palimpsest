@@ -1389,6 +1389,12 @@ fn auth_error_to_status(err: AuthError) -> Status {
         AuthError::InvalidClaimShape(name) => {
             Status::unauthenticated(format!("invalid claim shape: {name}"))
         }
+        AuthError::UnknownKey(kid) => {
+            Status::unauthenticated(format!("no verification key matches the token (kid {kid:?})"))
+        }
+        // Configuration problems are the server's fault, not the
+        // caller's — don't leak them as auth failures.
+        AuthError::InvalidConfig(_) => Status::internal("authentication misconfigured"),
     }
 }
 

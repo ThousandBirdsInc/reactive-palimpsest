@@ -6,7 +6,6 @@
 //! listener, translates `?token=` into `authorization: Bearer`, and
 //! pumps protobuf frames in both directions.
 
-use std::collections::BTreeMap;
 use std::net::TcpListener as StdTcpListener;
 use std::time::Duration;
 
@@ -97,12 +96,14 @@ async fn ws_rejects_bad_token_with_policy_violation_close() {
     let port = free_port();
     let server = Palimpsest::builder()
         .with_wal(EmptyWalRuntime::default())
-        .with_auth(JwtAuthenticator::new(JwtAuthConfig {
-            secret: "topsecret".to_owned(),
-            issuer: None,
-            audience: None,
-            claim_to_field: BTreeMap::new(),
-        }))
+        .with_auth(
+            JwtAuthenticator::from_config(JwtAuthConfig {
+                secret: Some("topsecret".to_owned()),
+                ..JwtAuthConfig::default()
+            })
+            .await
+            .expect("auth config"),
+        )
         .with_grpc_addr(format!("127.0.0.1:{port}").parse().expect("addr"))
         .with_metrics_addr(None)
         .build()
