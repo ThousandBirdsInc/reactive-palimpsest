@@ -60,6 +60,9 @@ pub enum ServeError {
     /// Metrics sidecar bind/serve failure.
     #[error("metrics sidecar: {0}")]
     Metrics(#[from] std::io::Error),
+    /// Main listener bind/serve failure.
+    #[error("server listener: {0}")]
+    Listener(std::io::Error),
 }
 
 /// Fluent builder for [`Palimpsest`].
@@ -301,19 +304,38 @@ impl Palimpsest {
         let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
         let (metrics_shutdown_tx, metrics_shutdown_rx) = oneshot::channel::<()>();
 
-        info!(addr = %config.grpc_addr, "gRPC SyncEngine listening");
-        let grpc_handle = tokio::spawn({
-            let grpc_addr = config.grpc_addr;
-            async move {
-                Server::builder()
-                    .accept_http1(true)
-                    .add_service(tonic_web::enable(grpc))
-                    .add_service(health_service)
-                    .serve_with_shutdown(grpc_addr, async {
-                        let _ = grpc_shutdown_rx.await;
-                    })
-                    .await
-            }
+        // Bind up front so a port-0 config resolves before the WS
+        // bridge needs the loopback dial address.
+        let listener = tokio::net::TcpListener::bind(config.grpc_addr)
+            .await
+            .map_err(ServeError::Listener)?;
+        let bound = listener.local_addr().map_err(ServeError::Listener)?;
+        let mut loopback = bound;
+        if loopback.ip().is_unspecified() {
+            loopback.set_ip(match loopback.ip() {
+                std::net::IpAddr::V4(_) => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                std::net::IpAddr::V6(_) => std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            });
+        }
+
+        // One listener serves gRPC, gRPC-Web, health, and the browser
+        // WebSocket transport: the WASM client appends /ws/subscribe
+        // to the same base URL it uses for everything else.
+        let app = Server::builder()
+            .add_service(tonic_web::enable(grpc))
+            .add_service(health_service)
+            .into_router()
+            .merge(crate::ws::router(crate::ws::WsState {
+                grpc_addr: loopback,
+            }));
+
+        info!(addr = %bound, "SyncEngine listening (gRPC + /ws/subscribe)");
+        let grpc_handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = grpc_shutdown_rx.await;
+                })
+                .await
         });
 
         let metrics_handle = config.metrics_addr.map(|addr| {
@@ -336,7 +358,10 @@ impl Palimpsest {
             let _ = metrics_shutdown_tx.send(());
         });
 
-        grpc_handle.await.expect("gRPC task panicked")?;
+        grpc_handle
+            .await
+            .expect("gRPC task panicked")
+            .map_err(ServeError::Listener)?;
 
         if let Some(handle) = metrics_handle {
             handle.await.expect("metrics task panicked")?;
