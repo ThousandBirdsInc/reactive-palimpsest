@@ -176,6 +176,32 @@ pub struct PreparedQuery {
     pub params: Vec<ParamSpec>,
     /// Parsed template.
     statement: Statement,
+    /// Base tables the lowered query reads, in stable order. Extracted
+    /// from the validated MIR at registration time so runtimes can
+    /// derive the streamed table set from the registry instead of a
+    /// separate `tables = [...]` config.
+    tables: Vec<String>,
+    /// Subset of `tables` with at least one occurrence outside an
+    /// anti-join's right-hand side (see
+    /// [`Self::row_sourcing_tables`]).
+    leaky_tables: Vec<String>,
+}
+
+impl PreparedQuery {
+    /// Base tables the query reads (deduplicated, stable order).
+    #[must_use]
+    pub fn referenced_tables(&self) -> &[String] {
+        &self.tables
+    }
+
+    /// Base tables with at least one occurrence *outside* the
+    /// right-hand side of an anti-join. Rows from these tables can
+    /// surface in (or extend) the query's output; anti-join-only
+    /// tables can only ever *exclude* rows.
+    #[must_use]
+    pub fn row_sourcing_tables(&self) -> &[String] {
+        &self.leaky_tables
+    }
 }
 
 /// Result of binding params into a registered query.
@@ -310,6 +336,16 @@ pub enum RegisterError {
         declared: usize,
     },
 
+    /// A table declared anti-join-only is readable in row-sourcing
+    /// position by a registered query.
+    #[error("table '{table}' is declared reachable only in anti-join position, but query '{query}' can source output rows from it")]
+    ReachabilityViolation {
+        /// The protected table.
+        table: String,
+        /// The violating query.
+        query: String,
+    },
+
     /// Explicit declaration disagrees with an inferred use site.
     #[error("query '{query}': parameter '{param}' is declared as {declared} but used as {used}")]
     ParamDeclMismatch {
@@ -429,9 +465,16 @@ const fn column_type_name(ty: ColumnType) -> &'static str {
         ColumnType::Float => "float",
         ColumnType::Text => "text",
         ColumnType::Timestamp => "timestamp",
+        ColumnType::TimestampTz => "timestamptz",
+        ColumnType::Date => "date",
+        ColumnType::Time => "time",
+        ColumnType::Interval => "interval",
+        ColumnType::Numeric => "numeric",
+        ColumnType::Bytea => "bytea",
         ColumnType::Uuid => "uuid",
         ColumnType::Jsonb => "jsonb",
         ColumnType::Enum => "enum",
+        ColumnType::Array => "array",
         ColumnType::Unknown => "unknown",
     }
 }
@@ -532,6 +575,46 @@ impl QueryRegistry {
         origin: &str,
         catalog: &Catalog,
     ) -> Result<Vec<String>, RegisterError> {
+        self.register_sqlc_blocks(source, origin, catalog, false)
+    }
+
+    /// Registers only the queries carrying a `-- palimpsest:` marker
+    /// from an sqlc-format source string, skipping every unmarked
+    /// block — including `:exec` and other mutation verbs. This lets
+    /// one query file feed both sqlc codegen and the live registry:
+    ///
+    /// ```sql
+    /// -- name: CreateTicket :exec
+    /// INSERT INTO tickets (...) VALUES (...);      -- skipped
+    ///
+    /// -- palimpsest: live
+    /// -- name: BoardTickets :many
+    /// SELECT ... FROM tickets WHERE board_id = $1; -- registered
+    /// ```
+    ///
+    /// The marker is accepted immediately above the `-- name:` header
+    /// or among the comment lines below it. A *marked* block with a
+    /// mutation verb is still an error — the marker explicitly claims
+    /// the query is live-subscribable.
+    ///
+    /// # Errors
+    /// Any [`RegisterError`], naming the query and exact reason.
+    pub fn register_sqlc_source_marked(
+        &mut self,
+        source: &str,
+        origin: &str,
+        catalog: &Catalog,
+    ) -> Result<Vec<String>, RegisterError> {
+        self.register_sqlc_blocks(source, origin, catalog, true)
+    }
+
+    fn register_sqlc_blocks(
+        &mut self,
+        source: &str,
+        origin: &str,
+        catalog: &Catalog,
+        marker_scoped: bool,
+    ) -> Result<Vec<String>, RegisterError> {
         let blocks = split_sqlc_source(source, origin)?;
         // Stage into a scratch registry so a failure mid-file leaves
         // `self` untouched.
@@ -539,10 +622,13 @@ impl QueryRegistry {
         staged.queries.clone_from(&self.queries);
         let mut registered = Vec::with_capacity(blocks.len());
         for block in blocks {
+            if marker_scoped && !block.marked {
+                continue;
+            }
             staged.register_full(
                 &block.name,
                 &block.sql,
-                block.cardinality,
+                block.cardinality()?,
                 None,
                 Some(catalog),
             )?;
@@ -580,12 +666,14 @@ impl QueryRegistry {
         let occurrences = collect_placeholders(name, &statement)?;
         let params = resolve_params(name, &statement, &occurrences, &named_args, decls, catalog)?;
 
-        let prepared = PreparedQuery {
+        let mut prepared = PreparedQuery {
             name: name.to_owned(),
             cardinality,
             sql: sql.to_owned(),
             params,
             statement,
+            tables: Vec::new(),
+            leaky_tables: Vec::new(),
         };
 
         // Registration-time validation: bind representative values of
@@ -597,13 +685,53 @@ impl QueryRegistry {
             .iter()
             .map(|spec| (spec.name.clone(), dummy_value(spec)))
             .collect();
-        bind_prepared(&prepared, &dummies, self.limits).map_err(|err| match err {
+        let bound = bind_prepared(&prepared, &dummies, self.limits).map_err(|err| match err {
             BindError::Rejected { query, source } => RegisterError::Unsupported { query, source },
             other => RegisterError::Unsupported {
                 query: name.to_owned(),
                 source: SqlError::InvalidQuery(other.to_string()),
             },
         })?;
+
+        // Record the base tables the lowered plan reads so the
+        // streamed table set is derivable from the registry, and which
+        // of them can actually source output rows (vs. appearing only
+        // on an anti-join's right-hand side).
+        let mut tables: Vec<String> = Vec::new();
+        let mut leaky: Vec<String> = Vec::new();
+        for index in bound.graph.base_table_indices() {
+            if let crate::mir::MirNodeKind::BaseTable { table, .. } = bound.graph.node_kind(index)
+            {
+                if !tables.contains(table) {
+                    tables.push(table.clone());
+                }
+                if !anti_join_protected(&bound.graph, index) && !leaky.contains(table) {
+                    leaky.push(table.clone());
+                }
+            }
+        }
+        tables.sort();
+        leaky.sort();
+        prepared.tables = tables;
+        prepared.leaky_tables = leaky;
+
+        // With a catalog in hand, validate every table and column
+        // reference against it — a typo'd table or a dropped column
+        // must fail here, not at subscribe time. The dummy-bound
+        // rendering is used so placeholders are typed literals.
+        if let Some(catalog) = catalog {
+            let rendered = crate::parser::parse_single_query(&bound.sql, self.limits)
+                .map_err(|source| RegisterError::Unsupported {
+                    query: name.to_owned(),
+                    source,
+                })?;
+            crate::normalize::validate_statement_against_catalog(&rendered, catalog).map_err(
+                |source| RegisterError::Unsupported {
+                    query: name.to_owned(),
+                    source,
+                },
+            )?;
+        }
 
         Ok(self.queries.entry(name.to_owned()).or_insert(prepared))
     }
@@ -628,6 +756,92 @@ impl QueryRegistry {
             .ok_or_else(|| BindError::UnknownQuery(name.to_owned()))?;
         bind_prepared(prepared, params, self.limits)
     }
+
+    /// Asserts that `table` is reachable *only* through the right-hand
+    /// side of anti-joins across every registered query.
+    ///
+    /// Permission rules fail **open** on an anti-join's right-hand
+    /// table (a restrictive rule there filters the exclusion set, not
+    /// the result), so adopters who stream such a table need a
+    /// machine-checked guarantee that no registered query can surface
+    /// its rows. Call this after registration — it turns the emergent
+    /// property "nobody registered a query that reads T" into an
+    /// enforced one.
+    ///
+    /// # Errors
+    /// [`RegisterError::ReachabilityViolation`] naming the first query
+    /// that can source output rows from `table`.
+    pub fn assert_anti_join_only(&self, table: &str) -> Result<(), RegisterError> {
+        for query in self.queries.values() {
+            if query.leaky_tables.iter().any(|t| t == table) {
+                return Err(RegisterError::ReachabilityViolation {
+                    table: table.to_owned(),
+                    query: query.name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Union of the base tables referenced by every registered query,
+    /// deduplicated and sorted. This is the streamed table set a WAL
+    /// runtime should derive from the registry — no separate
+    /// `tables = [...]` config.
+    #[must_use]
+    pub fn referenced_tables(&self) -> Vec<String> {
+        let mut tables: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for query in self.queries.values() {
+            tables.extend(query.tables.iter().cloned());
+        }
+        tables.into_iter().collect()
+    }
+}
+
+/// True when every path from `base` to the graph root passes through
+/// the right-hand input of an anti-join — i.e. rows from this table
+/// occurrence can only *exclude* output rows, never appear in them.
+fn anti_join_protected(graph: &MirGraph, base: petgraph::graph::NodeIndex) -> bool {
+    use petgraph::visit::EdgeRef;
+    use petgraph::Direction;
+
+    fn protected(
+        graph: &MirGraph,
+        node: petgraph::graph::NodeIndex,
+        seen: &mut std::collections::HashSet<petgraph::graph::NodeIndex>,
+    ) -> bool {
+        if !seen.insert(node) {
+            // Already on the walk stack (or resolved) — treat a cycle
+            // defensively as unprotected.
+            return false;
+        }
+        let mut consumers = graph
+            .graph()
+            .edges_directed(node, Direction::Outgoing)
+            .peekable();
+        if consumers.peek().is_none() {
+            // Reached the root without entering an anti-join's right
+            // input: rows can surface in the output.
+            return false;
+        }
+        let result = consumers.all(|edge| {
+            let consumer = edge.target();
+            let enters_anti_right = matches!(
+                (graph.node_kind(consumer), edge.weight()),
+                (
+                    crate::mir::MirNodeKind::Join {
+                        kind: crate::mir::JoinKind::Anti,
+                        ..
+                    },
+                    crate::mir::MirEdgeKind::Input(1),
+                )
+            );
+            enters_anti_right || protected(graph, consumer, seen)
+        });
+        seen.remove(&node);
+        result
+    }
+
+    protected(graph, base, &mut std::collections::HashSet::new())
 }
 
 // ---------------------------------------------------------------------
@@ -636,14 +850,38 @@ impl QueryRegistry {
 
 struct SqlcBlock {
     name: String,
-    cardinality: PreparedCardinality,
+    /// Raw sqlc verb from the header (with the leading `:`). Mapped to
+    /// a [`PreparedCardinality`] at registration time so marker-scoped
+    /// ingestion can *skip* unmarked `:exec` blocks instead of
+    /// aborting the whole file on them.
+    verb: String,
+    /// True when the block carries a `-- palimpsest:` marker (either
+    /// immediately above its `-- name:` header or among the comment
+    /// lines below it).
+    marked: bool,
     sql: String,
+}
+
+impl SqlcBlock {
+    fn cardinality(&self) -> Result<PreparedCardinality, RegisterError> {
+        match self.verb.as_str() {
+            ":one" => Ok(PreparedCardinality::One),
+            ":many" => Ok(PreparedCardinality::Many),
+            other => Err(RegisterError::UnsupportedVerb {
+                query: self.name.clone(),
+                verb: other.to_owned(),
+            }),
+        }
+    }
 }
 
 /// Splits an sqlc query file into `(name, verb, sql)` blocks.
 fn split_sqlc_source(source: &str, origin: &str) -> Result<Vec<SqlcBlock>, RegisterError> {
     let mut blocks: Vec<SqlcBlock> = Vec::new();
     let mut current: Option<SqlcBlock> = None;
+    // A `-- palimpsest:` line seen before any `-- name:` header marks
+    // the *next* block (the natural "annotate above the header" style).
+    let mut pending_marker = false;
 
     for (index, line) in source.lines().enumerate() {
         let line_no = index + 1;
@@ -655,7 +893,19 @@ fn split_sqlc_source(source: &str, origin: &str) -> Result<Vec<SqlcBlock>, Regis
                 if let Some(block) = current.take() {
                     push_block(&mut blocks, block)?;
                 }
-                current = Some(parse_sqlc_header(header, origin, line_no)?);
+                let mut block = parse_sqlc_header(header, origin, line_no)?;
+                block.marked = std::mem::take(&mut pending_marker);
+                current = Some(block);
+                continue;
+            }
+            if body.strip_prefix("palimpsest:").is_some() || body == "palimpsest" {
+                // Marker in metadata position (under a header, before
+                // its SQL) marks the current block; anywhere else it
+                // marks the next `-- name:` header.
+                match current.as_mut() {
+                    Some(block) if block.sql.trim().is_empty() => block.marked = true,
+                    _ => pending_marker = true,
+                }
                 continue;
             }
             // Non-header comment: keep inside the current block (the
@@ -713,19 +963,10 @@ fn parse_sqlc_header(header: &str, origin: &str, line: usize) -> Result<SqlcBloc
     if parts.next().is_some() || !verb.starts_with(':') || name.is_empty() {
         return Err(malformed());
     }
-    let cardinality = match verb {
-        ":one" => PreparedCardinality::One,
-        ":many" => PreparedCardinality::Many,
-        other => {
-            return Err(RegisterError::UnsupportedVerb {
-                query: name.to_owned(),
-                verb: other.to_owned(),
-            })
-        }
-    };
     Ok(SqlcBlock {
         name: name.to_owned(),
-        cardinality,
+        verb: verb.to_owned(),
+        marked: false,
         sql: String::new(),
     })
 }
@@ -1441,10 +1682,17 @@ fn dummy_value(spec: &ParamSpec) -> ParamValue {
         ColumnType::Float => ParamValue::Float(0.0),
         ColumnType::Uuid => ParamValue::Text("00000000-0000-0000-0000-000000000000".to_owned()),
         ColumnType::Timestamp => ParamValue::Text("2000-01-01 00:00:00".to_owned()),
+        ColumnType::TimestampTz => ParamValue::Text("2000-01-01 00:00:00+00".to_owned()),
+        ColumnType::Date => ParamValue::Text("2000-01-01".to_owned()),
+        ColumnType::Time => ParamValue::Text("00:00:00".to_owned()),
+        ColumnType::Interval => ParamValue::Text("0 seconds".to_owned()),
+        ColumnType::Numeric => ParamValue::Text("0".to_owned()),
         ColumnType::Jsonb => ParamValue::Text("{}".to_owned()),
-        ColumnType::Text | ColumnType::Enum | ColumnType::Unknown => {
-            ParamValue::Text(String::new())
-        }
+        ColumnType::Text
+        | ColumnType::Enum
+        | ColumnType::Bytea
+        | ColumnType::Array
+        | ColumnType::Unknown => ParamValue::Text(String::new()),
     };
     if spec.list {
         ParamValue::List(vec![scalar])
@@ -1750,6 +1998,154 @@ ORDER BY cards.position;
 -- name: BoardById :one
 SELECT id, title FROM boards WHERE id = $1;
 ";
+
+    const MIXED_SQLC: &str = "\
+-- name: CreateCard :exec
+INSERT INTO cards (id, board_id, position, archived) VALUES ($1, $2, $3, false);
+
+-- palimpsest: live
+-- name: BoardCards :many
+SELECT cards.id, cards.position
+FROM cards
+WHERE cards.board_id = $1 AND cards.archived = false;
+
+-- name: BoardById :one
+-- palimpsest:
+SELECT id, title FROM boards WHERE id = $1;
+
+-- name: ArchiveCard :exec
+UPDATE cards SET archived = true WHERE id = $1;
+";
+
+    #[test]
+    fn marker_scoped_registration_selects_live_subset_and_skips_exec() {
+        let mut registry = QueryRegistry::new();
+        let names = registry
+            .register_sqlc_source_marked(MIXED_SQLC, "queries.sql", &boards_catalog())
+            .expect("marker-scoped register");
+        // Marker above the header and marker below the header both
+        // count; the two :exec blocks are skipped, not fatal.
+        assert_eq!(names, vec!["BoardCards".to_owned(), "BoardById".to_owned()]);
+        assert!(registry.get("CreateCard").is_none());
+        assert!(registry.get("ArchiveCard").is_none());
+    }
+
+    #[test]
+    fn unmarked_registration_still_aborts_on_exec_verbs() {
+        let mut registry = QueryRegistry::new();
+        let err = registry
+            .register_sqlc_source(MIXED_SQLC, "queries.sql", &boards_catalog())
+            .expect_err("exec verb must abort the unmarked path");
+        assert!(matches!(err, RegisterError::UnsupportedVerb { .. }));
+    }
+
+    #[test]
+    fn marked_exec_block_is_an_error() {
+        let source = "\
+-- palimpsest: live
+-- name: CreateCard :exec
+INSERT INTO cards (id) VALUES ($1);
+";
+        let mut registry = QueryRegistry::new();
+        let err = registry
+            .register_sqlc_source_marked(source, "queries.sql", &boards_catalog())
+            .expect_err("a marked :exec claims live-subscribability; fail loud");
+        assert!(matches!(
+            err,
+            RegisterError::UnsupportedVerb { query, verb } if query == "CreateCard" && verb == ":exec"
+        ));
+    }
+
+    #[test]
+    fn registration_validates_tables_and_columns_against_catalog() {
+        // A typo'd table registers clean today only if validation is
+        // skipped; it must fail at registration, not at runtime.
+        let mut registry = QueryRegistry::new();
+        let err = registry
+            .register_sqlc_source(
+                "-- name: Typo :many\nSELECT id FROM cardz WHERE board_id = $1::uuid;\n",
+                "queries.sql",
+                &boards_catalog(),
+            )
+            .expect_err("unknown table must fail registration");
+        assert!(
+            err.to_string().contains("cardz"),
+            "error should name the missing table: {err}"
+        );
+
+        let mut registry = QueryRegistry::new();
+        let err = registry
+            .register_sqlc_source(
+                "-- name: DroppedColumn :many\nSELECT id, nonexistent FROM boards;\n",
+                "queries.sql",
+                &boards_catalog(),
+            )
+            .expect_err("unknown column must fail registration");
+        assert!(
+            err.to_string().contains("nonexistent"),
+            "error should name the missing column: {err}"
+        );
+    }
+
+    #[test]
+    fn anti_join_reachability_is_machine_checked() {
+        let mut registry = QueryRegistry::new();
+        registry
+            .register_sqlc_source(
+                "-- name: VisibleCards :many\n\
+                 SELECT cards.id FROM cards WHERE NOT EXISTS (\n\
+                     SELECT 1 FROM hidden_cards\n\
+                     WHERE hidden_cards.card_id = cards.id\n\
+                 );\n",
+                "queries.sql",
+                &Catalog::new([
+                    TableSchema::new(
+                        "cards",
+                        vec![ColumnSchema::new("id", ColumnType::Uuid)],
+                    ),
+                    TableSchema::new(
+                        "hidden_cards",
+                        vec![ColumnSchema::new("card_id", ColumnType::Uuid)],
+                    ),
+                ]),
+            )
+            .expect("register");
+
+        // hidden_cards is only ever an exclusion set — the assertion
+        // holds. cards sources output rows — the assertion trips.
+        registry
+            .assert_anti_join_only("hidden_cards")
+            .expect("anti-join-only table passes");
+        let err = registry
+            .assert_anti_join_only("cards")
+            .expect_err("row-sourcing table fails");
+        assert!(matches!(
+            err,
+            RegisterError::ReachabilityViolation { table, query }
+                if table == "cards" && query == "VisibleCards"
+        ));
+
+        let visible = registry.get("VisibleCards").expect("registered");
+        assert_eq!(
+            visible.referenced_tables(),
+            ["cards".to_owned(), "hidden_cards".to_owned()]
+        );
+        assert_eq!(visible.row_sourcing_tables(), ["cards".to_owned()]);
+    }
+
+    #[test]
+    fn registry_derives_referenced_tables() {
+        let mut registry = QueryRegistry::new();
+        registry
+            .register_sqlc_source(BOARD_SQLC, "board.sql", &boards_catalog())
+            .expect("register");
+        assert_eq!(
+            registry.referenced_tables(),
+            vec!["boards".to_owned(), "cards".to_owned()]
+        );
+        let board_cards = registry.get("BoardCards").expect("registered");
+        assert_eq!(board_cards.referenced_tables(), ["cards".to_owned()]);
+    }
 
     #[test]
     fn registers_sqlc_source_and_infers_uuid_param() {

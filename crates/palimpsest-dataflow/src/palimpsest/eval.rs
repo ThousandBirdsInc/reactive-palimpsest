@@ -854,12 +854,75 @@ fn cast_datum(datum: Datum, target: ColumnType) -> Datum {
             Text(bytes) => Jsonb(bytes),
             _ => Null,
         },
-        ColumnType::Timestamp => match datum {
-            timestamp @ Datum::Timestamp(_) => timestamp,
+        ColumnType::Timestamp | ColumnType::TimestampTz => match datum {
+            timestamp @ (Datum::Timestamp(_) | Datum::TimestampTz(_)) => timestamp,
+            Datum::Date(date) => Datum::Timestamp(palimpsest_wal::Timestamp {
+                micros_since_unix_epoch: i64::from(date.days_since_unix_epoch) * 86_400_000_000,
+            }),
+            Text(_) => parse_temporal_text(
+                &datum,
+                if target == ColumnType::TimestampTz {
+                    &palimpsest_wal::DatumType::TimestampTz
+                } else {
+                    &palimpsest_wal::DatumType::Timestamp
+                },
+            ),
+            _ => Null,
+        },
+        ColumnType::Date => match datum {
+            date @ Datum::Date(_) => date,
+            Datum::Timestamp(ts) => Datum::Date(palimpsest_wal::Date {
+                days_since_unix_epoch: ts.micros_since_unix_epoch.div_euclid(86_400_000_000) as i32,
+            }),
+            Datum::TimestampTz(ts) => Datum::Date(palimpsest_wal::Date {
+                days_since_unix_epoch: ts.micros_since_unix_epoch.div_euclid(86_400_000_000) as i32,
+            }),
+            Text(_) => parse_temporal_text(&datum, &palimpsest_wal::DatumType::Date),
+            _ => Null,
+        },
+        ColumnType::Time => match datum {
+            time @ Datum::Time(_) => time,
+            Text(_) => parse_temporal_text(&datum, &palimpsest_wal::DatumType::Time),
+            _ => Null,
+        },
+        ColumnType::Interval => match datum {
+            interval @ Datum::Interval(_) => interval,
+            Text(_) => parse_temporal_text(&datum, &palimpsest_wal::DatumType::Interval),
+            _ => Null,
+        },
+        ColumnType::Numeric => match &datum {
+            Numeric(_) => datum,
+            I64(_) | I32(_) | I16(_) | F64(_) | F32(_) | Text(_) => text_of(&datum)
+                .map_or(Null, |text| {
+                    Numeric(palimpsest_wal::BigDecimal::new(text))
+                }),
+            _ => Null,
+        },
+        ColumnType::Bytea => match datum {
+            bytea @ Datum::Bytea(_) => bytea,
+            Text(bytes) => Datum::Bytea(bytes),
+            _ => Null,
+        },
+        ColumnType::Array => match datum {
+            array @ Datum::Array(_) => array,
             _ => Null,
         },
         ColumnType::Unknown => datum,
     }
+}
+
+/// Parses a text datum into the requested temporal type via the WAL
+/// crate's Postgres-format decoders. `Null` on any parse failure,
+/// consistent with the evaluator's total-function contract.
+fn parse_temporal_text(datum: &Datum, target: &palimpsest_wal::DatumType) -> Datum {
+    let Datum::Text(bytes) = datum else {
+        return Datum::Null;
+    };
+    palimpsest_wal::decode_column_value(
+        target,
+        palimpsest_wal::ColumnValue::Text(bytes.clone()),
+    )
+    .unwrap_or(Datum::Null)
 }
 
 /// `expr <op> ANY(array)` — true when the comparison holds for at least

@@ -301,9 +301,16 @@ fn parse_column_type(value: &str) -> Result<ColumnType, String> {
         "float" | "double" => Ok(ColumnType::Float),
         "text" | "string" => Ok(ColumnType::Text),
         "timestamp" => Ok(ColumnType::Timestamp),
+        "timestamptz" => Ok(ColumnType::TimestampTz),
+        "date" => Ok(ColumnType::Date),
+        "time" => Ok(ColumnType::Time),
+        "interval" => Ok(ColumnType::Interval),
+        "numeric" | "decimal" => Ok(ColumnType::Numeric),
+        "bytea" => Ok(ColumnType::Bytea),
         "uuid" => Ok(ColumnType::Uuid),
         "jsonb" | "json" => Ok(ColumnType::Jsonb),
         "enum" => Ok(ColumnType::Enum),
+        "array" => Ok(ColumnType::Array),
         other => Err(format!("unknown column type '{other}'")),
     }
 }
@@ -315,9 +322,16 @@ const fn column_type_label(ty: ColumnType) -> &'static str {
         ColumnType::Float => "float",
         ColumnType::Text => "text",
         ColumnType::Timestamp => "timestamp",
+        ColumnType::TimestampTz => "timestamptz",
+        ColumnType::Date => "date",
+        ColumnType::Time => "time",
+        ColumnType::Interval => "interval",
+        ColumnType::Numeric => "numeric",
+        ColumnType::Bytea => "bytea",
         ColumnType::Uuid => "uuid",
         ColumnType::Jsonb => "jsonb",
         ColumnType::Enum => "enum",
+        ColumnType::Array => "array",
         ColumnType::Unknown => "unknown",
     }
 }
@@ -766,10 +780,18 @@ fn parse_json_user_value(
             .as_str()
             .map(|value| UserValue::Text(value.to_owned()))
             .ok_or_else(|| user_value_type_error(field, "string", value)),
-        ColumnType::Timestamp => value
+        ColumnType::Timestamp
+        | ColumnType::TimestampTz
+        | ColumnType::Date
+        | ColumnType::Time
+        | ColumnType::Interval => value
             .as_str()
             .map(|value| UserValue::Timestamp(value.to_owned()))
             .ok_or_else(|| user_value_type_error(field, "string timestamp", value)),
+        ColumnType::Numeric => value
+            .as_f64()
+            .map(UserValue::Float)
+            .ok_or_else(|| user_value_type_error(field, "number", value)),
         ColumnType::Uuid => value
             .as_str()
             .ok_or_else(|| user_value_type_error(field, "string uuid", value))
@@ -781,9 +803,11 @@ fn parse_json_user_value(
             .as_str()
             .map(|value| UserValue::Enum(value.to_owned()))
             .ok_or_else(|| user_value_type_error(field, "string enum label", value)),
-        ColumnType::Unknown => Err(CliError::EvalPermissions(format!(
-            "unknown user-context type for field '{field}'"
-        ))),
+        ColumnType::Bytea | ColumnType::Array | ColumnType::Unknown => {
+            Err(CliError::EvalPermissions(format!(
+                "unsupported user-context type for field '{field}'"
+            )))
+        }
     }
 }
 
@@ -821,7 +845,16 @@ fn parse_user_value(
             ))
         }),
         ColumnType::Text => Ok(UserValue::Text(raw_value.to_owned())),
-        ColumnType::Timestamp => Ok(UserValue::Timestamp(raw_value.to_owned())),
+        ColumnType::Timestamp
+        | ColumnType::TimestampTz
+        | ColumnType::Date
+        | ColumnType::Time
+        | ColumnType::Interval => Ok(UserValue::Timestamp(raw_value.to_owned())),
+        ColumnType::Numeric => raw_value.parse::<f64>().map(UserValue::Float).map_err(|_| {
+            CliError::EvalPermissions(format!(
+                "user field '{field}' expects a number, got '{raw_value}'"
+            ))
+        }),
         ColumnType::Uuid => UserValue::uuid(raw_value).map_err(|_| {
             CliError::EvalPermissions(format!(
                 "user field '{field}' expects a uuid, got '{raw_value}'"
@@ -835,9 +868,11 @@ fn parse_user_value(
                 ))
             }),
         ColumnType::Enum => Ok(UserValue::Enum(raw_value.to_owned())),
-        ColumnType::Unknown => Err(CliError::EvalPermissions(format!(
-            "unknown user-context type for field '{field}'"
-        ))),
+        ColumnType::Bytea | ColumnType::Array | ColumnType::Unknown => {
+            Err(CliError::EvalPermissions(format!(
+                "unsupported user-context type for field '{field}'"
+            )))
+        }
     }
 }
 

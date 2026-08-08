@@ -228,6 +228,7 @@ impl Palimpsest {
         PalimpsestHandle {
             router: Arc::clone(&self.router),
             metrics: self.router.metrics().clone(),
+            named: self.named.clone(),
         }
     }
 
@@ -253,6 +254,14 @@ impl Palimpsest {
     /// [`SubscriptionRouter::set_rules`] for the published lag metric.
     pub fn update_permissions(&self, rules: Vec<CompiledRule>) {
         self.router.set_rules(rules);
+    }
+
+    /// Hot-swaps the named-query registry on the running server —
+    /// registration parity with [`Self::update_permissions`]. Future
+    /// subscribes bind against the new registry immediately;
+    /// subscriptions already streaming keep their bound plan.
+    pub fn update_queries(&self, registry: QueryRegistry) {
+        self.named.replace_registry(registry);
     }
 
     /// Runs the gRPC server (and the metrics sidecar, if configured)
@@ -343,6 +352,7 @@ pub struct PalimpsestHandle {
     pub router: Arc<SubscriptionRouter>,
     /// Live metrics handle.
     pub metrics: RouterMetrics,
+    named: NamedQueries,
 }
 
 impl PalimpsestHandle {
@@ -350,6 +360,12 @@ impl PalimpsestHandle {
     /// [`Palimpsest::update_permissions`].
     pub fn update_permissions(&self, rules: Vec<CompiledRule>) {
         self.router.set_rules(rules);
+    }
+
+    /// Hot-swaps the named-query registry; see
+    /// [`Palimpsest::update_queries`].
+    pub fn update_queries(&self, registry: QueryRegistry) {
+        self.named.replace_registry(registry);
     }
 }
 
