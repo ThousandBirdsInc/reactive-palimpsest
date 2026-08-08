@@ -99,16 +99,17 @@ pub struct JwtAuthenticator {
     claim_to_field: BTreeMap<String, String>,
 }
 
-/// Configuration for [`JwtAuthenticator`] — declaratively selects the
-/// key material, the standard-claim policy, and the claim mapping.
-/// Exactly one of `secret`, `public_key_pem`, `jwks`, or `jwks_url`
-/// must be set.
+/// Configuration for [`JwtAuthenticator`].
+///
+/// Declaratively selects the key material, the standard-claim policy,
+/// and the claim mapping. Exactly one of `secret`, `public_key_pem`,
+/// `jwks`, or `jwks_url` must be set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JwtAuthConfig {
     /// HMAC shared secret (HS256/HS384/HS512).
     #[serde(default)]
     pub secret: Option<String>,
-    /// PEM-encoded public key (RS*/PS*/ES*/EdDSA verification).
+    /// PEM-encoded public key (`RS*` / `PS*` / `ES*` / `EdDSA`).
     #[serde(default)]
     pub public_key_pem: Option<String>,
     /// Inline JWKS document (RFC 7517 `{"keys": [...]}`).

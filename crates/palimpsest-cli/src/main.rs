@@ -92,7 +92,7 @@ struct MetricsConfig {
 enum AuthConfig {
     #[default]
     Anonymous,
-    Jwt(JwtAuthConfig),
+    Jwt(Box<JwtAuthConfig>),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -373,7 +373,7 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
     builder = match config.auth {
         AuthConfig::Anonymous => builder.with_auth(AnonymousAuthenticator),
         AuthConfig::Jwt(jwt) => builder.with_auth(
-            JwtAuthenticator::from_config(jwt)
+            JwtAuthenticator::from_config(*jwt)
                 .await
                 .map_err(|err| CliError::BuildServer(err.to_string()))?,
         ),

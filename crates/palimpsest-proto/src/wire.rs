@@ -91,7 +91,7 @@ pub enum WireDatum {
         micros: i64,
     },
     /// Postgres array value: element datums in array order.
-    Array(Vec<WireDatum>),
+    Array(Vec<Self>),
 }
 
 /// One wire-encoded row — a flat list of column values matching the

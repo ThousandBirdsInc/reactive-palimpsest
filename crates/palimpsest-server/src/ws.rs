@@ -49,18 +49,21 @@ const CLOSE_POLICY_VIOLATION: u16 = 1008;
 /// State injected into the WS handler: the loopback address of this
 /// server's own gRPC listener.
 #[derive(Clone)]
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) struct WsState {
     pub(crate) grpc_addr: SocketAddr,
 }
 
 /// Query parameters accepted on the upgrade URL.
 #[derive(Deserialize, Default)]
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) struct WsQuery {
     #[serde(default)]
     token: Option<String>,
 }
 
 /// Builds the `/ws/subscribe` router to merge into the main listener.
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) fn router(state: WsState) -> axum::Router {
     axum::Router::new()
         .route("/ws/subscribe", axum::routing::get(ws_subscribe))
@@ -109,19 +112,15 @@ async fn run(
     // native gRPC client's header.
     let mut request = tonic::Request::new(ReceiverStream::new(out_rx));
     if let Some(token) = token {
-        match format!("Bearer {token}").parse() {
-            Ok(value) => {
-                request.metadata_mut().insert("authorization", value);
-            }
-            Err(_) => {
-                let close = CloseFrame {
-                    code: CLOSE_POLICY_VIOLATION,
-                    reason: "invalid token".into(),
-                };
-                let _ = ws_sink.send(Message::Close(Some(close))).await;
-                return Err(BridgeError::InvalidToken);
-            }
-        }
+        let Ok(value) = format!("Bearer {token}").parse() else {
+            let close = CloseFrame {
+                code: CLOSE_POLICY_VIOLATION,
+                reason: "invalid token".into(),
+            };
+            let _ = ws_sink.send(Message::Close(Some(close))).await;
+            return Err(BridgeError::InvalidToken);
+        };
+        request.metadata_mut().insert("authorization", value);
     }
 
     let response = match client.subscribe(request).await {

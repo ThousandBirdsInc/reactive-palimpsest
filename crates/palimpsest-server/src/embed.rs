@@ -18,7 +18,6 @@ use palimpsest_permissions::CompiledRule;
 use palimpsest_proto::palimpsest::sync::v1::sync_engine_server::SyncEngineServer;
 use thiserror::Error;
 use tokio::sync::oneshot;
-use tonic::transport::Server;
 use tonic_health::server::health_reporter;
 use tracing::info;
 
@@ -321,10 +320,9 @@ impl Palimpsest {
         // One listener serves gRPC, gRPC-Web, health, and the browser
         // WebSocket transport: the WASM client appends /ws/subscribe
         // to the same base URL it uses for everything else.
-        let app = Server::builder()
-            .add_service(tonic_web::enable(grpc))
+        let app = tonic::service::Routes::new(tonic_web::enable(grpc))
             .add_service(health_service)
-            .into_router()
+            .into_axum_router()
             .merge(crate::ws::router(crate::ws::WsState {
                 grpc_addr: loopback,
             }));

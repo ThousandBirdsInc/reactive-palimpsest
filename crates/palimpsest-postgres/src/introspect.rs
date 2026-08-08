@@ -261,16 +261,16 @@ fn map_type(
         let element = elem_type_oid
             .and_then(stock_postgres_16_type)
             .unwrap_or_else(|| {
-                if elem_typtype == Some("e") {
-                    DatumType::Text
-                } else {
+                // Element enums decode as their labels; anything else
+                // unrecognized falls back to text too, loudly.
+                if elem_typtype != Some("e") {
                     tracing::warn!(
                         type_oid,
                         elem_type_oid,
                         "array element type not recognized; decoding elements as text"
                     );
-                    DatumType::Text
                 }
+                DatumType::Text
             });
         return (DatumType::Array(Box::new(element)), ColumnType::Array);
     }
@@ -284,7 +284,7 @@ fn map_type(
 }
 
 /// Coarse SQL-layer type for a decoder type.
-fn column_type_of(datum_type: &DatumType) -> ColumnType {
+const fn column_type_of(datum_type: &DatumType) -> ColumnType {
     match datum_type {
         DatumType::Bool => ColumnType::Bool,
         DatumType::I16 | DatumType::I32 | DatumType::I64 => ColumnType::Int,

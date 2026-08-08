@@ -174,6 +174,16 @@ pub fn compile_typed_scalar(
     let expr = parse_expr(expr_sql)?;
     let scalar = compile_inner(&expr, schema)?;
     let ty = infer_type(&expr, schema);
+    // Reconcile runtime values with the advertised type: an
+    // expression like `coalesce(uuid_col, '<literal>')` infers `Uuid`
+    // from the column, but the fallback branch would produce a text
+    // datum at runtime — and the schema mismatch would kill the
+    // subscription client-side. Coerce every produced datum to the
+    // inferred type so the wire always matches the advertisement.
+    let scalar = match ty {
+        ColumnType::Unknown | ColumnType::Text => scalar,
+        concrete => Box::new(move |row: &Row| cast_datum(scalar(row), concrete)),
+    };
     Ok((scalar, ty))
 }
 
@@ -1598,6 +1608,35 @@ mod tests {
         assert_eq!(f(&unnamed), text("fallback"));
         let all_null = compile_scalar("coalesce(NULL, NULL)", &schema).unwrap();
         assert_eq!(all_null(&named), Datum::Null);
+    }
+
+    #[test]
+    fn coalesce_fallback_literal_coerces_to_the_inferred_column_type() {
+        // Regression: `coalesce(uuid_col, '<literal>')` advertised
+        // `Uuid` but served a text datum when the fallback fired,
+        // killing the subscription with a client-side schema
+        // mismatch. The adopter workaround was a `::uuid` cast written
+        // into the query text.
+        let schema = ScalarSchema::from_pairs([("id".to_owned(), ColumnType::Uuid)]);
+        let (scalar, ty) = compile_typed_scalar(
+            "coalesce(id, 'a5e9e2c0-0000-4000-8000-000000000042')",
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(ty, ColumnType::Uuid);
+
+        let missing: Row = smallvec![Datum::Null];
+        match scalar(&missing) {
+            Datum::Uuid(uuid) => assert_eq!(
+                uuid.to_string(),
+                "a5e9e2c0-0000-4000-8000-000000000042",
+                "fallback literal must be served as the advertised type"
+            ),
+            other => panic!("expected a uuid datum, got {other:?}"),
+        }
+
+        let present: Row = smallvec![Datum::Uuid(palimpsest_wal::Uuid::from_bytes([7; 16]))];
+        assert!(matches!(scalar(&present), Datum::Uuid(_)));
     }
 
     #[test]

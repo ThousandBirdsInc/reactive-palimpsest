@@ -7,8 +7,9 @@
 //! snapshot, and live insert/update/delete diffs through the journal
 //! cursor.
 //!
-//! The test provisions its own throwaway cluster (initdb + pg_ctl). It
-//! soft-skips when no Postgres installation is available.
+//! The test provisions its own throwaway cluster (`initdb` +
+//! `pg_ctl`). It soft-skips when no Postgres installation is
+//! available.
 
 use std::io::Write as _;
 use std::net::TcpListener;

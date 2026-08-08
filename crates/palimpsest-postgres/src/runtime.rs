@@ -119,6 +119,7 @@ impl Journal {
 // Shared state
 // ---------------------------------------------------------------------
 
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) struct SharedState {
     /// Streamed tables keyed by every name a query may use for them
     /// (bare relation name, and `namespace.relation`).
@@ -316,7 +317,7 @@ impl PostgresWalRuntime {
         let mut mirror = self.state.mirror.lock().expect("mirror");
         let mut journal = self.state.journal.lock().expect("journal");
         let at = Lsn::new(lsn);
-        for (&table, _) in &self.state.names_by_id {
+        for &table in self.state.names_by_id.keys() {
             let old_rows = mirror.remove(&table).unwrap_or_default();
             let new_rows = fresh.get(&table).cloned().unwrap_or_default();
 
@@ -710,10 +711,9 @@ mod tests {
         }
 
         // 12 diffs through a capacity-8 journal: the first 4 dropped.
-        let err = match runtime.open_cursor(&QueryId::new("SELECT id FROM tickets"), Lsn::new(2))
-        {
-            Err(err) => err,
-            Ok(_) => panic!("resume into the truncated window must be refused"),
+        let Err(err) = runtime.open_cursor(&QueryId::new("SELECT id FROM tickets"), Lsn::new(2))
+        else {
+            panic!("resume into the truncated window must be refused");
         };
         assert!(err.contains("truncated"), "{err}");
 

@@ -21,7 +21,6 @@
 
 #![allow(clippy::significant_drop_tightening)]
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

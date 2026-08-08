@@ -55,7 +55,7 @@ impl NamedQueries {
 
     /// Explicitly enables or disables raw-SQL subscribes.
     #[must_use]
-    pub fn with_inline_sql(mut self, enabled: bool) -> Self {
+    pub const fn with_inline_sql(mut self, enabled: bool) -> Self {
         self.inline_sql_enabled = enabled;
         self
     }

@@ -272,6 +272,7 @@ async fn ensure_slot(client: &Client, slot: &str) -> Result<(), PostgresRuntimeE
 /// transactions whose xid the snapshot already saw as committed are
 /// skipped so they don't double-apply.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) struct SnapshotFence {
     xmax: u64,
     in_progress: Vec<u64>,
@@ -294,6 +295,7 @@ impl SnapshotFence {
 
     /// True when a slot transaction with `xid` was already visible to
     /// the snapshot (committed before it) and must not re-apply.
+    #[allow(clippy::redundant_pub_crate)]
     pub(crate) fn already_in_snapshot(&self, xid: u32) -> bool {
         if self
             .in_progress
