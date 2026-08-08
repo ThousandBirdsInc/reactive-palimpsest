@@ -47,7 +47,7 @@ use std::sync::Arc;
 use js_sys::{Array, BigInt, Function, Object, Reflect, Uint8Array};
 use palimpsest_client::{
     var_value, Auth, Client as RustClient, ClientError, ConnectionState, DatumType, DiffEvent,
-    DiffOp, ResyncReason, Subscription as RustSubscription, VarValue, WireDatum,
+    DiffOp, ResyncReason, Subscription as RustSubscription, VarList, VarValue, WireDatum,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -96,6 +96,28 @@ impl Client {
     pub async fn subscribe(&self, sql: String, vars: JsValue) -> Result<Subscription, JsValue> {
         let vars = parse_vars(&vars)?;
         let sub = self.inner.subscribe_with(sql, vars).await.map_err(js_err)?;
+        Ok(Subscription::wrap(sub))
+    }
+
+    /// Subscribe to a server-registered named prepared query. The
+    /// browser never holds or sends SQL on this path.
+    ///
+    /// `params` is a plain object keyed by the registered parameter
+    /// names (or `$N` positions). Values are converted by JS type:
+    /// string → string, boolean → bool, integral number → int, other
+    /// number → float, `null` → null, array of the above → list.
+    #[wasm_bindgen(js_name = subscribeNamed)]
+    pub async fn subscribe_named(
+        &self,
+        name: String,
+        params: JsValue,
+    ) -> Result<Subscription, JsValue> {
+        let params = parse_params(&params)?;
+        let sub = self
+            .inner
+            .subscribe_named_with(name, params)
+            .await
+            .map_err(js_err)?;
         Ok(Subscription::wrap(sub))
     }
 
@@ -179,6 +201,65 @@ fn parse_vars(value: &JsValue) -> Result<HashMap<String, VarValue>, JsValue> {
         out.insert(k, var);
     }
     Ok(out)
+}
+
+/// Typed conversion for named-query parameters. Unlike the legacy
+/// `parse_vars` (everything stringified), this keeps JS types so the
+/// server's bind step can type-check them.
+fn parse_params(value: &JsValue) -> Result<HashMap<String, VarValue>, JsValue> {
+    let mut out = HashMap::new();
+    if value.is_undefined() || value.is_null() {
+        return Ok(out);
+    }
+    let obj: Object = value
+        .clone()
+        .dyn_into()
+        .map_err(|_| JsValue::from(JsError::new("params must be a plain object")))?;
+    let entries = Object::entries(&obj);
+    for entry in entries.iter() {
+        let pair: Array = entry.dyn_into().map_err(|_| JsValue::from_str("entry"))?;
+        let key = pair.get(0).as_string().unwrap_or_default();
+        let var = param_to_var(&pair.get(1), &key, true)?;
+        out.insert(key, var);
+    }
+    Ok(out)
+}
+
+fn param_to_var(value: &JsValue, key: &str, allow_list: bool) -> Result<VarValue, JsValue> {
+    let kind = if value.is_null() || value.is_undefined() {
+        var_value::Kind::NullValue(true)
+    } else if let Some(text) = value.as_string() {
+        var_value::Kind::StringValue(text)
+    } else if let Some(flag) = value.as_bool() {
+        var_value::Kind::BoolValue(flag)
+    } else if let Some(number) = value.as_f64() {
+        // Integral JS numbers travel as ints so int-typed parameters
+        // accept them; everything else is a float.
+        #[allow(clippy::cast_possible_truncation)]
+        if number.fract() == 0.0 && number.abs() < 9_007_199_254_740_992.0 {
+            var_value::Kind::IntValue(number as i64)
+        } else {
+            var_value::Kind::FloatValue(number)
+        }
+    } else if Array::is_array(value) {
+        if !allow_list {
+            return Err(
+                JsError::new(&format!("param '{key}': nested arrays are not supported")).into(),
+            );
+        }
+        let array: Array = value.clone().unchecked_into();
+        let mut values = Vec::with_capacity(array.length() as usize);
+        for element in array.iter() {
+            values.push(param_to_var(&element, key, false)?);
+        }
+        var_value::Kind::ListValue(VarList { values })
+    } else {
+        return Err(JsError::new(&format!(
+            "param '{key}': unsupported value type (expected string, number, boolean, null, or array)"
+        ))
+        .into());
+    };
+    Ok(VarValue { kind: Some(kind) })
 }
 
 /// One active subscription. Drop the value or call `unsubscribe()` to

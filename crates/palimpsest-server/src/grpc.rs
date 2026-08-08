@@ -41,6 +41,7 @@ use crate::diff::{
 };
 use crate::error::RouterError;
 use crate::metrics::RouterMetrics;
+use crate::named::NamedQueries;
 use crate::router::{canonical_subgraph_key, SubscribeRequest, SubscriptionRouter};
 use crate::security::{ConnectionLimiter, LimitDecision, ReconnectTracker, SecurityLimits};
 use crate::subscription::{
@@ -110,6 +111,8 @@ pub struct SyncEngineService {
     /// One cursor pump per canonical query key. See
     /// [`CanonicalPumpRegistry`].
     pump_registry: Arc<CanonicalPumpRegistry>,
+    /// Named prepared-query registry + raw-SQL admission policy.
+    named: Arc<NamedQueries>,
 }
 
 impl SyncEngineService {
@@ -143,7 +146,16 @@ impl SyncEngineService {
             dataflow_host: Arc::new(palimpsest_dataflow::palimpsest::PersistentHost::new()),
             subscribe_blocking_slots: Arc::new(Semaphore::new(SUBSCRIBE_BLOCKING_CONCURRENCY)),
             pump_registry: Arc::new(CanonicalPumpRegistry::new()),
+            named: Arc::new(NamedQueries::default()),
         }
+    }
+
+    /// Installs the named prepared-query policy (registry + raw-SQL
+    /// admission). Configure before serving.
+    #[must_use]
+    pub fn with_named_queries(mut self, named: NamedQueries) -> Self {
+        self.named = Arc::new(named);
+        self
     }
 
     fn next_connection(&self) -> ConnectionId {
@@ -196,6 +208,7 @@ impl proto::sync_engine_server::SyncEngine for SyncEngineService {
         let host = Arc::clone(&self.dataflow_host);
         let blocking_slots = Arc::clone(&self.subscribe_blocking_slots);
         let pump_registry = Arc::clone(&self.pump_registry);
+        let named = Arc::clone(&self.named);
 
         tokio::spawn(connection_loop(
             connection,
@@ -209,6 +222,7 @@ impl proto::sync_engine_server::SyncEngine for SyncEngineService {
             host,
             blocking_slots,
             pump_registry,
+            named,
         ));
 
         let stream = ReceiverStream::new(outbound_rx);
@@ -233,6 +247,7 @@ async fn connection_loop(
     host: Arc<palimpsest_dataflow::palimpsest::PersistentHost>,
     blocking_slots: Arc<Semaphore>,
     pump_registry: Arc<CanonicalPumpRegistry>,
+    named: Arc<NamedQueries>,
 ) {
     let state = Arc::new(Mutex::new(ConnectionState::default()));
 
@@ -272,6 +287,7 @@ async fn connection_loop(
                             admit_guard,
                             Arc::clone(&blocking_slots),
                             Arc::clone(&pump_registry),
+                            Arc::clone(&named),
                         ));
                     }
                 }
@@ -428,62 +444,103 @@ async fn handle_subscribe(
     mut admit_guard: AdmitGuard,
     blocking_slots: Arc<Semaphore>,
     pump_registry: Arc<CanonicalPumpRegistry>,
+    named: Arc<NamedQueries>,
 ) {
     let client_subscription_id = request.client_subscription_id.clone();
     let client_id = ClientSubscriptionId::new(client_subscription_id.clone());
-    // Use the SQL text as the `QueryId`. Two subscribers running the
-    // same query share a canonical subgraph key (subgraph reuse §11.4),
-    // and the WAL runtime can pattern-match the QueryId to route a
-    // snapshot/cursor to the right underlying table. Until the trait
-    // is extended to receive the lowered MIR directly, this is the
-    // sharpest signal a runtime gets about *what* the subscriber asked
-    // for.
-    let query = QueryId::new(request.sql.clone());
     let resume_lsn = request.resume_lsn.map(Lsn::new);
 
-    let graph = match parse_and_lower_with_limits(&request.sql, QueryLimits::DEFAULT) {
-        Ok(graph) => graph,
-        Err(SqlError::QueryTooLarge { .. }) => {
+    // Resolve the request to executable SQL text + lowered MIR.
+    //
+    // * Named path (`query_name` set): the SQL comes from the
+    //   server-side registry with the wire params bound as typed
+    //   literals. Unknown names are refused — fail closed.
+    // * Raw path (`sql` set): the pre-registry behavior, admitted only
+    //   when the policy allows it (configuring a registry disables it
+    //   by default).
+    let (sql_text, graph) = if request.query_name.is_empty() {
+        if !named.inline_sql_enabled() {
             let _ = send_error(
                 &outbound,
                 client_subscription_id,
-                "query_too_large",
-                "SQL input exceeds the configured byte limit",
+                "inline_sql_disabled",
+                "this server only accepts registered named queries; subscribe with query_name",
             )
             .await;
             return;
         }
-        Err(SqlError::QueryTooComplex { .. }) => {
+        match parse_and_lower_with_limits(&request.sql, QueryLimits::DEFAULT) {
+            Ok(graph) => (request.sql.clone(), graph),
+            Err(SqlError::QueryTooLarge { .. }) => {
+                let _ = send_error(
+                    &outbound,
+                    client_subscription_id,
+                    "query_too_large",
+                    "SQL input exceeds the configured byte limit",
+                )
+                .await;
+                return;
+            }
+            Err(SqlError::QueryTooComplex { .. }) => {
+                let _ = send_error(
+                    &outbound,
+                    client_subscription_id,
+                    "query_too_complex",
+                    "lowered MIR exceeds the configured node-count limit",
+                )
+                .await;
+                return;
+            }
+            Err(err @ SqlError::UnsupportedFunction { .. }) => {
+                let _ = send_error(
+                    &outbound,
+                    client_subscription_id,
+                    "unsupported_function",
+                    &err.to_string(),
+                )
+                .await;
+                return;
+            }
+            Err(err) => {
+                let _ = send_error(
+                    &outbound,
+                    client_subscription_id,
+                    "invalid_sql",
+                    &err.to_string(),
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        if !request.sql.is_empty() {
             let _ = send_error(
                 &outbound,
                 client_subscription_id,
-                "query_too_complex",
-                "lowered MIR exceeds the configured node-count limit",
+                "invalid_request",
+                "set either sql or query_name, not both",
             )
             .await;
             return;
         }
-        Err(err @ SqlError::UnsupportedFunction { .. }) => {
-            let _ = send_error(
-                &outbound,
-                client_subscription_id,
-                "unsupported_function",
-                &err.to_string(),
-            )
-            .await;
-            return;
-        }
-        Err(err) => {
-            let _ = send_error(
-                &outbound,
-                client_subscription_id,
-                "invalid_sql",
-                &err.to_string(),
-            )
-            .await;
-            return;
+        match named.bind_named(&request.query_name, &request.vars) {
+            Ok(bound) => (bound.sql, bound.graph),
+            Err((code, message)) => {
+                let _ = send_error(&outbound, client_subscription_id, code, &message).await;
+                return;
+            }
         }
     };
+
+    // Use the (bound) SQL text as the `QueryId`. Two subscribers
+    // running the same query — including the same named query with the
+    // same params — share a canonical subgraph key (subgraph reuse
+    // §11.4), and the WAL runtime can pattern-match the QueryId to
+    // route a snapshot/cursor to the right underlying table. Until the
+    // trait is extended to receive the lowered MIR directly, this is
+    // the sharpest signal a runtime gets about *what* the subscriber
+    // asked for.
+    let query = QueryId::new(sql_text.clone());
 
     // The MIR compile, snapshot pull, and dataflow seed are
     // CPU-bound and synchronous (timely's `execute_directly` runs to
@@ -653,7 +710,7 @@ async fn handle_subscribe(
     // * Non-host-routed plans (the query shapes the compiler can't
     //   lower yet): one pump per subscription, raw WAL diffs straight
     //   to the router. No state sharing.
-    let cursor_query = QueryId::new(request.sql.clone());
+    let cursor_query = QueryId::new(sql_text.clone());
     if let (Some(canonical), Some(plan)) =
         (host_canonical.as_ref(), compiled_plan_for_host.as_ref())
     {

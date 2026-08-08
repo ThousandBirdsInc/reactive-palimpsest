@@ -110,6 +110,15 @@ export interface WasmClientCtor {
 
 export interface WasmClient {
   subscribe(sql: string, vars: Record<string, string>): Promise<WasmSubscription>;
+  /**
+   * Subscribe to a server-registered named prepared query. The browser
+   * never holds or sends SQL on this path; `params` is keyed by the
+   * registered parameter names (or `$N` positions).
+   */
+  subscribeNamed(
+    name: string,
+    params: Record<string, NamedQueryParam>,
+  ): Promise<WasmSubscription>;
   shutdown(): Promise<void>;
   /**
    * Register a callback that fires once with the current transport
@@ -119,6 +128,19 @@ export interface WasmClient {
    */
   onConnectionStatus(callback: (status: RawConnectionStatus) => void): void;
 }
+
+/**
+ * Accepted value shapes for named-query parameters. Converted by JS
+ * type in the wasm bindings: string → string, boolean → bool, integral
+ * number → int, other number → float, `null` → SQL null, array of the
+ * above → list (for `= ANY($n)` parameters).
+ */
+export type NamedQueryParam =
+  | string
+  | number
+  | boolean
+  | null
+  | Array<string | number | boolean | null>;
 
 /** Raw connection-state payload — mirrors `connection_state_to_js`
  *  in `crates/palimpsest-client-js/src/bindings.rs`. */

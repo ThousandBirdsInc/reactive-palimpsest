@@ -15,6 +15,7 @@ import {
   type SubscribeOptions,
 } from "./types.js";
 import type {
+  NamedQueryParam,
   RawConnectionStatus,
   RawDiffEvent,
   WasmClient,
@@ -174,6 +175,27 @@ export class PalimpsestClient {
     options: SubscribeOptions & { decoder?: RowDecoderOptions } = {},
   ): Promise<TypedSubscription<T>> {
     const wasmSub = await this.wasmClient.subscribe(sql, options.vars ?? {});
+    return new TypedSubscription<T>(wasmSub, {
+      ...this.defaultDecoder,
+      ...(options.decoder ?? {}),
+    });
+  }
+
+  /**
+   * Open a subscription to a server-registered named prepared query.
+   *
+   * The client sends only `{name, params}` — no SQL ships in the
+   * bundle or over the socket. `params` is keyed by the registered
+   * parameter names (or `$N` positions); an unknown name, missing
+   * param, or ill-typed value is refused by the server with an
+   * `error` event (`unknown_query` / `invalid_params`).
+   */
+  async subscribeNamed<T>(
+    name: string,
+    params: Record<string, NamedQueryParam> = {},
+    options: { decoder?: RowDecoderOptions } = {},
+  ): Promise<TypedSubscription<T>> {
+    const wasmSub = await this.wasmClient.subscribeNamed(name, params);
     return new TypedSubscription<T>(wasmSub, {
       ...this.defaultDecoder,
       ...(options.decoder ?? {}),

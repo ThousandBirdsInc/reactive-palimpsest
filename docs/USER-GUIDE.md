@@ -48,6 +48,13 @@ If the parser rejects your query, the gRPC server returns an `Error`
 `ServerMessage` with a code like `query_too_large`,
 `query_too_complex`, or a parser error.
 
+Instead of sending SQL from the client, the server can register
+queries by name at startup (from sqlc-format query files) and clients
+subscribe with `subscribeNamed("BoardCards", { board_id })` — no SQL
+in the client bundle, typed parameters bound server-side, and
+unregistered shapes refused. See
+[`NAMED-QUERIES.md`](NAMED-QUERIES.md).
+
 ## CTE recipes
 
 Non-recursive CTEs are the main way to keep a query readable when it

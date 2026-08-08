@@ -26,6 +26,7 @@ export type {
 export { decodeRow, decodeRows, primaryKey } from "./codec.js";
 export type { ColumnDecoder, RowDecoderOptions } from "./codec.js";
 export type {
+  NamedQueryParam,
   RawAcceptedEvent,
   RawColumn,
   RawConnectionStatus,

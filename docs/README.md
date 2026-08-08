@@ -24,6 +24,7 @@ guides or deep-dives that assume that bigger picture.
 | [`MIGRATION-FROM-REST.md`](MIGRATION-FROM-REST.md) | Side-by-side mapping for moving from polling REST endpoints to Palimpsest subscriptions. |
 | [`WASM-CLIENT.md`](WASM-CLIENT.md) | Minimal HTML + JS quickstart for subscribing to a query from a browser via the WASM client. |
 | [`supported-sql.md`](supported-sql.md) | The deliberately small PostgreSQL `SELECT` subset the SQL frontend accepts. |
+| [`NAMED-QUERIES.md`](NAMED-QUERIES.md) | Server-registered prepared queries (sqlc-format files) that clients subscribe to by name — no SQL in the client. |
 | [`PERMISSIONS.md`](PERMISSIONS.md) | The row-level access TOML rule DSL, evaluated at subscribe time and folded into every diff. |
 
 ## Operating Palimpsest (running it in production)

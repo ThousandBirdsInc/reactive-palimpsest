@@ -32,10 +32,14 @@ use crate::{
 };
 
 /// Sentinel prefix used to encode `$user.<field>` references as plain
-/// SQL identifiers. The rewriter substitutes each occurrence with the
-/// caller-provided `UserContext` value before installing the filter.
-pub const USER_PLACEHOLDER_PREFIX: &str = "__palimpsest_user_";
-const USER_PLACEHOLDER_SUFFIX: &str = "__";
+/// SQL identifiers.
+///
+/// The rewriter substitutes each occurrence with the caller-provided
+/// `UserContext` value before installing the filter. Defined in
+/// `palimpsest-sql` so its expression validator can recognize the
+/// sentinels (e.g. allow `col = ANY($user.list)`).
+pub const USER_PLACEHOLDER_PREFIX: &str = palimpsest_sql::parser::USER_PLACEHOLDER_PREFIX;
+const USER_PLACEHOLDER_SUFFIX: &str = palimpsest_sql::parser::USER_PLACEHOLDER_SUFFIX;
 
 /// Maximum AST depth permitted in a compiled rule predicate.
 ///

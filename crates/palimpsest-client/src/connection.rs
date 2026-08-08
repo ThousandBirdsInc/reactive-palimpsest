@@ -72,11 +72,20 @@ pub enum ConnectionState {
     },
 }
 
+/// What a subscription asks the server to run: raw SQL, or a
+/// server-registered named prepared query (the client never holds SQL
+/// on that path).
+#[derive(Clone)]
+pub(crate) enum QuerySpec {
+    Sql(String),
+    Named(String),
+}
+
 /// Commands accepted by the connection manager.
 pub(crate) enum Command {
     Subscribe {
         subscription_id: String,
-        sql: String,
+        query: QuerySpec,
         vars: HashMap<String, proto::VarValue>,
         events_tx: mpsc::Sender<Result<DiffEvent, ClientError>>,
         cache: Option<Arc<Mutex<LocalCache>>>,
@@ -112,7 +121,7 @@ impl ConnectionInbox {
 
 /// State the manager keeps per active subscription. Survives reconnects.
 struct SubState {
-    sql: String,
+    query: QuerySpec,
     vars: HashMap<String, proto::VarValue>,
     events_tx: mpsc::Sender<Result<DiffEvent, ClientError>>,
     cache: Option<Arc<Mutex<LocalCache>>>,
@@ -309,13 +318,13 @@ impl ConnectionTask {
             Command::Shutdown => true,
             Command::Subscribe {
                 subscription_id,
-                sql,
+                query,
                 vars,
                 events_tx,
                 cache,
             } => {
                 let sub = SubState {
-                    sql: sql.clone(),
+                    query,
                     vars: vars.clone(),
                     events_tx,
                     cache,
@@ -566,13 +575,18 @@ fn client_subscribe(
     sub: &SubState,
     resume_lsn: Option<u64>,
 ) -> ClientMessage {
+    let (sql, query_name) = match &sub.query {
+        QuerySpec::Sql(sql) => (sql.clone(), String::new()),
+        QuerySpec::Named(name) => (String::new(), name.clone()),
+    };
     ClientMessage {
         kind: Some(proto::client_message::Kind::Subscribe(
             proto::SubscribeRequest {
                 client_subscription_id: subscription_id.to_owned(),
-                sql: sub.sql.clone(),
+                sql,
                 vars: sub.vars.clone(),
                 resume_lsn,
+                query_name,
             },
         )),
     }

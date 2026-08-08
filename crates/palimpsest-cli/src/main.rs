@@ -50,7 +50,23 @@ struct Config {
     #[serde(default)]
     permissions: PermissionsConfig,
     #[serde(default)]
+    queries: QueriesConfig,
+    #[serde(default)]
     upstream: Option<UpstreamConfig>,
+}
+
+/// Named prepared-query registration (§ named-queries doc).
+///
+/// `files` lists sqlc-format query files registered at startup;
+/// registration failures abort startup with the query name and the
+/// exact rejected construct. When any file is configured, raw-SQL
+/// subscribes are refused unless `inline_sql = true`.
+#[derive(Debug, Default, Deserialize)]
+struct QueriesConfig {
+    #[serde(default)]
+    files: Vec<PathBuf>,
+    #[serde(default)]
+    inline_sql: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +144,10 @@ enum CliError {
     ParseConfig(#[from] toml::de::Error),
     #[error("compile permissions: {0}")]
     CompilePermissions(String),
+    #[error("read query file '{0}': {1}")]
+    ReadQueryFile(PathBuf, #[source] std::io::Error),
+    #[error("register queries: {0}")]
+    RegisterQueries(String),
     #[error("build server: {0}")]
     BuildServer(String),
     #[error("serve: {0}")]
@@ -235,6 +255,37 @@ fn read_config(path: &Path) -> Result<Config, CliError> {
     Ok(toml::from_str(&raw)?)
 }
 
+/// Builds the named-query registry from the `[queries]` config
+/// section. Any registration failure aborts loudly — a template the
+/// engine cannot execute must never survive to subscribe time.
+///
+/// Query files are resolved relative to the config file's directory.
+fn build_query_registry(
+    config: &QueriesConfig,
+    config_path: &Path,
+    catalog: &Catalog,
+) -> Result<Option<palimpsest_sql::QueryRegistry>, CliError> {
+    if config.files.is_empty() {
+        return Ok(None);
+    }
+    let base = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut registry = palimpsest_sql::QueryRegistry::new();
+    for file in &config.files {
+        let path = if file.is_absolute() {
+            file.clone()
+        } else {
+            base.join(file)
+        };
+        let source =
+            fs::read_to_string(&path).map_err(|err| CliError::ReadQueryFile(path.clone(), err))?;
+        let names = registry
+            .register_sqlc_source(&source, &path.display().to_string(), catalog)
+            .map_err(|err| CliError::RegisterQueries(err.to_string()))?;
+        info!(file = %path.display(), queries = names.len(), "registered named queries");
+    }
+    Ok(Some(registry))
+}
+
 fn build_user_schema(schema: &BTreeMap<String, String>) -> Result<UserContextSchema, String> {
     let mut fields = Vec::with_capacity(schema.len());
     for (name, ty) in schema {
@@ -290,11 +341,20 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
     let compiled = compile_rules(&rules, &catalog, &user_schema)
         .map_err(|err| CliError::CompilePermissions(err.to_string()))?;
 
+    let query_registry = build_query_registry(&config.queries, &path, &catalog)?;
+
     let mut builder = Palimpsest::builder()
         .with_wal(EmptyWalRuntime::default())
         .with_permissions(compiled)
         .with_grpc_addr(config.grpc.addr)
         .with_metrics_addr(config.metrics.addr);
+
+    if let Some(registry) = query_registry {
+        builder = builder.with_query_registry(registry);
+    }
+    if let Some(inline_sql) = config.queries.inline_sql {
+        builder = builder.with_inline_sql(inline_sql);
+    }
 
     builder = match config.auth {
         AuthConfig::Anonymous => builder.with_auth(AnonymousAuthenticator),
@@ -330,11 +390,18 @@ fn cmd_validate_config(path: &Path) -> Result<(), CliError> {
     let _compiled = compile_rules(&rules, &catalog, &user_schema)
         .map_err(|err| CliError::CompilePermissions(err.to_string()))?;
 
+    let registry = build_query_registry(&config.queries, path, &catalog)?;
+    let query_count = registry
+        .as_ref()
+        .map_or(0, palimpsest_sql::QueryRegistry::len);
+
     println!(
-        "{}: ok ({} permission rule(s), {} user-context field(s))",
+        "{}: ok ({} permission rule(s), {} user-context field(s), {} named quer{})",
         path.display(),
         rules.len(),
-        config.permissions.user_schema.len()
+        config.permissions.user_schema.len(),
+        query_count,
+        if query_count == 1 { "y" } else { "ies" }
     );
     if config.upstream.is_none() {
         println!("note: no [upstream] section — `slot-info` will be unavailable.");

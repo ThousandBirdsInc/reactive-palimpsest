@@ -27,9 +27,11 @@ use crate::diff::ResyncReason;
 use crate::grpc::SyncEngineService;
 use crate::metrics::RouterMetrics;
 use crate::metrics_endpoint::serve_until as serve_metrics_until;
+use crate::named::NamedQueries;
 use crate::router::{RouterConfig, SubscriptionRouter};
 use crate::security::SecurityLimits;
 use crate::wal_runtime::WalRuntime;
+use palimpsest_sql::prepared::QueryRegistry;
 
 /// Network listener configuration.
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +71,8 @@ pub struct PalimpsestBuilder {
     router_config: RouterConfig,
     server_config: ServerConfig,
     security: SecurityLimits,
+    query_registry: Option<QueryRegistry>,
+    inline_sql: Option<bool>,
 }
 
 impl PalimpsestBuilder {
@@ -132,6 +136,29 @@ impl PalimpsestBuilder {
         self
     }
 
+    /// Installs a named prepared-query registry. Build (and loudly
+    /// fail) the registry at startup — see
+    /// [`QueryRegistry::register_sqlc_source`] /
+    /// [`QueryRegistry::register`].
+    ///
+    /// Configuring a registry disables raw-SQL subscribes: registered
+    /// queries become the only reachable query surface, which is what
+    /// makes the registry an authorization boundary. Re-enable raw SQL
+    /// explicitly with [`Self::with_inline_sql`] if you want both.
+    #[must_use]
+    pub fn with_query_registry(mut self, registry: QueryRegistry) -> Self {
+        self.query_registry = Some(registry);
+        self
+    }
+
+    /// Explicitly allows or refuses raw-SQL subscribes, overriding the
+    /// default (allowed without a registry, refused with one).
+    #[must_use]
+    pub const fn with_inline_sql(mut self, enabled: bool) -> Self {
+        self.inline_sql = Some(enabled);
+        self
+    }
+
     /// Materialises the [`Palimpsest`] handle. A WAL runtime must have
     /// been supplied.
     ///
@@ -145,6 +172,8 @@ impl PalimpsestBuilder {
             router_config,
             server_config,
             security,
+            query_registry,
+            inline_sql,
         } = self;
         let wal = wal.ok_or(BuildError::MissingWal)?;
         let router = Arc::new(SubscriptionRouter::new(router_config));
@@ -153,12 +182,17 @@ impl PalimpsestBuilder {
         }
         let auth: DynAuthenticator =
             auth.unwrap_or_else(|| Arc::new(AnonymousAuthenticator) as DynAuthenticator);
+        let mut named = query_registry.map_or_else(NamedQueries::default, NamedQueries::new);
+        if let Some(enabled) = inline_sql {
+            named = named.with_inline_sql(enabled);
+        }
         Ok(Palimpsest {
             router,
             auth,
             wal,
             config: server_config,
             security,
+            named,
         })
     }
 }
@@ -178,6 +212,7 @@ pub struct Palimpsest {
     wal: Arc<dyn WalRuntime>,
     config: ServerConfig,
     security: SecurityLimits,
+    named: NamedQueries,
 }
 
 impl Palimpsest {
@@ -241,10 +276,12 @@ impl Palimpsest {
             wal,
             config,
             security,
+            named,
         } = self;
 
         let service =
-            SyncEngineService::with_security(Arc::clone(&router), auth, Arc::clone(&wal), security);
+            SyncEngineService::with_security(Arc::clone(&router), auth, Arc::clone(&wal), security)
+                .with_named_queries(named);
         let grpc = SyncEngineServer::new(service);
 
         let (mut health_reporter, health_service) = health_reporter();
