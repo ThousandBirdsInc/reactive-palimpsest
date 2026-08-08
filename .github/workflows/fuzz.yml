@@ -1,6 +1,6 @@
 name: fuzz
 
-# Three fuzz targets, 30 minutes each, every night. Crash artifacts
+# Four fuzz targets, 30 minutes each, every night. Crash artifacts
 # are uploaded and a tracking issue is auto-filed with the seed so the
 # team has a stable repro point. PRs do not run fuzz — only nightly,
 # to keep the merge gate fast.
@@ -34,6 +34,7 @@ jobs:
           - pgoutput_decoder
           - sql_parser
           - wire_decoder
+          - named_query_registrar
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -66,6 +66,30 @@ fn canonical_subscribe() -> proto::ClientMessage {
                 sql: "SELECT id FROM posts".into(),
                 vars: std::collections::HashMap::new(),
                 resume_lsn: Some(42),
+                query_name: String::new(),
+            },
+        )),
+    }
+}
+
+fn canonical_named_subscribe() -> proto::ClientMessage {
+    let mut vars = std::collections::HashMap::new();
+    vars.insert(
+        "board_id".to_owned(),
+        proto::VarValue {
+            kind: Some(proto::var_value::Kind::StringValue(
+                "00000000-0000-0000-0000-000000000042".into(),
+            )),
+        },
+    );
+    proto::ClientMessage {
+        kind: Some(proto::client_message::Kind::Subscribe(
+            proto::SubscribeRequest {
+                client_subscription_id: "board".into(),
+                sql: String::new(),
+                vars,
+                resume_lsn: None,
+                query_name: "BoardCards".into(),
             },
         )),
     }
@@ -120,6 +144,12 @@ fn canonical_resync() -> proto::ServerMessage {
 
 const SUBSCRIBE_HEX: &str = "0a1f0a05706f737473121453454c4543542069642046524f4d20706f737473202a";
 
+const NAMED_SUBSCRIBE_HEX: &str = concat!(
+    "0a470a05626f6172641a320a08626f6172645f6964122622243030303030303030",
+    "2d303030302d303030302d303030302d3030303030303030303034322a0a426f61",
+    "72644361726473",
+);
+
 const ACCEPTED_HEX: &str =
     "0a250a05706f7374731007186422180a060a02696410040a0b0a057469746c6510081801120100";
 
@@ -155,6 +185,56 @@ fn client_message_subscribe_matches_fixture() {
         hex(&expected),
         "ClientMessage::Subscribe wire format drift"
     );
+}
+
+#[test]
+fn client_message_named_subscribe_matches_fixture() {
+    let actual = canonical_named_subscribe().encode_to_vec();
+    let expected = unhex(&strip_ws(NAMED_SUBSCRIBE_HEX));
+    assert_eq!(
+        hex(&actual),
+        hex(&expected),
+        "ClientMessage::Subscribe (named) wire format drift"
+    );
+}
+
+#[test]
+fn named_subscribe_round_trips_name_and_params() {
+    let bytes = canonical_named_subscribe().encode_to_vec();
+    let decoded = proto::ClientMessage::decode(bytes.as_slice()).expect("decode");
+    let Some(proto::client_message::Kind::Subscribe(subscribe)) = decoded.kind else {
+        panic!("expected Subscribe");
+    };
+    assert_eq!(subscribe.query_name, "BoardCards");
+    assert!(subscribe.sql.is_empty());
+    let value = subscribe.vars.get("board_id").expect("param");
+    assert!(matches!(
+        &value.kind,
+        Some(proto::var_value::Kind::StringValue(s))
+            if s == "00000000-0000-0000-0000-000000000042"
+    ));
+}
+
+#[test]
+fn var_list_round_trips() {
+    let list = proto::VarValue {
+        kind: Some(proto::var_value::Kind::ListValue(proto::VarList {
+            values: vec![
+                proto::VarValue {
+                    kind: Some(proto::var_value::Kind::IntValue(1)),
+                },
+                proto::VarValue {
+                    kind: Some(proto::var_value::Kind::IntValue(2)),
+                },
+            ],
+        })),
+    };
+    let bytes = list.encode_to_vec();
+    let decoded = proto::VarValue::decode(bytes.as_slice()).expect("decode");
+    let Some(proto::var_value::Kind::ListValue(decoded_list)) = decoded.kind else {
+        panic!("expected ListValue");
+    };
+    assert_eq!(decoded_list.values.len(), 2);
 }
 
 #[test]
@@ -237,6 +317,10 @@ fn print_fixtures() {
     println!(
         "SUBSCRIBE   = {}",
         hex(&canonical_subscribe().encode_to_vec())
+    );
+    println!(
+        "NAMED_SUB   = {}",
+        hex(&canonical_named_subscribe().encode_to_vec())
     );
     println!(
         "ACCEPTED    = {}",

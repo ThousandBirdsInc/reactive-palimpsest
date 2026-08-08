@@ -1,10 +1,11 @@
 # Fuzz targets
 
-Per §15.5 / §18.12, three nightly fuzz targets:
+Per §15.5 / §18.12, four nightly fuzz targets:
 
 - `pgoutput_decoder` — bytes → `decode_pgoutput_message` should never panic.
 - `sql_parser` — UTF-8 → `parse_select` + `parse_and_lower` should never panic.
 - `wire_decoder` — bytes → `decode_rows`; on success, encode and decode again must round-trip.
+- `named_query_registrar` — UTF-8 → `QueryRegistry::register_sqlc_source` should never panic (every failure is a typed `RegisterError`; registration dummy-binds accepted templates, covering the literal-substitution pipeline too).
 
 ## Running locally
 

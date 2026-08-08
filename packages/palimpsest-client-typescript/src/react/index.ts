@@ -7,8 +7,10 @@ export {
   type UsePalimpsestClientResult,
 } from "./usePalimpsestClient.js";
 export {
+  usePalimpsestNamedSubscription,
   usePalimpsestSubscription,
   type SubscriptionStatus,
+  type UseNamedSubscriptionOptions,
   type UseSubscriptionOptions,
   type UseSubscriptionResult,
 } from "./usePalimpsestSubscription.js";

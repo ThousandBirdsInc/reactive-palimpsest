@@ -136,3 +136,14 @@ SELECT id FROM posts
 UNION ALL
 SELECT id FROM archived_posts;
 ```
+
+## Named prepared queries
+
+The same surface applies to server-registered named queries (see
+[NAMED-QUERIES.md](NAMED-QUERIES.md)): every registered template is
+validated against it at **registration time** — with representative
+parameter values bound — so an unsupported construct fails the
+registrar (naming the construct) rather than a live subscribe.
+Templates additionally accept `$1..$N` placeholders and
+`sqlc.arg(name)` / `sqlc.narg(name)` calls, which are replaced by typed
+literals before validation and lowering.

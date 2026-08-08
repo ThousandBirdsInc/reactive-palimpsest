@@ -30,9 +30,17 @@ message ServerMessage {
 
 message SubscribeRequest {
   string client_subscription_id = 1;
+  // Raw SQL subscribe. Mutually exclusive with query_name; refused by
+  // servers configured with a named-query registry unless raw SQL is
+  // explicitly re-enabled.
   string sql = 2;
+  // Parameter bindings. For named subscribes these are the prepared
+  // query's parameters, keyed by wire name (or "$N" position).
   map<string, VarValue> vars = 3;
   optional uint64 resume_lsn = 4;
+  // Named prepared-query subscribe: the server-registered query name.
+  // The client never holds or sends SQL on this path.
+  string query_name = 5;
 }
 
 message UpdateRequest {
@@ -113,7 +121,14 @@ message VarValue {
     string string_value = 4;
     bytes bytes_value = 5;
     bool null_value = 6;
+    // List of scalars, for prepared-query parameters bound into
+    // `col = ANY($n)` positions. Elements must be scalar kinds.
+    VarList list_value = 7;
   }
+}
+
+message VarList {
+  repeated VarValue values = 1;
 }
 
 enum DiffOp {

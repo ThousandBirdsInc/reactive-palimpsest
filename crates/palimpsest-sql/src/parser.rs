@@ -16,6 +16,30 @@ use sqlparser::{
 
 use crate::{limits::enforce_input_size, QueryLimits, SqlError};
 
+/// Sentinel prefix for `$user.<field>` references.
+///
+/// The permission-rule compiler (`palimpsest-permissions`) encodes
+/// `$user.<field>` as `__palimpsest_user_<field>__` so predicates
+/// parse as plain SQL. Defined here — the lowest crate in the
+/// dependency chain — because the expression validator must recognize
+/// the sentinels: `col = ANY(<sentinel>)` is valid (the rewriter
+/// materializes a list-valued field as an `ARRAY[...]` literal before
+/// anything evaluates) even though `ANY` over an arbitrary identifier
+/// is not.
+pub const USER_PLACEHOLDER_PREFIX: &str = "__palimpsest_user_";
+
+/// Sentinel suffix matching [`USER_PLACEHOLDER_PREFIX`].
+pub const USER_PLACEHOLDER_SUFFIX: &str = "__";
+
+/// True when `ident` has the `__palimpsest_user_<field>__` sentinel
+/// shape.
+#[must_use]
+pub fn is_user_placeholder(ident: &str) -> bool {
+    ident.len() > USER_PLACEHOLDER_PREFIX.len() + USER_PLACEHOLDER_SUFFIX.len()
+        && ident.starts_with(USER_PLACEHOLDER_PREFIX)
+        && ident.ends_with(USER_PLACEHOLDER_SUFFIX)
+}
+
 /// Parses a single `SELECT` statement under the default
 /// [`QueryLimits`].
 ///
@@ -33,6 +57,20 @@ pub fn parse_select(sql: &str) -> Result<Statement, SqlError> {
 /// the input exceeds `limits.max_input_bytes`; otherwise propagates
 /// any parse / validation error.
 pub fn parse_select_with_limits(sql: &str, limits: QueryLimits) -> Result<Statement, SqlError> {
+    let statement = parse_single_query(sql, limits)?;
+    let Statement::Query(query) = &statement else {
+        return Err(SqlError::UnsupportedStatement);
+    };
+
+    validate_query(query)?;
+    Ok(statement)
+}
+
+/// Parses exactly one `SELECT` statement *without* running the
+/// supported-surface validation. Used by the prepared-query registrar,
+/// whose templates contain `$N` placeholders that the validator would
+/// reject; validation runs after the placeholders are substituted.
+pub(crate) fn parse_single_query(sql: &str, limits: QueryLimits) -> Result<Statement, SqlError> {
     enforce_input_size(sql, limits)?;
     let dialect = PostgreSqlDialect {};
     let mut statements = Parser::parse_sql(&dialect, sql)?;
@@ -42,11 +80,9 @@ pub fn parse_select_with_limits(sql: &str, limits: QueryLimits) -> Result<Statem
     }
 
     let statement = statements.remove(0);
-    let Statement::Query(query) = &statement else {
+    if !matches!(&statement, Statement::Query(_)) {
         return Err(SqlError::UnsupportedStatement);
-    };
-
-    validate_query(query)?;
+    }
     Ok(statement)
 }
 
@@ -285,10 +321,16 @@ impl Visitor for UnsupportedExprVisitor {
                         | BinaryOperator::Gt
                         | BinaryOperator::GtEq
                 );
-                let array_like = matches!(
-                    right.as_ref(),
-                    Expr::Array(_) | Expr::Value(Value::SingleQuotedString(_))
-                );
+                // `ANY(...)` accepts array literals, string-encoded
+                // arrays, and `$user.<field>` sentinels (which the
+                // permission rewriter replaces with `ARRAY[...]`
+                // literals before evaluation). Arbitrary identifiers
+                // stay rejected: the evaluator has no array columns.
+                let array_like = match right.as_ref() {
+                    Expr::Array(_) | Expr::Value(Value::SingleQuotedString(_)) => true,
+                    Expr::Identifier(ident) => is_user_placeholder(&ident.value),
+                    _ => false,
+                };
                 if comparison && array_like {
                     ControlFlow::Continue(())
                 } else if matches!(right.as_ref(), Expr::Subquery(_)) {
@@ -517,6 +559,22 @@ mod tests {
     fn parses_any_over_array() {
         parse_select("SELECT id FROM posts WHERE id = ANY('{1,2,3}')")
             .expect("ANY over an array literal should parse");
+    }
+
+    #[test]
+    fn parses_any_over_user_sentinel_but_not_plain_identifiers() {
+        // The permission-rule compiler encodes `$user.team_ids` as
+        // `__palimpsest_user_team_ids__`; the rewriter later
+        // materializes it as an ARRAY literal. The validator must let
+        // the sentinel through `ANY(...)` (docs/PERMISSIONS.md "Scoped
+        // read with admin override") without widening the surface to
+        // arbitrary identifiers the evaluator can't handle.
+        parse_select("SELECT id FROM posts WHERE id = ANY(__palimpsest_user_team_ids__)")
+            .expect("ANY over a $user sentinel should parse");
+
+        let err = parse_select("SELECT id FROM posts WHERE id = ANY(title)")
+            .expect_err("ANY over a plain column stays rejected");
+        assert!(err.to_string().contains("non-array"), "got {err}");
     }
 
     #[test]

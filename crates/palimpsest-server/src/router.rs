@@ -591,7 +591,10 @@ pub fn canonical_subgraph_key(query: &QueryId, user_ctx: &UserContext) -> String
         .collect();
     entries.sort();
     for (field, value) in entries {
-        write!(&mut key, "{field}={value};").expect("write into String");
+        // Length-prefixed so a value containing `;field=` cannot make
+        // two different contexts share one canonical key (and thereby
+        // one permission-filtered dataflow).
+        write!(&mut key, "{field}={}:{value};", value.len()).expect("write into String");
     }
     key
 }

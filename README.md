@@ -200,6 +200,7 @@ queries before execution.
 Start with:
 
 - [docs/supported-sql.md](docs/supported-sql.md)
+- [docs/NAMED-QUERIES.md](docs/NAMED-QUERIES.md)
 - [docs/USER-GUIDE.md](docs/USER-GUIDE.md)
 - [docs/PERMISSIONS.md](docs/PERMISSIONS.md)
 

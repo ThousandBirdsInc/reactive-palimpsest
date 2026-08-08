@@ -30,6 +30,7 @@ import type {
   Schema,
   SubscribeOptions,
 } from "../types.js";
+import type { NamedQueryParam } from "../wasm.js";
 
 export type SubscriptionStatus =
   | "idle"
@@ -88,6 +89,60 @@ export function usePalimpsestSubscription<T>(
   sql: string,
   options: UseSubscriptionOptions<T> = {},
 ): UseSubscriptionResult<T> {
+  // Stable string key for vars — re-subscribe when it changes.
+  const varsKey = useMemo(
+    () => JSON.stringify(options.vars ?? {}),
+    [options.vars],
+  );
+  return useSubscriptionCore<T>(
+    client,
+    (c) => c.subscribe<T>(sql, { vars: options.vars, decoder: options.decoder }),
+    `sql:${sql}\u0000${varsKey}`,
+    options,
+  );
+}
+
+/**
+ * Options for {@link usePalimpsestNamedSubscription} — everything from
+ * {@link UseSubscriptionOptions} except `vars` (named queries bind
+ * `params` instead).
+ */
+export type UseNamedSubscriptionOptions<T> = Omit<
+  UseSubscriptionOptions<T>,
+  "vars"
+>;
+
+/**
+ * Subscribe to a server-registered named prepared query. The component
+ * holds only the query *name* and its params — no SQL ships in the
+ * bundle. Otherwise identical to {@link usePalimpsestSubscription}.
+ */
+export function usePalimpsestNamedSubscription<T>(
+  client: PalimpsestClient | null,
+  name: string,
+  params: Record<string, NamedQueryParam> = {},
+  options: UseNamedSubscriptionOptions<T> = {},
+): UseSubscriptionResult<T> {
+  const paramsKey = useMemo(() => JSON.stringify(params), [params]);
+  return useSubscriptionCore<T>(
+    client,
+    (c) => c.subscribeNamed<T>(name, params, { decoder: options.decoder }),
+    `named:${name}\u0000${paramsKey}`,
+    options,
+  );
+}
+
+/**
+ * Shared lifecycle behind both hooks: owns one subscription per
+ * (client, subscribeKey, refreshKey) combo and folds its event stream
+ * into rows/schema/status state.
+ */
+function useSubscriptionCore<T>(
+  client: PalimpsestClient | null,
+  open: (client: PalimpsestClient) => Promise<TypedSubscription<T>>,
+  subscribeKey: string,
+  options: Omit<UseSubscriptionOptions<T>, "vars">,
+): UseSubscriptionResult<T> {
   const [status, setStatus] = useState<SubscriptionStatus>("idle");
   const [rows, setRows] = useState<T[]>([]);
   const [schema, setSchema] = useState<Schema | null>(null);
@@ -100,18 +155,16 @@ export function usePalimpsestSubscription<T>(
   // this the subscription would appear "stuck" after a write burst.
   const [resyncEpoch, setResyncEpoch] = useState(0);
 
-  // Stable string key for vars — re-subscribe when it changes.
-  const varsKey = useMemo(
-    () => JSON.stringify(options.vars ?? {}),
-    [options.vars],
-  );
-
   // Latest-callback refs so changing handler identity never tears the
   // subscription down; the event callback always sees the current one.
   const onDiffRef = useRef(options.onDiff);
   onDiffRef.current = options.onDiff;
   const onResyncRef = useRef(options.onResync);
   onResyncRef.current = options.onResync;
+  // Same treatment for the opener: its identity changes every render,
+  // but only `subscribeKey` should trigger a re-subscribe.
+  const openRef = useRef(open);
+  openRef.current = open;
   const trackRows = options.trackRows !== false;
 
   // eslint-disable-next-line react-hooks/exhaustive-deps -- explicit deps below
@@ -135,10 +188,7 @@ export function usePalimpsestSubscription<T>(
     let openedSub: TypedSubscription<T> | null = null;
     (async () => {
       try {
-        const sub = await client.subscribe<T>(sql, {
-          vars: options.vars,
-          decoder: options.decoder,
-        });
+        const sub = await openRef.current(client);
         if (!alive) {
           await sub.unsubscribe();
           return;
@@ -221,7 +271,7 @@ export function usePalimpsestSubscription<T>(
       }
       setStatus("closed");
     };
-  }, [client, sql, varsKey, options.refreshKey, resyncEpoch, trackRows]);
+  }, [client, subscribeKey, options.refreshKey, resyncEpoch, trackRows]);
 
   return { status, rows, schema, error, lsn };
 }

@@ -50,7 +50,7 @@ pub use cache::{LocalCache, PrimaryKey};
 pub use connection::ConnectionState;
 pub use error::ClientError;
 pub use palimpsest_proto::palimpsest::sync::v1::{
-    var_value, DatumType, DiffOp, ResyncReason, VarValue,
+    var_value, DatumType, DiffOp, ResyncReason, VarList, VarValue,
 };
 pub use palimpsest_proto::wire::{WireDatum, WireRow};
 pub use reconnect::BackoffConfig;
@@ -165,6 +165,43 @@ impl Client {
         sql: impl Into<String>,
         vars: HashMap<String, VarValue>,
     ) -> Result<Subscription, ClientError> {
+        self.subscribe_spec(connection::QuerySpec::Sql(sql.into()), vars)
+            .await
+    }
+
+    /// Subscribe to a server-registered named prepared query with no
+    /// parameters. The client never holds or sends SQL on this path.
+    ///
+    /// # Errors
+    /// [`ClientError::ConnectionClosed`] if the manager has shut down.
+    /// Server-side refusals (unknown name, missing params) arrive as
+    /// [`DiffEvent::Error`] on the subscription stream.
+    pub async fn subscribe_named(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<Subscription, ClientError> {
+        self.subscribe_named_with(name, HashMap::new()).await
+    }
+
+    /// Subscribe to a named prepared query with parameter bindings.
+    /// Keys are the registered parameter names (or `$N` positions).
+    ///
+    /// # Errors
+    /// See [`Self::subscribe_named`].
+    pub async fn subscribe_named_with(
+        &self,
+        name: impl Into<String>,
+        params: HashMap<String, VarValue>,
+    ) -> Result<Subscription, ClientError> {
+        self.subscribe_spec(connection::QuerySpec::Named(name.into()), params)
+            .await
+    }
+
+    async fn subscribe_spec(
+        &self,
+        query: connection::QuerySpec,
+        vars: HashMap<String, VarValue>,
+    ) -> Result<Subscription, ClientError> {
         let id = format!(
             "sub-{}",
             self.next_subscription_id.fetch_add(1, Ordering::Relaxed)
@@ -178,7 +215,7 @@ impl Client {
         self.inbox
             .send(Command::Subscribe {
                 subscription_id: id.clone(),
-                sql: sql.into(),
+                query,
                 vars,
                 events_tx,
                 cache: cache.clone(),

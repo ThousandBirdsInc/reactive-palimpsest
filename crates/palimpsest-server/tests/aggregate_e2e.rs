@@ -279,6 +279,7 @@ fn subscribe_message(client_id: &str, sql: &str) -> proto::ClientMessage {
                 sql: sql.to_owned(),
                 vars: HashMap::new(),
                 resume_lsn: None,
+                query_name: String::new(),
             },
         )),
     }

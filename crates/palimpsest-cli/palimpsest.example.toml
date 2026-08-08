@@ -28,6 +28,15 @@ kind = "anonymous"
 # mode = "both"
 # predicate = "author_id = $user.id"
 
+# Named prepared queries (docs/NAMED-QUERIES.md): sqlc-format query
+# files registered at startup. Registration failures abort startup with
+# the query name and the exact rejected construct. Configuring any file
+# disables raw-SQL subscribes (clients must subscribe by query name)
+# unless `inline_sql = true`. Paths resolve relative to this file.
+# [queries]
+# files = ["queries.sql"]
+# inline_sql = false
+
 # Optional upstream Postgres connection. Required for `slot-info` and
 # (later) for the real WAL runtime.
 # [upstream]

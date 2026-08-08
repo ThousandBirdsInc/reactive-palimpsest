@@ -31,6 +31,7 @@ pub mod error;
 pub mod grpc;
 pub mod metrics;
 pub mod metrics_endpoint;
+pub mod named;
 pub mod permissions;
 pub mod registry;
 pub mod resume;
@@ -58,6 +59,7 @@ pub use metrics_endpoint::{
     build_router as build_metrics_router, build_router_with as build_metrics_router_with,
     render_prometheus, HealthConfig,
 };
+pub use named::NamedQueries;
 pub use permissions::install_permission_filters;
 pub use registry::SubscriptionRegistry;
 pub use resume::{CompactionWindow, ResumeDecision};
