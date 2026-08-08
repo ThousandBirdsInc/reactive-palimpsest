@@ -503,6 +503,39 @@ fn datum_to_js(d: &WireDatum) -> JsValue {
         WireDatum::Bytea(bytes) => bytea_to_js(bytes),
         WireDatum::Uuid(b) => JsValue::from_str(&format_uuid(b)),
         WireDatum::Null => JsValue::NULL,
+        // Temporal datums surface as JS `Date` objects — no more
+        // hand-written micros-to-Date decoding in application code.
+        // Sub-millisecond precision is truncated (JS `Date` is ms).
+        WireDatum::Date(days) => js_sys::Date::new(&JsValue::from_f64(
+            f64::from(*days) * 86_400_000.0,
+        ))
+        .into(),
+        WireDatum::Timestamp(micros) | WireDatum::TimestampTz(micros) => {
+            #[allow(clippy::cast_precision_loss)]
+            js_sys::Date::new(&JsValue::from_f64((*micros as f64 / 1000.0).floor())).into()
+        }
+        // `time` has no natural JS Date form; expose microseconds
+        // since midnight as a number (< 2^37, exact in an f64).
+        #[allow(clippy::cast_precision_loss)]
+        WireDatum::Time(micros) => JsValue::from_f64(*micros as f64),
+        WireDatum::Interval {
+            months,
+            days,
+            micros,
+        } => {
+            let obj = Object::new();
+            set(&obj, "months", &JsValue::from_f64(f64::from(*months)));
+            set(&obj, "days", &JsValue::from_f64(f64::from(*days)));
+            set(&obj, "micros", &BigInt::from(*micros).into());
+            obj.into()
+        }
+        WireDatum::Array(elements) => {
+            let arr = Array::new();
+            for element in elements {
+                arr.push(&datum_to_js(element));
+            }
+            arr.into()
+        }
     }
 }
 

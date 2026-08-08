@@ -70,6 +70,28 @@ pub enum WireDatum {
     Uuid([u8; 16]),
     /// SQL `NULL`.
     Null,
+    /// Postgres `date`: days since the Unix epoch (1970-01-01).
+    Date(i32),
+    /// Postgres `time`: microseconds since midnight.
+    Time(i64),
+    /// Postgres `timestamp` (no timezone): microseconds since the
+    /// Unix epoch.
+    Timestamp(i64),
+    /// Postgres `timestamptz`: microseconds since the Unix epoch,
+    /// UTC-normalized.
+    TimestampTz(i64),
+    /// Postgres `interval`, kept in its native three-field form so
+    /// calendar-aware arithmetic stays possible client-side.
+    Interval {
+        /// Whole months.
+        months: i32,
+        /// Whole days.
+        days: i32,
+        /// Sub-day microseconds.
+        micros: i64,
+    },
+    /// Postgres array value: element datums in array order.
+    Array(Vec<WireDatum>),
 }
 
 /// One wire-encoded row — a flat list of column values matching the
@@ -248,6 +270,14 @@ const fn is_compatible(datum: &WireDatum, declared: DatumType, nullable: bool) -
             | (WireDatum::Json(_), DatumType::Json)
             | (WireDatum::Jsonb(_), DatumType::Jsonb)
             | (WireDatum::Uuid(_), DatumType::Uuid)
+            | (WireDatum::Date(_), DatumType::Date)
+            | (WireDatum::Time(_), DatumType::Time)
+            | (WireDatum::Timestamp(_), DatumType::Timestamp)
+            | (WireDatum::TimestampTz(_), DatumType::TimestampTz)
+            | (WireDatum::Interval { .. }, DatumType::Interval)
+            // Array element types are not declared per-column on the
+            // wire; the container variant is what the schema checks.
+            | (WireDatum::Array(_), DatumType::Array)
             // Tolerate a server that hasn't advertised a strong schema:
             // a permissive `Unspecified` accepts anything.
             | (_, DatumType::Unspecified)
@@ -269,6 +299,12 @@ const fn datum_tag(datum: &WireDatum) -> &'static str {
         WireDatum::Jsonb(_) => "jsonb",
         WireDatum::Uuid(_) => "uuid",
         WireDatum::Null => "null",
+        WireDatum::Date(_) => "date",
+        WireDatum::Time(_) => "time",
+        WireDatum::Timestamp(_) => "timestamp",
+        WireDatum::TimestampTz(_) => "timestamptz",
+        WireDatum::Interval { .. } => "interval",
+        WireDatum::Array(_) => "array",
     }
 }
 
@@ -530,5 +566,82 @@ mod tests {
         let bytes = encode_rows(&rows).unwrap();
         let decoded = decode_rows(&bytes).unwrap();
         assert_eq!(decoded, rows);
+    }
+
+    #[test]
+    fn temporal_and_array_datums_round_trip() {
+        let rows = vec![vec![
+            WireDatum::Date(19_723),
+            WireDatum::Time(43_200_000_000),
+            WireDatum::Timestamp(1_700_000_000_000_000),
+            WireDatum::TimestampTz(1_700_000_000_000_000),
+            WireDatum::Interval {
+                months: 1,
+                days: 2,
+                micros: 3_000_000,
+            },
+            WireDatum::Array(vec![
+                WireDatum::Text(b"a".to_vec()),
+                WireDatum::Null,
+                WireDatum::Array(vec![WireDatum::I32(1)]),
+            ]),
+        ]];
+        let bytes = encode_rows(&rows).unwrap();
+        let decoded = decode_rows(&bytes).unwrap();
+        assert_eq!(decoded, rows);
+    }
+
+    #[test]
+    fn temporal_datums_validate_against_declared_schema() {
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "created_at".into(),
+                    r#type: DatumType::TimestampTz.into(),
+                    nullable: false,
+                },
+                Column {
+                    name: "tags".into(),
+                    r#type: DatumType::Array.into(),
+                    nullable: true,
+                },
+            ],
+            primary_key_columns: vec![0],
+        };
+        let rows = vec![vec![
+            WireDatum::TimestampTz(1_700_000_000_000_000),
+            WireDatum::Array(vec![WireDatum::Text(b"bug".to_vec())]),
+        ]];
+        let bytes = encode_rows(&rows).unwrap();
+        let diff = Diff {
+            subscription_id: "tickets".into(),
+            lsn: 1,
+            op: DiffOp::Insert.into(),
+            schema_id: 3,
+            rows: bytes,
+        };
+        let decoded = decode_diff(&diff, &schema).unwrap();
+        assert_eq!(decoded, rows);
+
+        // A timestamp datum on a timestamptz column is still a
+        // mismatch — the variants are distinct on purpose.
+        let bad = encode_rows(&[vec![
+            WireDatum::Timestamp(0),
+            WireDatum::Null,
+        ]])
+        .unwrap();
+        let diff = Diff {
+            rows: bad,
+            ..diff
+        };
+        let err = decode_diff(&diff, &schema).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::SchemaMismatch {
+                column: 0,
+                schema: DatumType::TimestampTz,
+                datum: "timestamp"
+            }
+        ));
     }
 }

@@ -47,6 +47,11 @@ pub type IntExtractor = Box<dyn Fn(&Row) -> i64 + Send + Sync>;
 pub struct ScalarSchema {
     columns: Vec<(String, ColumnType)>,
     index: BTreeMap<String, usize>,
+    /// Per-column source-relation attribution, aligned with `columns`.
+    /// Empty when the caller supplied none. Lets qualified references
+    /// (`tickets.id`) bind to the right occurrence when a join carries
+    /// the same bare name on both sides.
+    provenance: Vec<Option<String>>,
 }
 
 impl ScalarSchema {
@@ -60,7 +65,29 @@ impl ScalarSchema {
         for (i, (name, _)) in columns.iter().enumerate() {
             index.insert(name.clone(), i);
         }
-        Self { columns, index }
+        Self {
+            columns,
+            index,
+            provenance: Vec::new(),
+        }
+    }
+
+    /// Attaches per-column source-relation attribution (aligned with
+    /// the column order) so qualified references resolve by relation
+    /// rather than falling back to bare-name lookup.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: Vec<Option<String>>) -> Self {
+        self.provenance = provenance;
+        self
+    }
+
+    /// Row index of the column named `name` whose provenance
+    /// attributes it to `relation`, if any.
+    #[must_use]
+    pub fn index_of_qualified(&self, relation: &str, name: &str) -> Option<usize> {
+        self.columns.iter().enumerate().position(|(i, (col, _))| {
+            col == name && self.provenance.get(i).and_then(Option::as_deref) == Some(relation)
+        })
     }
 
     /// Row index of the column named `name`, if any.
@@ -178,10 +205,21 @@ fn infer_type(expr: &Expr, schema: &ScalarSchema) -> ColumnType {
         Expr::Identifier(ident) => schema
             .column_type(&ident.value)
             .unwrap_or(ColumnType::Unknown),
-        Expr::CompoundIdentifier(parts) => parts
-            .last()
-            .and_then(|last| schema.column_type(&last.value))
-            .unwrap_or(ColumnType::Unknown),
+        Expr::CompoundIdentifier(parts) => {
+            let qualified = match parts.as_slice() {
+                [relation, column] => schema
+                    .index_of_qualified(&relation.value, &column.value)
+                    .map(|idx| schema.columns()[idx].1),
+                _ => None,
+            };
+            qualified
+                .or_else(|| {
+                    parts
+                        .last()
+                        .and_then(|last| schema.column_type(&last.value))
+                })
+                .unwrap_or(ColumnType::Unknown)
+        }
         Expr::Value(SqlValue::Boolean(_)) => ColumnType::Bool,
         Expr::Value(SqlValue::Number(n, _)) => {
             if n.parse::<i64>().is_ok() {
@@ -315,9 +353,19 @@ fn compile_inner(expr: &Expr, schema: &ScalarSchema) -> Result<ScalarFn, EvalErr
         Expr::Nested(inner) => compile_inner(inner, schema),
         Expr::Identifier(ident) => identifier_scalar(&ident.value, schema),
         Expr::CompoundIdentifier(parts) => {
-            // Treat `table.column` as just `column` for our flat row
-            // model. The MIR's BaseTable.project already pinned
-            // column ordering, so qualification is informational.
+            // Bind `relation.column` through provenance first: a join
+            // can carry the same bare name on both sides, and the
+            // qualifier is what tells them apart. Fall back to the
+            // trailing segment for schemas without provenance (or
+            // qualifiers that don't attribute, e.g. derived-table
+            // aliases).
+            if let [relation, column] = parts.as_slice() {
+                if let Some(idx) = schema.index_of_qualified(&relation.value, &column.value) {
+                    return Ok(Box::new(move |row| {
+                        row.get(idx).cloned().unwrap_or(Datum::Null)
+                    }));
+                }
+            }
             let last = parts
                 .last()
                 .ok_or_else(|| EvalError::Unsupported("empty compound identifier".to_owned()))?;

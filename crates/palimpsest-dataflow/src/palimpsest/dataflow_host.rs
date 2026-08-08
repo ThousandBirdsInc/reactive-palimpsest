@@ -56,7 +56,12 @@ pub fn snapshot_run(plan: &CompiledPlan, inputs: HashMap<TableId, Vec<Row>>) -> 
                 let (_, collection) = scope.new_collection_from(rows);
                 input_collections.insert(*table, collection);
             }
-            let output = install_plan(&plan, scope, &input_collections);
+            // Consolidate before capturing: plans with anti-joins
+            // (NOT EXISTS) emit matched rows and their cancelling -1s
+            // as separate updates in the raw stream. Capturing without
+            // consolidation would keep the +1 and drop the -1, serving
+            // rows the query excludes.
+            let output = install_plan(&plan, scope, &input_collections).consolidate();
             let cap_inner = Arc::clone(&cap);
             output.inner.inspect(move |entry: &(Row, u64, isize)| {
                 let (row, _time, diff) = entry;
@@ -193,7 +198,10 @@ fn run_worker(plan: CompiledPlan, cmd_rx: std_mpsc::Receiver<DataflowCommand>) {
             input_collections.insert(*table, collection);
             inputs.insert(*table, input);
         }
-        let output = install_plan(&plan, scope, &input_collections);
+        // Consolidate before capturing (see `snapshot_run`): without it
+        // an anti-join's cancelling -1 arrives as a separate raw update
+        // and the excluded row would be served to subscribers.
+        let output = install_plan(&plan, scope, &input_collections).consolidate();
         let cap_for_inspect = Arc::clone(&cap_for_dataflow);
         output
             .inner
@@ -738,6 +746,207 @@ mod tests {
         assert!(deltas.iter().all(|d| d.lsn == Lsn::new(2)));
 
         host.release(canonical, 7);
+    }
+
+    #[test]
+    fn snapshot_run_honors_not_exists_antijoin() {
+        // Regression: the output-capture sites used to read the raw
+        // differential stream, so an anti-join's cancelling -1 was
+        // discarded and excluded rows were served.
+        let tickets = TableId::new(30);
+        let blocks = TableId::new(31);
+        let antijoin_lookup = move |table: &str| match table {
+            "tickets" => Some((
+                tickets,
+                ScalarSchema::from_pairs([("id".to_owned(), ColumnType::Int)]),
+            )),
+            "blocks" => Some((
+                blocks,
+                ScalarSchema::from_pairs([("ticket_id".to_owned(), ColumnType::Int)]),
+            )),
+            _ => None,
+        };
+
+        let sql = "SELECT tickets.id FROM tickets
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM blocks WHERE blocks.ticket_id = tickets.id
+                   )";
+        let graph = parse_and_lower(sql).unwrap();
+        let plan = compile_mir(&graph, &antijoin_lookup).unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            tickets,
+            vec![
+                row(vec![Datum::I64(1)]),
+                row(vec![Datum::I64(2)]),
+                row(vec![Datum::I64(3)]),
+            ],
+        );
+        inputs.insert(blocks, vec![row(vec![Datum::I64(2)])]);
+
+        let mut output = snapshot_run(&plan, inputs);
+        output.sort();
+        assert_eq!(
+            output,
+            vec![row(vec![Datum::I64(1)]), row(vec![Datum::I64(3)])],
+            "blocked ticket 2 must be excluded from the snapshot"
+        );
+    }
+
+    #[test]
+    fn persistent_host_honors_not_exists_antijoin() {
+        let tickets = TableId::new(32);
+        let blocks = TableId::new(33);
+        let antijoin_lookup = move |table: &str| match table {
+            "tickets" => Some((
+                tickets,
+                ScalarSchema::from_pairs([("id".to_owned(), ColumnType::Int)]),
+            )),
+            "blocks" => Some((
+                blocks,
+                ScalarSchema::from_pairs([("ticket_id".to_owned(), ColumnType::Int)]),
+            )),
+            _ => None,
+        };
+
+        let sql = "SELECT tickets.id FROM tickets
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM blocks WHERE blocks.ticket_id = tickets.id
+                   )";
+        let plan = compile_mir(&parse_and_lower(sql).unwrap(), &antijoin_lookup).unwrap();
+        let host = PersistentHost::new();
+        let canonical = "tickets.unblocked";
+
+        let mut seed = HashMap::new();
+        seed.insert(
+            tickets,
+            vec![row(vec![Datum::I64(1)]), row(vec![Datum::I64(2)])],
+        );
+        seed.insert(blocks, vec![row(vec![Datum::I64(2)])]);
+        let mut initial = host.register_or_seed(canonical, &plan, seed, Lsn::new(1), 5);
+        initial.sort();
+        assert_eq!(
+            initial,
+            vec![row(vec![Datum::I64(1)])],
+            "seeded blocked ticket must not appear in the initial view"
+        );
+
+        // Blocking ticket 1 must emit exactly one retraction.
+        let deltas =
+            host.push_table_diff(canonical, blocks, row(vec![Datum::I64(1)]), 1, Lsn::new(2));
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].diff, -1);
+        assert_eq!(deltas[0].row, row(vec![Datum::I64(1)]));
+
+        // Unblocking re-asserts it.
+        let deltas =
+            host.push_table_diff(canonical, blocks, row(vec![Datum::I64(1)]), -1, Lsn::new(3));
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].diff, 1);
+        assert_eq!(deltas[0].row, row(vec![Datum::I64(1)]));
+
+        host.release(canonical, 5);
+    }
+
+    fn colliding_join_lookup() -> impl Fn(&str) -> Option<(TableId, ScalarSchema)> + Copy {
+        // Both tables carry `id` and `name`, so only provenance can
+        // bind a qualified reference to the right side of the join.
+        |table: &str| match table {
+            "tickets" => Some((
+                TableId::new(40),
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("name".to_owned(), ColumnType::Text),
+                    ("source_id".to_owned(), ColumnType::Int),
+                ]),
+            )),
+            "sources" => Some((
+                TableId::new(41),
+                ScalarSchema::from_pairs([
+                    ("id".to_owned(), ColumnType::Int),
+                    ("name".to_owned(), ColumnType::Text),
+                ]),
+            )),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn aliased_join_projects_columns_from_the_right_relations() {
+        // Regression: `t.id, t.name, so.id, so.name` used to fall back
+        // to bare-name last-wins lookup and could return all four
+        // values from the wrong table.
+        let lookup = colliding_join_lookup();
+        let sql = "SELECT t.id, t.name, so.id, so.name
+                   FROM tickets t JOIN sources so ON t.source_id = so.id";
+        let plan = compile_mir(&parse_and_lower(sql).unwrap(), &lookup).unwrap();
+
+        let ticket_name = Datum::Text(bytes::Bytes::from_static(b"fix login"));
+        let source_name = Datum::Text(bytes::Bytes::from_static(b"email"));
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            TableId::new(40),
+            vec![row(vec![
+                Datum::I64(7),
+                ticket_name.clone(),
+                Datum::I64(3),
+            ])],
+        );
+        inputs.insert(
+            TableId::new(41),
+            vec![row(vec![Datum::I64(3), source_name.clone()])],
+        );
+
+        let output = snapshot_run(&plan, inputs);
+        assert_eq!(
+            output,
+            vec![row(vec![
+                Datum::I64(7),
+                ticket_name,
+                Datum::I64(3),
+                source_name,
+            ])],
+            "each projected column must come from its qualified relation"
+        );
+    }
+
+    #[test]
+    fn qualified_where_predicate_binds_across_colliding_names() {
+        // Regression: a table-qualified predicate on a name that
+        // collides across the join used to bind bare-name (last wins)
+        // and return zero rows.
+        let lookup = colliding_join_lookup();
+        let sql = "SELECT t.id
+                   FROM tickets t JOIN sources so ON t.source_id = so.id
+                   WHERE t.name = 'fix login'";
+        let plan = compile_mir(&parse_and_lower(sql).unwrap(), &lookup).unwrap();
+
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            TableId::new(40),
+            vec![row(vec![
+                Datum::I64(7),
+                Datum::Text(bytes::Bytes::from_static(b"fix login")),
+                Datum::I64(3),
+            ])],
+        );
+        // The sources row's `name` deliberately differs, so bare-name
+        // (last-wins) binding would filter the row out.
+        inputs.insert(
+            TableId::new(41),
+            vec![row(vec![
+                Datum::I64(3),
+                Datum::Text(bytes::Bytes::from_static(b"email")),
+            ])],
+        );
+
+        let output = snapshot_run(&plan, inputs);
+        assert_eq!(
+            output,
+            vec![row(vec![Datum::I64(7)])],
+            "the ticket-side name must satisfy the qualified predicate"
+        );
     }
 
     #[test]

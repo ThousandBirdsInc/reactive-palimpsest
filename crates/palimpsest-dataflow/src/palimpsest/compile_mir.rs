@@ -438,14 +438,17 @@ fn compile_filter(
         .ok_or_else(|| CompileError::Unknown("filter input schema".to_owned()))?
         .clone();
 
-    let pred = compile_predicate(predicate, &input_schema)?;
-    let pred: Arc<dyn Fn(&Row) -> bool + Send + Sync> = Arc::from(pred);
-
     let provenance = state
         .node_provenance
         .get(&input_node)
         .cloned()
         .unwrap_or_else(|| vec![None; input_schema.len()]);
+
+    // Attach provenance so qualified references (`tickets.name`) bind
+    // to the right occurrence when a join carries colliding names.
+    let pred_schema = input_schema.clone().with_provenance(provenance.clone());
+    let pred = compile_predicate(predicate, &pred_schema)?;
+    let pred: Arc<dyn Fn(&Row) -> bool + Send + Sync> = Arc::from(pred);
     state.node_provenance.insert(node, provenance);
     state.node_schemas.insert(node, input_schema);
     state
@@ -478,6 +481,9 @@ fn compile_project(
         .get(&input_node)
         .cloned()
         .unwrap_or_else(|| vec![None; input_schema.len()]);
+    // Scalar projection expressions resolve qualified references
+    // through provenance, like predicates do.
+    let expr_schema = input_schema.clone().with_provenance(input_prov.clone());
 
     let mut outputs: Vec<OutputColumn> = Vec::with_capacity(columns.len());
     let mut output_pairs = Vec::with_capacity(columns.len());
@@ -522,7 +528,7 @@ fn compile_project(
                 );
                 continue;
             }
-            let (scalar, ty) = compile_typed_scalar(expr_text, &input_schema)?;
+            let (scalar, ty) = compile_typed_scalar(expr_text, &expr_schema)?;
             outputs.push(OutputColumn::Scalar(Arc::from(scalar)));
             output_pairs.push((alias.to_owned(), ty));
             output_prov.push(None);
@@ -625,7 +631,7 @@ fn compile_project(
         }
 
         // Anything else is a scalar expression (cast, coalesce, ...).
-        let (scalar, ty) = compile_typed_scalar(entry, &input_schema)?;
+        let (scalar, ty) = compile_typed_scalar(entry, &expr_schema)?;
         let name = crate::palimpsest::eval::cast_label(entry).unwrap_or_else(|| entry.to_owned());
         outputs.push(OutputColumn::Scalar(Arc::from(scalar)));
         output_pairs.push((name, ty));
@@ -762,7 +768,8 @@ fn compile_aggregate(
                 // every row.
                 (Arc::new(|_row: &Row| Datum::Bool(true)), ColumnType::Bool)
             } else {
-                let (scalar, ty) = compile_typed_scalar(&arg, &input_schema)?;
+                let arg_schema = input_schema.clone().with_provenance(input_prov.clone());
+                let (scalar, ty) = compile_typed_scalar(&arg, &arg_schema)?;
                 (Arc::from(scalar), ty)
             };
         value_extracts.push(extractor);
@@ -1086,7 +1093,8 @@ fn compile_key_extractor(
             row.get(index).cloned().unwrap_or(Datum::Null)
         }));
     }
-    let scalar = crate::palimpsest::eval::compile_scalar(entry, schema)?;
+    let expr_schema = schema.clone().with_provenance(provenance.to_vec());
+    let scalar = crate::palimpsest::eval::compile_scalar(entry, &expr_schema)?;
     Ok(Arc::from(scalar))
 }
 

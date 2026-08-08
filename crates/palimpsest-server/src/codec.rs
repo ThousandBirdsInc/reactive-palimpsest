@@ -19,7 +19,8 @@ use palimpsest_dataflow::palimpsest::Row;
 /// Failures producing a wire row from a WAL row.
 #[derive(Debug, Error)]
 pub enum CodecError {
-    /// `Datum` variant not in the v1 wire surface.
+    /// `Datum::Unchanged` reached the encoder: a TOAST placeholder
+    /// that should have been resolved against the mirror upstream.
     #[error("unsupported datum variant for wire format")]
     UnsupportedDatum,
     /// Underlying wire codec failure (encode/decode).
@@ -31,8 +32,8 @@ pub enum CodecError {
 /// `Diff::rows`.
 ///
 /// # Errors
-/// * [`CodecError::UnsupportedDatum`] for `Datum` variants outside the
-///   v1 wire surface (date/time/interval/array/unchanged).
+/// * [`CodecError::UnsupportedDatum`] for `Datum::Unchanged` (a TOAST
+///   placeholder that must be resolved before encoding).
 /// * [`CodecError::Wire`] on bincode failure.
 pub fn encode_rows(rows: &[Row]) -> Result<Vec<u8>, CodecError> {
     let mut wire_rows: Vec<wire::WireRow> = Vec::with_capacity(rows.len());
@@ -74,6 +75,7 @@ pub fn decode_rows(bytes: &[u8]) -> Result<Vec<Row>, CodecError> {
 }
 
 fn datum_to_wire(datum: &Datum) -> Result<WireDatum, CodecError> {
+    use palimpsest_wal::{Date, Interval, Time, Timestamp, TimestampTz};
     Ok(match datum {
         Datum::Bool(value) => WireDatum::Bool(*value),
         Datum::I16(value) => WireDatum::I16(*value),
@@ -88,17 +90,41 @@ fn datum_to_wire(datum: &Datum) -> Result<WireDatum, CodecError> {
         Datum::Jsonb(value) => WireDatum::Jsonb(value.to_vec()),
         Datum::Uuid(value) => WireDatum::Uuid(value.as_bytes()),
         Datum::Null => WireDatum::Null,
-        Datum::Date(_)
-        | Datum::Time(_)
-        | Datum::Timestamp(_)
-        | Datum::TimestampTz(_)
-        | Datum::Interval(_)
-        | Datum::Array(_)
-        | Datum::Unchanged => return Err(CodecError::UnsupportedDatum),
+        Datum::Date(Date {
+            days_since_unix_epoch,
+        }) => WireDatum::Date(*days_since_unix_epoch),
+        Datum::Time(Time {
+            micros_since_midnight,
+        }) => WireDatum::Time(*micros_since_midnight),
+        Datum::Timestamp(Timestamp {
+            micros_since_unix_epoch,
+        }) => WireDatum::Timestamp(*micros_since_unix_epoch),
+        Datum::TimestampTz(TimestampTz {
+            micros_since_unix_epoch,
+        }) => WireDatum::TimestampTz(*micros_since_unix_epoch),
+        Datum::Interval(Interval {
+            months,
+            days,
+            micros,
+        }) => WireDatum::Interval {
+            months: *months,
+            days: *days,
+            micros: *micros,
+        },
+        Datum::Array(elements) => WireDatum::Array(
+            elements
+                .iter()
+                .map(datum_to_wire)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        // `Unchanged` is a TOAST placeholder, not a value; it must be
+        // resolved against the mirror before rows reach the wire.
+        Datum::Unchanged => return Err(CodecError::UnsupportedDatum),
     })
 }
 
 fn wire_to_datum(datum: &WireDatum) -> Datum {
+    use palimpsest_wal::{Date, Interval, Time, Timestamp, TimestampTz};
     match datum {
         WireDatum::Bool(value) => Datum::Bool(*value),
         WireDatum::I16(value) => Datum::I16(*value),
@@ -113,6 +139,28 @@ fn wire_to_datum(datum: &WireDatum) -> Datum {
         WireDatum::Jsonb(bytes) => Datum::Jsonb(bytes.clone().into()),
         WireDatum::Uuid(bytes) => Datum::Uuid(palimpsest_wal::Uuid::from_bytes(*bytes)),
         WireDatum::Null => Datum::Null,
+        WireDatum::Date(days) => Datum::Date(Date {
+            days_since_unix_epoch: *days,
+        }),
+        WireDatum::Time(micros) => Datum::Time(Time {
+            micros_since_midnight: *micros,
+        }),
+        WireDatum::Timestamp(micros) => Datum::Timestamp(Timestamp {
+            micros_since_unix_epoch: *micros,
+        }),
+        WireDatum::TimestampTz(micros) => Datum::TimestampTz(TimestampTz {
+            micros_since_unix_epoch: *micros,
+        }),
+        WireDatum::Interval {
+            months,
+            days,
+            micros,
+        } => Datum::Interval(Interval {
+            months: *months,
+            days: *days,
+            micros: *micros,
+        }),
+        WireDatum::Array(elements) => Datum::Array(elements.iter().map(wire_to_datum).collect()),
     }
 }
 
@@ -175,5 +223,44 @@ mod tests {
         let bytes = encode_rows(std::slice::from_ref(&row)).unwrap();
         let decoded = decode_rows(&bytes).unwrap();
         assert_eq!(decoded[0], row);
+    }
+
+    #[test]
+    fn temporal_interval_and_array_datums_round_trip() {
+        use palimpsest_wal::{Date, Interval, Time, Timestamp, TimestampTz};
+        let row = smallvec![
+            Datum::Date(Date {
+                days_since_unix_epoch: 19_723
+            }),
+            Datum::Time(Time {
+                micros_since_midnight: 43_200_000_000
+            }),
+            Datum::Timestamp(Timestamp {
+                micros_since_unix_epoch: 1_700_000_000_000_000
+            }),
+            Datum::TimestampTz(TimestampTz {
+                micros_since_unix_epoch: 1_700_000_000_000_000
+            }),
+            Datum::Interval(Interval {
+                months: 1,
+                days: 2,
+                micros: 3_000_000
+            }),
+            Datum::Array(vec![
+                Datum::Text("a".into()),
+                Datum::Null,
+                Datum::Array(vec![Datum::I32(7)]),
+            ]),
+        ];
+        let bytes = encode_rows(std::slice::from_ref(&row)).unwrap();
+        let decoded = decode_rows(&bytes).unwrap();
+        assert_eq!(decoded[0], row);
+    }
+
+    #[test]
+    fn unchanged_inside_array_is_reported() {
+        let row = smallvec![Datum::Array(vec![Datum::Unchanged])];
+        let err = encode_rows(&[row]).unwrap_err();
+        assert!(matches!(err, CodecError::UnsupportedDatum));
     }
 }
