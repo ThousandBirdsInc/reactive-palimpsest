@@ -13,14 +13,22 @@ categories.workspace = true
 publish = false
 
 [dependencies]
+bytes.workspace = true
 palimpsest-dataflow = { path = "../palimpsest-dataflow" }
 palimpsest-permissions = { path = "../palimpsest-permissions" }
 palimpsest-server = { path = "../palimpsest-server" }
 palimpsest-sql = { path = "../palimpsest-sql" }
+palimpsest-test-harness = { path = "../palimpsest-test-harness" }
 palimpsest-wal = { path = "../palimpsest-wal" }
+serde.workspace = true
+serde_json.workspace = true
 smallvec.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-stream.workspace = true
+
+[lib]
+name = "palimpsest_soak"
+path = "src/lib.rs"
 
 [[bin]]
 name = "palimpsest-soak"
@@ -29,6 +37,10 @@ path = "src/soak.rs"
 [[bin]]
 name = "palimpsest-load"
 path = "src/load.rs"
+
+[[bin]]
+name = "palimpsest-loadsuite"
+path = "src/suite.rs"
 
 [lints]
 workspace = true

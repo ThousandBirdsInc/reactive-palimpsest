@@ -1527,11 +1527,15 @@ dependencies = [
 name = "palimpsest-soak"
 version = "0.1.1"
 dependencies = [
+ "bytes",
  "palimpsest-dataflow",
  "palimpsest-permissions",
  "palimpsest-server",
  "palimpsest-sql",
+ "palimpsest-test-harness",
  "palimpsest-wal",
+ "serde",
+ "serde_json",
  "smallvec",
  "tokio",
  "tokio-stream",
