@@ -1,0 +1,30 @@
+[package]
+name = "palimpsest-postgres"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Production Postgres WAL runtime for Palimpsest: catalog introspection, slot/publication ownership, snapshot + logical-replication ingest."
+keywords.workspace = true
+categories = ["database", "network-programming"]
+
+[dependencies]
+bytes.workspace = true
+palimpsest-dataflow = { path = "../palimpsest-dataflow", version = "0.1.1" }
+palimpsest-server = { path = "../palimpsest-server", version = "0.1.1" }
+palimpsest-sql = { path = "../palimpsest-sql", version = "0.1.1" }
+palimpsest-wal = { path = "../palimpsest-wal", version = "0.1.1" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-postgres.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+smallvec.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "process"] }
+
+[lints]
+workspace = true

@@ -1463,6 +1463,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "palimpsest-postgres"
+version = "0.1.1"
+dependencies = [
+ "bytes",
+ "palimpsest-dataflow",
+ "palimpsest-server",
+ "palimpsest-sql",
+ "palimpsest-wal",
+ "smallvec",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
 name = "palimpsest-properties"
 version = "0.1.1"
 dependencies = [
