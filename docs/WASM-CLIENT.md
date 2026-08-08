@@ -137,12 +137,29 @@ The `Client` keeps the gRPC stream alive across subscriptions.
 blip with the same LSN cursor, store the last acked LSN in
 `localStorage` and pass it to `client.subscribe(sql, { resumeFromLsn })`.
 
+## Named prepared queries
+
+Shipping SQL in the page exposes schema internals and couples SQL
+changes to frontend deploys. If the server registers queries by name
+([NAMED-QUERIES.md](NAMED-QUERIES.md)), subscribe with the name and
+typed params instead:
+
+```js
+const sub = await client.subscribeNamed("BoardCards", {
+  board_id: boardId,
+});
+```
+
+The browser never holds SQL; unknown names and bad params are refused
+server-side (`unknown_query` / `invalid_params` error events).
+
 ## Production checklist
 
 - [ ] Serve over HTTPS (gRPC-Web requires either TLS or `localhost`).
 - [ ] Set CORS headers on the proxy.
 - [ ] Ship a stable JWT minting flow (don't embed long-lived tokens
       in the page).
+- [ ] Prefer named prepared queries over raw SQL in the bundle.
 - [ ] Persist `lastAckedLsn` so reconnects skip the snapshot.
 - [ ] Wire `on_resync` to clear local state cleanly.
 - [ ] Handle `on_error` — `rate_limited`, `connection_saturated`, and

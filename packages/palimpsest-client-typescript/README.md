@@ -80,6 +80,25 @@ await sub.unsubscribe();
 await client.shutdown();
 ```
 
+## Named prepared queries
+
+When the server registers queries by name (see
+`docs/NAMED-QUERIES.md`), subscribe with the name and typed params —
+no SQL in the bundle or on the wire:
+
+```ts
+const sub = await client.subscribeNamed<Post>("PublishedPosts", {
+  author_id: "a5e9e2c0-0000-4000-8000-000000000042",
+});
+```
+
+Param values map by JS type: string → string, boolean → bool, integral
+number → int, other number → float, `null` → SQL null, array → list
+(for `= ANY($n)` parameters). Unknown names, missing params, or
+ill-typed values surface as an `error` event (`unknown_query` /
+`invalid_params`). The React equivalent is
+`usePalimpsestNamedSubscription(client, "PublishedPosts", { author_id })`.
+
 ## Quick start (React)
 
 ```tsx

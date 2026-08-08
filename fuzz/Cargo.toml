@@ -41,5 +41,11 @@ path = "fuzz_targets/wire_decoder.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "named_query_registrar"
+path = "fuzz_targets/named_query_registrar.rs"
+test = false
+doc = false
+
 [profile.release]
 debug = 1

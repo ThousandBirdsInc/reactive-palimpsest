@@ -366,6 +366,16 @@ pub enum BindError {
         param: String,
     },
 
+    /// The same parameter was supplied under two keys (its wire name
+    /// and its `$N` position).
+    #[error("query '{query}': parameter '{param}' was supplied more than once")]
+    DuplicateParam {
+        /// Query name.
+        query: String,
+        /// Wire name of the doubly-supplied parameter.
+        param: String,
+    },
+
     /// Value kind does not match the declared type.
     #[error("query '{query}': parameter '{param}' expects {expected}, got {got}")]
     TypeMismatch {
@@ -1426,7 +1436,10 @@ fn bind_prepared(
     params: &HashMap<String, ParamValue>,
     limits: QueryLimits,
 ) -> Result<BoundQuery, BindError> {
-    // Resolve every supplied key to a position; refuse unknowns.
+    // Resolve every supplied key to a position; refuse unknowns and
+    // the same parameter supplied under two keys (e.g. both
+    // `board_id` and `$1`) — silently picking one would mask a caller
+    // bug.
     let mut by_position: HashMap<usize, &ParamValue> = HashMap::new();
     for (key, value) in params {
         let spec = prepared
@@ -1437,7 +1450,12 @@ fn bind_prepared(
                 query: prepared.name.clone(),
                 param: key.clone(),
             })?;
-        by_position.insert(spec.position, value);
+        if by_position.insert(spec.position, value).is_some() {
+            return Err(BindError::DuplicateParam {
+                query: prepared.name.clone(),
+                param: spec.name.clone(),
+            });
+        }
     }
 
     // Render a literal for every declared parameter; all must be
@@ -1477,10 +1495,14 @@ fn bind_prepared(
     let graph = lower_select_statement(&statement).map_err(rejected)?;
     enforce_graph_size(graph.node_count(), limits).map_err(rejected)?;
 
-    Ok(BoundQuery {
-        sql: statement.to_string(),
-        graph,
-    })
+    // The rendered text feeds the QueryId / canonical subgraph key and
+    // travels through the WAL runtime, so it gets the same byte budget
+    // a raw-SQL subscribe would. Per-value caps bound each parameter,
+    // but many large params in one query could still add up.
+    let sql = statement.to_string();
+    crate::limits::enforce_input_size(&sql, limits).map_err(rejected)?;
+
+    Ok(BoundQuery { sql, graph })
 }
 
 /// Renders one typed literal AST node for a parameter value,
@@ -2036,6 +2058,47 @@ SELECT id, title FROM boards WHERE id = $1;
             )
             .expect("bind b");
         assert_eq!(a.sql, b.sql, "same name+params must share a canonical key");
+    }
+
+    #[test]
+    fn doubly_supplied_param_is_refused() {
+        let mut registry = QueryRegistry::new();
+        registry
+            .register_sqlc_source(BOARD_SQLC, "board.sql", &boards_catalog())
+            .expect("register");
+        let uuid = "00000000-0000-0000-0000-000000000001";
+        let err = registry
+            .bind(
+                "BoardCards",
+                &params(&[
+                    ("board_id", ParamValue::Text(uuid.to_owned())),
+                    ("$1", ParamValue::Text(uuid.to_owned())),
+                ]),
+            )
+            .expect_err("name + position for the same param must be refused");
+        assert!(matches!(err, BindError::DuplicateParam { .. }), "{err}");
+    }
+
+    #[test]
+    fn oversized_bound_sql_is_refused() {
+        let mut registry = QueryRegistry::with_limits(crate::QueryLimits {
+            max_input_bytes: 256,
+            max_mir_nodes: 64,
+        });
+        registry
+            .register(
+                "Titled",
+                "SELECT id FROM boards WHERE title = $1",
+                &[ParamDecl::new("title", ColumnType::Text)],
+            )
+            .expect("template itself fits the budget");
+        let err = registry
+            .bind(
+                "Titled",
+                &params(&[("title", ParamValue::Text("x".repeat(1024)))]),
+            )
+            .expect_err("rendered SQL above the byte budget must be refused");
+        assert!(matches!(err, BindError::Rejected { .. }), "{err}");
     }
 
     #[test]

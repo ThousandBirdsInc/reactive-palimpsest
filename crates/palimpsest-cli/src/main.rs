@@ -963,7 +963,7 @@ Use the `palimpsest` binary for local operation and diagnostics. Start with `pal
 
 ## Core Commands
 
-- `palimpsest validate-config <config>`: parse TOML and compile permission rules.
+- `palimpsest validate-config <config>`: parse TOML, compile permission rules, and register any `[queries]` sqlc files (named prepared queries) — registration failures name the query and the exact rejected construct.
 - `palimpsest permissions eval <config> --query <sql> --user field=value`: compile configured permissions and show canonical query MIR before and after rewriting.
 - `palimpsest dump-catalog [config]`: print the configured demo catalog as JSON.
 - `palimpsest slot-info <config>`: inspect upstream replication slot status when the binary was built with `--features slot-info`.
