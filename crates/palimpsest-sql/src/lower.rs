@@ -56,7 +56,13 @@ pub fn lower_select_statement(statement: &Statement) -> Result<MirGraph, SqlErro
         return Err(SqlError::UnsupportedStatement);
     };
 
-    lower_query(query)
+    // Resolve FROM aliases to canonical relation names first: the MIR
+    // carries no alias notion, so `t.id` must become `tickets.id` for
+    // provenance attribution downstream to bind qualified references
+    // to the right join side.
+    let mut query = (**query).clone();
+    crate::alias::resolve_from_aliases(&mut query);
+    lower_query(&query)
 }
 
 fn lower_query(query: &Query) -> Result<MirGraph, SqlError> {

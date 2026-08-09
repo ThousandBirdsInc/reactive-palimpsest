@@ -43,7 +43,8 @@ from the Postgres WAL.
 | Path | Purpose |
 | --- | --- |
 | `crates/palimpsest-cli` | `palimpsest` command-line binary for running and validating a server config. |
-| `crates/palimpsest-server` | Embeddable SyncEngine server, subscription router, auth wiring, metrics, and cursor pumping. |
+| `crates/palimpsest-server` | Embeddable SyncEngine server, subscription router, auth wiring, `/ws/subscribe` browser transport, metrics, and cursor pumping. |
+| `crates/palimpsest-postgres` | Production Postgres WAL runtime: catalog introspection, slot/publication/replica-identity ownership, fenced snapshots, streaming logical replication over TLS, reconnect-with-reconciliation, and TypeScript type generation. |
 | `crates/palimpsest-client` | Native and WASM-capable Rust client for the SyncEngine protocol. |
 | `crates/palimpsest-client-js` | `wasm-bindgen` wrapper used by browser clients. |
 | `packages/palimpsest-client-typescript` | TypeScript wrapper and React hooks for the WASM client. |
@@ -60,6 +61,79 @@ from the Postgres WAL.
 | `examples/demo-app` | Dockerized React + WASM + Rust end-to-end demo. |
 | `docs` | Architecture, user, operator, security, TLS, migration, and runbook docs. |
 | `xtask` | Project maintenance commands. |
+
+## Adopting Against A Real Postgres
+
+An adopter supplies four things — a DSN, a query file, an auth config,
+and permission rules. The engine derives everything else from the live
+database:
+
+```rust
+use palimpsest_postgres::{PostgresRuntimeConfig, PostgresWalRuntime};
+use palimpsest_server::Palimpsest;
+use palimpsest_sql::prepared::QueryRegistry;
+
+// 1. Register the live queries (sqlc format; `-- palimpsest:`-marked
+//    blocks only, so one file also feeds sqlc codegen). Tables and
+//    columns validate against the introspected catalog.
+let mut registry = QueryRegistry::new();
+registry.register_sqlc_source_marked(&queries_sql, "db/queries/live.sql", &catalog)?;
+
+// 2. The runtime derives the streamed tables from the registry, owns
+//    the slot, the publication, and REPLICA IDENTITY, and serves
+//    table schemas from pg_catalog — no WalRuntime impl, no
+//    table_schema, no type mapping, no publication DDL.
+let config = PostgresRuntimeConfig::from_registry(dsn, &registry);
+let (runtime, _replication) = PostgresWalRuntime::connect(config).await?;
+
+// 3. One listener serves gRPC, gRPC-Web, and the browser's
+//    /ws/subscribe. Auth (HS*/RS*/ES*/JWKS) is config, not code.
+Palimpsest::builder()
+    .with_wal(runtime)
+    .with_query_registry(registry)
+    .with_auth(auth)
+    .with_permissions(rules)
+    .build()?
+    .serve(shutdown)
+    .await?;
+```
+
+`palimpsest_postgres::sql_catalog(&introspect_tables(...))` builds the
+registration catalog from the same live source of truth.
+
+Changes arrive over a real walsender session (`START_REPLICATION` on a
+`COPY_BOTH` connection, since `tokio-postgres` cannot open one), and
+the slot's confirmed position advances only for what has been applied
+— a crash replays rather than loses. TLS DSNs are negotiated on both
+the management connection and the replication stream: without a root
+CA the session is encrypted but unauthenticated (libpq
+`sslmode=require`); `tls_root_ca_file` upgrades to full chain +
+hostname verification.
+
+The equivalent via the CLI is entirely declarative:
+
+```toml
+[database]
+dsn = "postgres://…"                # catalog, tables, slot, publication,
+                                    # and replica identity all derived
+# tls_root_ca_file = "ca.pem"       # optional: verify-full
+
+[queries]
+files = ["db/queries/live.sql"]     # sqlc format, marker-scoped
+
+[auth]
+kind = "jwt"
+jwks_url = "https://issuer.example/.well-known/jwks.json"
+claims = { sub = "id", team_ids = "team_ids" }
+
+[permissions]
+rules = [{ name = "own_rows", table = "tickets", predicate = "owner_id = $user.id" }]
+```
+
+`palimpsest typegen --out src/queries.ts` then emits a row type and a
+parameter type per registered query from that same catalog, so clients
+generate their row types instead of transcribing them (`timestamptz`
+arrives as a `Date`, `bigint` as a JS `bigint`, arrays as arrays).
 
 ## Quick Start: Demo App
 

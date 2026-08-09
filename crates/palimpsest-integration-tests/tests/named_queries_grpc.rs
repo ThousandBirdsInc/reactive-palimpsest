@@ -137,7 +137,7 @@ async fn next_event_within(
         .expect("event error")
 }
 
-fn int_param(value: i64) -> VarValue {
+const fn int_param(value: i64) -> VarValue {
     VarValue {
         kind: Some(var_value::Kind::IntValue(value)),
     }

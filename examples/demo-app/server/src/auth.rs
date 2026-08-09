@@ -98,9 +98,8 @@ pub fn jwt_auth_config() -> JwtAuthConfig {
     claim_to_field.insert("sub".to_owned(), "id".to_owned());
     claim_to_field.insert("is_admin".to_owned(), "is_admin".to_owned());
     JwtAuthConfig {
-        secret: DEV_SECRET.to_owned(),
-        issuer: None,
-        audience: None,
+        secret: Some(DEV_SECRET.to_owned()),
         claim_to_field,
+        ..JwtAuthConfig::default()
     }
 }

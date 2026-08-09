@@ -50,8 +50,19 @@ pub enum DecodedEvent {
     },
     Truncate(Truncate),
     Origin(Origin),
+    /// A user-defined type announced ahead of the relations that use
+    /// it. Informational: values still arrive in text form.
+    Type(TypeInfo),
     Stream(StreamAction),
     TwoPhase(TwoPhaseAction),
+}
+
+/// A `Type` message from the replication stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeInfo {
+    pub oid: u32,
+    pub namespace: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +133,17 @@ pub fn decode_pgoutput_message(catalog: &mut Catalog, bytes: Bytes) -> Result<De
             }
         }
         b'R' => decode_relation(catalog, &mut decoder)?,
+        // Type: emitted before a Relation whose columns use a
+        // user-defined type (enum, domain, composite, or an array of
+        // one). Purely informational for us — values arrive in their
+        // text form and the catalog carries the real types — but it
+        // must be decoded, not rejected, or a single enum column makes
+        // the whole stream undecodable.
+        b'Y' => DecodedEvent::Type(TypeInfo {
+            oid: decoder.u32("type oid")?,
+            namespace: decoder.cstr("type namespace")?,
+            name: decoder.cstr("type name")?,
+        }),
         b'I' => decode_insert(catalog, &mut decoder)?,
         b'U' => decode_update(catalog, &mut decoder)?,
         b'D' => decode_delete(catalog, &mut decoder)?,
@@ -375,9 +397,32 @@ mod tests {
 
     use super::{
         decode_pgoutput_message, DecodedEvent, Origin, RowOp, StreamAction, Truncate,
-        TwoPhaseAction,
+        TwoPhaseAction, TypeInfo,
     };
     use crate::{Catalog, Datum, Lsn, TableId, Tuple, WalError, BOOL_OID, INT4_OID, TEXT_OID};
+
+    #[test]
+    fn decodes_type_message_for_user_defined_types() {
+        // Postgres emits a Type message before the Relation whenever a
+        // column uses a user-defined type (an enum, say). Rejecting it
+        // made a single enum column undecodable for the whole stream.
+        let mut catalog = Catalog::new();
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(b'Y');
+        bytes.put_u32(543_210);
+        put_cstr(&mut bytes, "public");
+        put_cstr(&mut bytes, "ticket_status");
+
+        let event = decode_pgoutput_message(&mut catalog, bytes.freeze()).expect("decodes");
+        assert_eq!(
+            event,
+            DecodedEvent::Type(TypeInfo {
+                oid: 543_210,
+                namespace: "public".to_owned(),
+                name: "ticket_status".to_owned(),
+            })
+        );
+    }
 
     #[test]
     fn decodes_relation_and_insert_tuple() {
@@ -540,16 +585,23 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_rejects_type_and_logical_message_variants_for_phase_one() {
+    fn explicitly_rejects_logical_message_variant() {
+        // `M` (logical decoding message) carries no row data and has
+        // no meaning for the engine, so it stays rejected. `Y` (Type)
+        // used to be rejected too, but Postgres emits one before any
+        // Relation using a user-defined type — see
+        // `decodes_type_message_for_user_defined_types`.
         let mut catalog = Catalog::new();
-        assert!(matches!(
-            decode_pgoutput_message(&mut catalog, Bytes::from_static(b"Y")),
-            Err(WalError::UnsupportedMessage(b'Y'))
-        ));
         assert!(matches!(
             decode_pgoutput_message(&mut catalog, Bytes::from_static(b"M")),
             Err(WalError::UnsupportedMessage(b'M'))
         ));
+    }
+
+    #[test]
+    fn truncated_type_message_is_rejected_not_silently_accepted() {
+        let mut catalog = Catalog::new();
+        assert!(decode_pgoutput_message(&mut catalog, Bytes::from_static(b"Y")).is_err());
     }
 
     fn relation(table: TableId, columns: &[(&str, u32)]) -> Bytes {

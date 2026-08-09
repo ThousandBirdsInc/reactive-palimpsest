@@ -15,15 +15,19 @@
 //!   their own.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use palimpsest_proto::palimpsest::sync::v1 as proto;
 use palimpsest_sql::prepared::{BindError, BoundQuery, ParamValue, QueryRegistry};
 
-/// Immutable named-query policy shared by every connection.
+/// Named-query policy shared by every connection.
+///
+/// Clones share the underlying registry slot, so
+/// [`Self::replace_registry`] on any clone is immediately visible to
+/// every connection — mirroring how permission rules hot-swap.
 #[derive(Clone)]
 pub struct NamedQueries {
-    registry: Option<Arc<QueryRegistry>>,
+    registry: Arc<RwLock<Option<Arc<QueryRegistry>>>>,
     inline_sql_enabled: bool,
 }
 
@@ -31,7 +35,7 @@ impl Default for NamedQueries {
     /// No registry; raw SQL stays enabled (the pre-registry behavior).
     fn default() -> Self {
         Self {
-            registry: None,
+            registry: Arc::new(RwLock::new(None)),
             inline_sql_enabled: true,
         }
     }
@@ -44,7 +48,7 @@ impl NamedQueries {
     #[must_use]
     pub fn new(registry: QueryRegistry) -> Self {
         Self {
-            registry: Some(Arc::new(registry)),
+            registry: Arc::new(RwLock::new(Some(Arc::new(registry)))),
             inline_sql_enabled: false,
         }
     }
@@ -64,8 +68,17 @@ impl NamedQueries {
 
     /// The backing registry, when one is configured.
     #[must_use]
-    pub fn registry(&self) -> Option<&QueryRegistry> {
-        self.registry.as_deref()
+    pub fn registry(&self) -> Option<Arc<QueryRegistry>> {
+        self.registry.read().expect("registry lock").clone()
+    }
+
+    /// Hot-swaps the registry on a running server. Future subscribes
+    /// bind against the new set immediately; subscriptions already
+    /// streaming keep their bound plan (removing a query does not tear
+    /// down its active subscriptions — drop the affected permission
+    /// grants or restart to revoke live streams).
+    pub fn replace_registry(&self, registry: QueryRegistry) {
+        *self.registry.write().expect("registry lock") = Some(Arc::new(registry));
     }
 
     /// Resolves a named subscribe: converts the wire params and binds
@@ -80,7 +93,7 @@ impl NamedQueries {
         name: &str,
         vars: &HashMap<String, proto::VarValue>,
     ) -> Result<BoundQuery, (&'static str, String)> {
-        let Some(registry) = self.registry.as_deref() else {
+        let Some(registry) = self.registry() else {
             // Fail closed: a server without a registry has no named
             // queries, so every name is unknown.
             return Err((
@@ -167,6 +180,32 @@ mod tests {
         assert!(NamedQueries::new(registry())
             .with_inline_sql(true)
             .inline_sql_enabled());
+    }
+
+    #[test]
+    fn replace_registry_is_visible_to_clones() {
+        let policy = NamedQueries::new(registry());
+        let connection_view = policy.clone();
+
+        let mut swapped = QueryRegistry::new();
+        swapped
+            .register(
+                "PostsByAuthor",
+                "SELECT id FROM posts WHERE author_id = $1",
+                &[ParamDecl::new("author_id", ColumnType::Int)],
+            )
+            .expect("register");
+        policy.replace_registry(swapped);
+
+        let mut vars = HashMap::new();
+        vars.insert("author_id".to_owned(), string_var("3"));
+        connection_view
+            .bind_named("PostsByAuthor", &vars)
+            .expect("clone sees the swapped registry");
+        let err = connection_view
+            .bind_named("PostById", &HashMap::new())
+            .expect_err("old name is gone after the swap");
+        assert_eq!(err.0, "unknown_query");
     }
 
     #[test]

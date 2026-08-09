@@ -19,8 +19,20 @@ pub enum ColumnType {
     Float,
     /// UTF-8 text.
     Text,
-    /// Timestamp (with or without timezone).
+    /// Timestamp without timezone.
     Timestamp,
+    /// Timestamp with timezone (UTC-normalized on the wire).
+    TimestampTz,
+    /// Calendar date.
+    Date,
+    /// Time of day.
+    Time,
+    /// Postgres `interval`.
+    Interval,
+    /// Arbitrary-precision numeric/decimal.
+    Numeric,
+    /// Opaque byte payload (`bytea`).
+    Bytea,
     /// RFC 4122 UUID.
     Uuid,
     /// Postgres `jsonb` (and `json`) document.
@@ -28,6 +40,9 @@ pub enum ColumnType {
     /// Postgres enum label. The taxonomy is coarse on purpose: all enum
     /// types collapse into one variant and labels are compared as text.
     Enum,
+    /// Postgres array. Coarse like [`Self::Enum`]: the element type is
+    /// not tracked here (the wire schema carries it).
+    Array,
     /// Type couldn't be inferred yet — treat as compatible with anything.
     Unknown,
 }
@@ -69,10 +84,21 @@ impl ColumnType {
         })
     }
 
-    /// True for [`Self::Int`] and [`Self::Float`].
+    /// True for [`Self::Int`], [`Self::Float`], and [`Self::Numeric`].
     #[must_use]
     pub const fn is_numeric(self) -> bool {
-        matches!(self, Self::Int | Self::Float)
+        matches!(self, Self::Int | Self::Float | Self::Numeric)
+    }
+
+    /// True for the temporal types. Temporal literals are written as
+    /// quoted strings (which type as [`Self::Text`]), and Postgres
+    /// compares dates with timestamps freely.
+    #[must_use]
+    pub const fn is_temporal(self) -> bool {
+        matches!(
+            self,
+            Self::Timestamp | Self::TimestampTz | Self::Date | Self::Time | Self::Interval
+        )
     }
 
     /// True for types whose values are written and compared as text.
@@ -95,6 +121,10 @@ impl ColumnType {
             || self == other
             || (self.is_numeric() && other.is_numeric())
             || (self.is_textual() && other.is_textual())
+            // Temporal values compare with each other (date vs
+            // timestamp) and with quoted literals, which type as text.
+            || (self.is_temporal() && (other.is_temporal() || other == Self::Text))
+            || (other.is_temporal() && self == Self::Text)
             || matches!(
                 (self, other),
                 (Self::Jsonb, Self::Text) | (Self::Text, Self::Jsonb)

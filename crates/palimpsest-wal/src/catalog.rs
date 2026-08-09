@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{stock_postgres_16_type, ColumnDef, Result, TableId, WalError};
+use crate::{stock_postgres_16_type, ColumnDef, DatumType, Result, TableId, WalError};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
@@ -95,8 +95,13 @@ impl TryFrom<u8> for ReplicaIdentity {
 
 #[allow(clippy::redundant_pub_crate)]
 pub(crate) fn column_from_pgoutput(flags: u8, name: String, type_oid: u32) -> Result<ColumnDef> {
-    let datum_type =
-        stock_postgres_16_type(type_oid).ok_or(WalError::UnsupportedTypeOid(type_oid))?;
+    // User-defined type OIDs (enums, domains, composites, and their
+    // array types) are not in the stock table; fall back to text
+    // rather than failing the whole `Relation` frame — pgoutput ships
+    // every value in its text form, so text decoding is always
+    // faithful. Callers that can introspect `pg_catalog` (the
+    // Postgres runtime) refine these entries with the real types.
+    let datum_type = stock_postgres_16_type(type_oid).unwrap_or(DatumType::Text);
     Ok(ColumnDef {
         name,
         type_oid,
@@ -142,8 +147,9 @@ pub fn load_catalog_from_probe_rows(
         let column = ColumnDef {
             name: row.column_name,
             type_oid: row.type_oid,
-            datum_type: stock_postgres_16_type(row.type_oid)
-                .ok_or(WalError::UnsupportedTypeOid(row.type_oid))?,
+            // Same fallback as `column_from_pgoutput`: a user-defined
+            // OID decodes as text instead of failing the catalog load.
+            datum_type: stock_postgres_16_type(row.type_oid).unwrap_or(DatumType::Text),
             nullable: row.nullable,
             key: row.primary_key,
         };
@@ -235,6 +241,23 @@ mod tests {
         assert_eq!(relation.columns[0].datum_type, DatumType::I32);
         assert!(relation.columns[0].key);
         assert_eq!(relation.columns[1].name, "body");
+    }
+
+    #[test]
+    fn user_defined_type_oids_fall_back_to_text() {
+        // A table with an enum column (user-defined OID) must still
+        // load — one enum column used to make the whole table
+        // undecodable.
+        let catalog = load_catalog_from_probe_rows([
+            row("id", INT4_OID, 1, true),
+            row("status", 123_456, 2, false),
+        ])
+        .unwrap();
+
+        let relation = catalog.relations().next().unwrap();
+        assert_eq!(relation.columns[1].name, "status");
+        assert_eq!(relation.columns[1].type_oid, 123_456);
+        assert_eq!(relation.columns[1].datum_type, DatumType::Text);
     }
 
     fn row(name: &str, type_oid: u32, attnum: i16, primary_key: bool) -> CatalogProbeRow {

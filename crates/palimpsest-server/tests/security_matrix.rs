@@ -21,7 +21,6 @@
 
 #![allow(clippy::significant_drop_tightening)]
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -138,17 +137,18 @@ fn subscribe_message(id: &str, sql: &str) -> proto::ClientMessage {
     }
 }
 
-fn jwt_harness_with<F>(configure: F) -> impl std::future::Future<Output = Harness>
+async fn jwt_harness_with<F>(configure: F) -> Harness
 where
     F: FnOnce(JwtAuthConfig) -> JwtAuthConfig,
 {
     let config = configure(JwtAuthConfig {
-        secret: "topsecret".to_owned(),
-        issuer: None,
-        audience: None,
-        claim_to_field: BTreeMap::new(),
+        secret: Some("topsecret".to_owned()),
+        ..JwtAuthConfig::default()
     });
-    Harness::start_with(move |builder| builder.with_auth(JwtAuthenticator::new(config)))
+    let auth = JwtAuthenticator::from_config(config)
+        .await
+        .expect("jwt config");
+    Harness::start_with(move |builder| builder.with_auth(auth)).await
 }
 
 async fn assert_unauthenticated(harness: &Harness, token: Option<&str>) {

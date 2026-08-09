@@ -176,7 +176,11 @@ async fn main() -> std::process::ExitCode {
             TableId::new(pg.orders_oid),
             TableId::new(pg.accounts_oid),
         ))
-        .with_auth(JwtAuthenticator::new(auth::jwt_auth_config()))
+        .with_auth(
+            JwtAuthenticator::from_config(auth::jwt_auth_config())
+                .await
+                .expect("jwt auth config"),
+        )
         .with_permissions(permission_rules)
         .with_grpc_addr(grpc_addr)
         .with_metrics_addr(None)

@@ -5,6 +5,7 @@
 
 #![warn(missing_docs)]
 
+pub mod alias;
 pub mod canonical;
 pub mod catalog;
 mod error;

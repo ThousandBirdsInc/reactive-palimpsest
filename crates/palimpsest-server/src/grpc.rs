@@ -1204,18 +1204,27 @@ fn schema_definition_from_plan(
     }
 }
 
-const fn column_type_to_datum_type(ty: ColumnType) -> DatumType {
+fn column_type_to_datum_type(ty: ColumnType) -> DatumType {
     match ty {
         ColumnType::Bool => DatumType::Bool,
         ColumnType::Int => DatumType::I64,
         ColumnType::Float => DatumType::F64,
         ColumnType::Text => DatumType::Text,
         ColumnType::Timestamp => DatumType::Timestamp,
+        ColumnType::TimestampTz => DatumType::TimestampTz,
+        ColumnType::Date => DatumType::Date,
+        ColumnType::Time => DatumType::Time,
+        ColumnType::Interval => DatumType::Interval,
+        ColumnType::Numeric => DatumType::Numeric,
+        ColumnType::Bytea => DatumType::Bytea,
         ColumnType::Uuid => DatumType::Uuid,
         ColumnType::Jsonb => DatumType::Jsonb,
         // Enum labels travel as text on the wire (matching Postgres
         // logical decoding, which emits enum values as their labels).
         ColumnType::Enum => DatumType::Text,
+        // The coarse catalog does not track array element types; the
+        // wire schema only checks the container variant.
+        ColumnType::Array => DatumType::Array(Box::new(DatumType::Text)),
         // `Unknown` is the catalog's "couldn't infer" type — picking
         // Text is a defensive default that won't crash decoders that
         // probe the schema.
@@ -1380,6 +1389,12 @@ fn auth_error_to_status(err: AuthError) -> Status {
         AuthError::InvalidClaimShape(name) => {
             Status::unauthenticated(format!("invalid claim shape: {name}"))
         }
+        AuthError::UnknownKey(kid) => {
+            Status::unauthenticated(format!("no verification key matches the token (kid {kid:?})"))
+        }
+        // Configuration problems are the server's fault, not the
+        // caller's — don't leak them as auth failures.
+        AuthError::InvalidConfig(_) => Status::internal("authentication misconfigured"),
     }
 }
 

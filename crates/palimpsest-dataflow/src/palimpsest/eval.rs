@@ -47,6 +47,11 @@ pub type IntExtractor = Box<dyn Fn(&Row) -> i64 + Send + Sync>;
 pub struct ScalarSchema {
     columns: Vec<(String, ColumnType)>,
     index: BTreeMap<String, usize>,
+    /// Per-column source-relation attribution, aligned with `columns`.
+    /// Empty when the caller supplied none. Lets qualified references
+    /// (`tickets.id`) bind to the right occurrence when a join carries
+    /// the same bare name on both sides.
+    provenance: Vec<Option<String>>,
 }
 
 impl ScalarSchema {
@@ -60,7 +65,29 @@ impl ScalarSchema {
         for (i, (name, _)) in columns.iter().enumerate() {
             index.insert(name.clone(), i);
         }
-        Self { columns, index }
+        Self {
+            columns,
+            index,
+            provenance: Vec::new(),
+        }
+    }
+
+    /// Attaches per-column source-relation attribution (aligned with
+    /// the column order) so qualified references resolve by relation
+    /// rather than falling back to bare-name lookup.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: Vec<Option<String>>) -> Self {
+        self.provenance = provenance;
+        self
+    }
+
+    /// Row index of the column named `name` whose provenance
+    /// attributes it to `relation`, if any.
+    #[must_use]
+    pub fn index_of_qualified(&self, relation: &str, name: &str) -> Option<usize> {
+        self.columns.iter().enumerate().position(|(i, (col, _))| {
+            col == name && self.provenance.get(i).and_then(Option::as_deref) == Some(relation)
+        })
     }
 
     /// Row index of the column named `name`, if any.
@@ -147,6 +174,16 @@ pub fn compile_typed_scalar(
     let expr = parse_expr(expr_sql)?;
     let scalar = compile_inner(&expr, schema)?;
     let ty = infer_type(&expr, schema);
+    // Reconcile runtime values with the advertised type: an
+    // expression like `coalesce(uuid_col, '<literal>')` infers `Uuid`
+    // from the column, but the fallback branch would produce a text
+    // datum at runtime — and the schema mismatch would kill the
+    // subscription client-side. Coerce every produced datum to the
+    // inferred type so the wire always matches the advertisement.
+    let scalar = match ty {
+        ColumnType::Unknown | ColumnType::Text => scalar,
+        concrete => Box::new(move |row: &Row| cast_datum(scalar(row), concrete)),
+    };
     Ok((scalar, ty))
 }
 
@@ -178,10 +215,21 @@ fn infer_type(expr: &Expr, schema: &ScalarSchema) -> ColumnType {
         Expr::Identifier(ident) => schema
             .column_type(&ident.value)
             .unwrap_or(ColumnType::Unknown),
-        Expr::CompoundIdentifier(parts) => parts
-            .last()
-            .and_then(|last| schema.column_type(&last.value))
-            .unwrap_or(ColumnType::Unknown),
+        Expr::CompoundIdentifier(parts) => {
+            let qualified = match parts.as_slice() {
+                [relation, column] => schema
+                    .index_of_qualified(&relation.value, &column.value)
+                    .map(|idx| schema.columns()[idx].1),
+                _ => None,
+            };
+            qualified
+                .or_else(|| {
+                    parts
+                        .last()
+                        .and_then(|last| schema.column_type(&last.value))
+                })
+                .unwrap_or(ColumnType::Unknown)
+        }
         Expr::Value(SqlValue::Boolean(_)) => ColumnType::Bool,
         Expr::Value(SqlValue::Number(n, _)) => {
             if n.parse::<i64>().is_ok() {
@@ -315,9 +363,19 @@ fn compile_inner(expr: &Expr, schema: &ScalarSchema) -> Result<ScalarFn, EvalErr
         Expr::Nested(inner) => compile_inner(inner, schema),
         Expr::Identifier(ident) => identifier_scalar(&ident.value, schema),
         Expr::CompoundIdentifier(parts) => {
-            // Treat `table.column` as just `column` for our flat row
-            // model. The MIR's BaseTable.project already pinned
-            // column ordering, so qualification is informational.
+            // Bind `relation.column` through provenance first: a join
+            // can carry the same bare name on both sides, and the
+            // qualifier is what tells them apart. Fall back to the
+            // trailing segment for schemas without provenance (or
+            // qualifiers that don't attribute, e.g. derived-table
+            // aliases).
+            if let [relation, column] = parts.as_slice() {
+                if let Some(idx) = schema.index_of_qualified(&relation.value, &column.value) {
+                    return Ok(Box::new(move |row| {
+                        row.get(idx).cloned().unwrap_or(Datum::Null)
+                    }));
+                }
+            }
             let last = parts
                 .last()
                 .ok_or_else(|| EvalError::Unsupported("empty compound identifier".to_owned()))?;
@@ -806,12 +864,75 @@ fn cast_datum(datum: Datum, target: ColumnType) -> Datum {
             Text(bytes) => Jsonb(bytes),
             _ => Null,
         },
-        ColumnType::Timestamp => match datum {
-            timestamp @ Datum::Timestamp(_) => timestamp,
+        ColumnType::Timestamp | ColumnType::TimestampTz => match datum {
+            timestamp @ (Datum::Timestamp(_) | Datum::TimestampTz(_)) => timestamp,
+            Datum::Date(date) => Datum::Timestamp(palimpsest_wal::Timestamp {
+                micros_since_unix_epoch: i64::from(date.days_since_unix_epoch) * 86_400_000_000,
+            }),
+            Text(_) => parse_temporal_text(
+                &datum,
+                if target == ColumnType::TimestampTz {
+                    &palimpsest_wal::DatumType::TimestampTz
+                } else {
+                    &palimpsest_wal::DatumType::Timestamp
+                },
+            ),
+            _ => Null,
+        },
+        ColumnType::Date => match datum {
+            date @ Datum::Date(_) => date,
+            Datum::Timestamp(ts) => Datum::Date(palimpsest_wal::Date {
+                days_since_unix_epoch: ts.micros_since_unix_epoch.div_euclid(86_400_000_000) as i32,
+            }),
+            Datum::TimestampTz(ts) => Datum::Date(palimpsest_wal::Date {
+                days_since_unix_epoch: ts.micros_since_unix_epoch.div_euclid(86_400_000_000) as i32,
+            }),
+            Text(_) => parse_temporal_text(&datum, &palimpsest_wal::DatumType::Date),
+            _ => Null,
+        },
+        ColumnType::Time => match datum {
+            time @ Datum::Time(_) => time,
+            Text(_) => parse_temporal_text(&datum, &palimpsest_wal::DatumType::Time),
+            _ => Null,
+        },
+        ColumnType::Interval => match datum {
+            interval @ Datum::Interval(_) => interval,
+            Text(_) => parse_temporal_text(&datum, &palimpsest_wal::DatumType::Interval),
+            _ => Null,
+        },
+        ColumnType::Numeric => match &datum {
+            Numeric(_) => datum,
+            I64(_) | I32(_) | I16(_) | F64(_) | F32(_) | Text(_) => text_of(&datum)
+                .map_or(Null, |text| {
+                    Numeric(palimpsest_wal::BigDecimal::new(text))
+                }),
+            _ => Null,
+        },
+        ColumnType::Bytea => match datum {
+            bytea @ Datum::Bytea(_) => bytea,
+            Text(bytes) => Datum::Bytea(bytes),
+            _ => Null,
+        },
+        ColumnType::Array => match datum {
+            array @ Datum::Array(_) => array,
             _ => Null,
         },
         ColumnType::Unknown => datum,
     }
+}
+
+/// Parses a text datum into the requested temporal type via the WAL
+/// crate's Postgres-format decoders. `Null` on any parse failure,
+/// consistent with the evaluator's total-function contract.
+fn parse_temporal_text(datum: &Datum, target: &palimpsest_wal::DatumType) -> Datum {
+    let Datum::Text(bytes) = datum else {
+        return Datum::Null;
+    };
+    palimpsest_wal::decode_column_value(
+        target,
+        palimpsest_wal::ColumnValue::Text(bytes.clone()),
+    )
+    .unwrap_or(Datum::Null)
 }
 
 /// `expr <op> ANY(array)` — true when the comparison holds for at least
@@ -1487,6 +1608,35 @@ mod tests {
         assert_eq!(f(&unnamed), text("fallback"));
         let all_null = compile_scalar("coalesce(NULL, NULL)", &schema).unwrap();
         assert_eq!(all_null(&named), Datum::Null);
+    }
+
+    #[test]
+    fn coalesce_fallback_literal_coerces_to_the_inferred_column_type() {
+        // Regression: `coalesce(uuid_col, '<literal>')` advertised
+        // `Uuid` but served a text datum when the fallback fired,
+        // killing the subscription with a client-side schema
+        // mismatch. The adopter workaround was a `::uuid` cast written
+        // into the query text.
+        let schema = ScalarSchema::from_pairs([("id".to_owned(), ColumnType::Uuid)]);
+        let (scalar, ty) = compile_typed_scalar(
+            "coalesce(id, 'a5e9e2c0-0000-4000-8000-000000000042')",
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(ty, ColumnType::Uuid);
+
+        let missing: Row = smallvec![Datum::Null];
+        match scalar(&missing) {
+            Datum::Uuid(uuid) => assert_eq!(
+                uuid.to_string(),
+                "a5e9e2c0-0000-4000-8000-000000000042",
+                "fallback literal must be served as the advertised type"
+            ),
+            other => panic!("expected a uuid datum, got {other:?}"),
+        }
+
+        let present: Row = smallvec![Datum::Uuid(palimpsest_wal::Uuid::from_bytes([7; 16]))];
+        assert!(matches!(scalar(&present), Datum::Uuid(_)));
     }
 
     #[test]

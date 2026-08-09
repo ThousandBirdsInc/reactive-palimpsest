@@ -41,6 +41,7 @@ pub mod snapshot;
 pub mod subscription;
 pub mod tracing_setup;
 pub mod wal_runtime;
+mod ws;
 
 pub use ack::{AckOutcome, AckTracker};
 pub use auth::{

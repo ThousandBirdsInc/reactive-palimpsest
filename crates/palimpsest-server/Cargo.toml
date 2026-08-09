@@ -21,10 +21,12 @@ otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", 
 
 [dependencies]
 async-trait.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["http2", "query", "ws"] }
 futures.workspace = true
 http.workspace = true
 jsonwebtoken.workspace = true
+prost.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 opentelemetry = { version = "0.27", optional = true }
 opentelemetry-otlp = { version = "0.27", optional = true, features = ["grpc-tonic"] }
 opentelemetry_sdk = { version = "0.27", optional = true, features = ["rt-tokio"] }
@@ -37,7 +39,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
@@ -53,6 +55,7 @@ palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.1" }
 proptest.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = "0.21"
 tonic.workspace = true
 tonic-health.workspace = true
 

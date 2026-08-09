@@ -31,6 +31,7 @@ use std::process::ExitCode;
 use palimpsest_permissions::{
     compile_rules, rewrite, Mode, PermissionRule, UserContext, UserContextSchema, UserValue,
 };
+use palimpsest_postgres::{PostgresRuntimeConfig, PostgresWalRuntime};
 use palimpsest_server::{
     AnonymousAuthenticator, EmptyWalRuntime, JwtAuthConfig, JwtAuthenticator, Palimpsest,
 };
@@ -41,6 +42,8 @@ use tracing::{error, info};
 
 #[derive(Debug, Default, Deserialize)]
 struct Config {
+    #[serde(default)]
+    database: Option<DatabaseConfig>,
     #[serde(default)]
     grpc: GrpcConfig,
     #[serde(default)]
@@ -53,6 +56,30 @@ struct Config {
     queries: QueriesConfig,
     #[serde(default)]
     upstream: Option<UpstreamConfig>,
+}
+
+/// Live Postgres connection. Supplying `dsn` is the whole of the
+/// database-side adoption surface: the engine introspects the
+/// catalog, derives the streamed tables from the registered queries,
+/// and owns the slot, publication, and replica identity.
+#[derive(Debug, Deserialize)]
+struct DatabaseConfig {
+    /// libpq-style connection URL.
+    dsn: String,
+    /// Logical replication slot name.
+    #[serde(default = "default_slot_name")]
+    slot: String,
+    /// Publication name.
+    #[serde(default = "default_publication")]
+    publication: String,
+    /// PEM root CA for full certificate verification. Without it a
+    /// TLS DSN encrypts but does not authenticate the server.
+    #[serde(default)]
+    tls_root_ca_file: Option<PathBuf>,
+    /// Refuse to start rather than issue `ALTER TABLE ... REPLICA
+    /// IDENTITY FULL` where it is missing.
+    #[serde(default)]
+    manage_replica_identity: Option<bool>,
 }
 
 /// Named prepared-query registration (§ named-queries doc).
@@ -92,7 +119,7 @@ struct MetricsConfig {
 enum AuthConfig {
     #[default]
     Anonymous,
-    Jwt(JwtAuthConfig),
+    Jwt(Box<JwtAuthConfig>),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -208,6 +235,7 @@ async fn run() -> Result<(), CliError> {
         Some("permissions") => cmd_permissions(rest),
         Some("skills") => cmd_skills(rest),
         Some("dump-catalog") => cmd_dump_catalog(rest.first().map(PathBuf::from).as_deref()),
+        Some("typegen") => cmd_typegen(rest).await,
         Some("slot-info") => cmd_slot_info(require_one("slot-info", rest)?).await,
         Some("--help" | "-h" | "help") => {
             print_help();
@@ -240,6 +268,8 @@ Commands:
                               Rewrite query MIR with configured permissions.
   skills install [options]    Install Codex and Claude skills for this CLI.
   dump-catalog [config]       Print the configured catalog as JSON.
+  typegen [config] [--out f]  Generate TypeScript row/param types for every
+                              registered query from the live catalog.
   slot-info <config>          Print upstream replication slot status
                               (requires --features slot-info).
   help                        Show this message.
@@ -301,9 +331,16 @@ fn parse_column_type(value: &str) -> Result<ColumnType, String> {
         "float" | "double" => Ok(ColumnType::Float),
         "text" | "string" => Ok(ColumnType::Text),
         "timestamp" => Ok(ColumnType::Timestamp),
+        "timestamptz" => Ok(ColumnType::TimestampTz),
+        "date" => Ok(ColumnType::Date),
+        "time" => Ok(ColumnType::Time),
+        "interval" => Ok(ColumnType::Interval),
+        "numeric" | "decimal" => Ok(ColumnType::Numeric),
+        "bytea" => Ok(ColumnType::Bytea),
         "uuid" => Ok(ColumnType::Uuid),
         "jsonb" | "json" => Ok(ColumnType::Jsonb),
         "enum" => Ok(ColumnType::Enum),
+        "array" => Ok(ColumnType::Array),
         other => Err(format!("unknown column type '{other}'")),
     }
 }
@@ -315,11 +352,51 @@ const fn column_type_label(ty: ColumnType) -> &'static str {
         ColumnType::Float => "float",
         ColumnType::Text => "text",
         ColumnType::Timestamp => "timestamp",
+        ColumnType::TimestampTz => "timestamptz",
+        ColumnType::Date => "date",
+        ColumnType::Time => "time",
+        ColumnType::Interval => "interval",
+        ColumnType::Numeric => "numeric",
+        ColumnType::Bytea => "bytea",
         ColumnType::Uuid => "uuid",
         ColumnType::Jsonb => "jsonb",
         ColumnType::Enum => "enum",
+        ColumnType::Array => "array",
         ColumnType::Unknown => "unknown",
     }
+}
+
+/// Loads the SQL catalog: introspected from the live database when
+/// `[database]` is configured, otherwise the built-in demo catalog.
+/// Returns the introspected tables too (empty in demo mode) so
+/// callers can generate client types from the same source.
+async fn load_catalog(
+    config: &Config,
+) -> Result<(Catalog, Vec<palimpsest_postgres::IntrospectedTable>), CliError> {
+    let Some(database) = &config.database else {
+        return Ok((Catalog::demo(), Vec::new()));
+    };
+    let root_ca = read_root_ca(database)?;
+    info!("introspecting the database catalog");
+    let tables = palimpsest_postgres::introspect_database(&database.dsn, root_ca)
+        .await
+        .map_err(|err| CliError::BuildServer(err.to_string()))?;
+    Ok((palimpsest_postgres::sql_catalog(&tables), tables))
+}
+
+fn read_root_ca(database: &DatabaseConfig) -> Result<Option<String>, CliError> {
+    database
+        .tls_root_ca_file
+        .as_ref()
+        .map(|path| {
+            std::fs::read_to_string(path).map_err(|err| {
+                CliError::BuildServer(format!(
+                    "reading tls_root_ca_file {}: {err}",
+                    path.display()
+                ))
+            })
+        })
+        .transpose()
 }
 
 async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
@@ -327,7 +404,7 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
     info!(config = %path.display(), "loading configuration");
     let config = read_config(&path)?;
 
-    let catalog = Catalog::demo();
+    let (catalog, _tables) = load_catalog(&config).await?;
     let user_schema =
         build_user_schema(&config.permissions.user_schema).map_err(CliError::CompilePermissions)?;
     let rules: Vec<_> = config
@@ -344,10 +421,44 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
     let query_registry = build_query_registry(&config.queries, &path, &catalog)?;
 
     let mut builder = Palimpsest::builder()
-        .with_wal(EmptyWalRuntime::default())
         .with_permissions(compiled)
         .with_grpc_addr(config.grpc.addr)
         .with_metrics_addr(config.metrics.addr);
+
+    // With `[database]` configured the real runtime derives its
+    // streamed table set from the registry and owns the slot,
+    // publication, and replica identity; without it the server boots
+    // against the stub so dev mode still works.
+    let _replication = if let Some(database) = &config.database {
+        let registry = query_registry.clone().ok_or_else(|| {
+            CliError::BuildServer(
+                "[database] requires [queries] files: the streamed table set is derived from the \
+                 registered queries"
+                    .to_owned(),
+            )
+        })?;
+        let mut runtime_config =
+            PostgresRuntimeConfig::from_registry(database.dsn.clone(), &registry);
+        runtime_config.slot.clone_from(&database.slot);
+        runtime_config.publication.clone_from(&database.publication);
+        runtime_config.tls_root_ca_pem = read_root_ca(database)?;
+        if let Some(manage) = database.manage_replica_identity {
+            runtime_config.manage_replica_identity = manage;
+        }
+        info!(
+            tables = runtime_config.tables.len(),
+            slot = %runtime_config.slot,
+            "connecting the Postgres WAL runtime"
+        );
+        let (runtime, handle) = PostgresWalRuntime::connect(runtime_config)
+            .await
+            .map_err(|err| CliError::BuildServer(err.to_string()))?;
+        builder = builder.with_wal(runtime);
+        Some(handle)
+    } else {
+        builder = builder.with_wal(EmptyWalRuntime::default());
+        None
+    };
 
     if let Some(registry) = query_registry {
         builder = builder.with_query_registry(registry);
@@ -358,7 +469,11 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
 
     builder = match config.auth {
         AuthConfig::Anonymous => builder.with_auth(AnonymousAuthenticator),
-        AuthConfig::Jwt(jwt) => builder.with_auth(JwtAuthenticator::new(jwt)),
+        AuthConfig::Jwt(jwt) => builder.with_auth(
+            JwtAuthenticator::from_config(*jwt)
+                .await
+                .map_err(|err| CliError::BuildServer(err.to_string()))?,
+        ),
     };
 
     let server = builder
@@ -766,10 +881,18 @@ fn parse_json_user_value(
             .as_str()
             .map(|value| UserValue::Text(value.to_owned()))
             .ok_or_else(|| user_value_type_error(field, "string", value)),
-        ColumnType::Timestamp => value
+        ColumnType::Timestamp
+        | ColumnType::TimestampTz
+        | ColumnType::Date
+        | ColumnType::Time
+        | ColumnType::Interval => value
             .as_str()
             .map(|value| UserValue::Timestamp(value.to_owned()))
             .ok_or_else(|| user_value_type_error(field, "string timestamp", value)),
+        ColumnType::Numeric => value
+            .as_f64()
+            .map(UserValue::Float)
+            .ok_or_else(|| user_value_type_error(field, "number", value)),
         ColumnType::Uuid => value
             .as_str()
             .ok_or_else(|| user_value_type_error(field, "string uuid", value))
@@ -781,9 +904,11 @@ fn parse_json_user_value(
             .as_str()
             .map(|value| UserValue::Enum(value.to_owned()))
             .ok_or_else(|| user_value_type_error(field, "string enum label", value)),
-        ColumnType::Unknown => Err(CliError::EvalPermissions(format!(
-            "unknown user-context type for field '{field}'"
-        ))),
+        ColumnType::Bytea | ColumnType::Array | ColumnType::Unknown => {
+            Err(CliError::EvalPermissions(format!(
+                "unsupported user-context type for field '{field}'"
+            )))
+        }
     }
 }
 
@@ -821,7 +946,16 @@ fn parse_user_value(
             ))
         }),
         ColumnType::Text => Ok(UserValue::Text(raw_value.to_owned())),
-        ColumnType::Timestamp => Ok(UserValue::Timestamp(raw_value.to_owned())),
+        ColumnType::Timestamp
+        | ColumnType::TimestampTz
+        | ColumnType::Date
+        | ColumnType::Time
+        | ColumnType::Interval => Ok(UserValue::Timestamp(raw_value.to_owned())),
+        ColumnType::Numeric => raw_value.parse::<f64>().map(UserValue::Float).map_err(|_| {
+            CliError::EvalPermissions(format!(
+                "user field '{field}' expects a number, got '{raw_value}'"
+            ))
+        }),
         ColumnType::Uuid => UserValue::uuid(raw_value).map_err(|_| {
             CliError::EvalPermissions(format!(
                 "user field '{field}' expects a uuid, got '{raw_value}'"
@@ -835,9 +969,11 @@ fn parse_user_value(
                 ))
             }),
         ColumnType::Enum => Ok(UserValue::Enum(raw_value.to_owned())),
-        ColumnType::Unknown => Err(CliError::EvalPermissions(format!(
-            "unknown user-context type for field '{field}'"
-        ))),
+        ColumnType::Bytea | ColumnType::Array | ColumnType::Unknown => {
+            Err(CliError::EvalPermissions(format!(
+                "unsupported user-context type for field '{field}'"
+            )))
+        }
     }
 }
 
@@ -1160,6 +1296,53 @@ struct ColumnDump {
     name: String,
     #[serde(rename = "type")]
     ty: &'static str,
+}
+
+/// `typegen [config] [--out <file>]` — generates TypeScript row and
+/// parameter types for every registered query, from the live catalog
+/// and the compiled result shapes. Writes to stdout unless `--out`
+/// is supplied.
+async fn cmd_typegen(rest: &[String]) -> Result<(), CliError> {
+    let mut config_path = PathBuf::from("palimpsest.toml");
+    let mut out: Option<PathBuf> = None;
+    let mut args = rest.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" | "-o" => {
+                out = Some(PathBuf::from(args.next().ok_or_else(|| {
+                    CliError::Usage("typegen: --out expects a path".to_owned())
+                })?));
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!("typegen: unknown flag '{other}'")));
+            }
+            other => config_path = PathBuf::from(other),
+        }
+    }
+
+    let config = read_config(&config_path)?;
+    if config.database.is_none() {
+        return Err(CliError::Usage(
+            "typegen needs a [database] section: types are generated from the live catalog"
+                .to_owned(),
+        ));
+    }
+    let (catalog, tables) = load_catalog(&config).await?;
+    let registry = build_query_registry(&config.queries, &config_path, &catalog)?.ok_or_else(
+        || CliError::Usage("typegen needs [queries] files to generate types for".to_owned()),
+    )?;
+
+    let module = palimpsest_postgres::typescript_module(&registry, &tables)
+        .map_err(CliError::BuildServer)?;
+    match out {
+        Some(path) => {
+            fs::write(&path, module)
+                .map_err(|err| CliError::ReadConfig(path.clone(), err))?;
+            info!(out = %path.display(), "wrote TypeScript types");
+        }
+        None => print!("{module}"),
+    }
+    Ok(())
 }
 
 fn cmd_dump_catalog(path: Option<&Path>) -> Result<(), CliError> {
