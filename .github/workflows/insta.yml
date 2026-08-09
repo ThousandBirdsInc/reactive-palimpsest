@@ -25,6 +25,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
       - name: Install protoc
         uses: ./.github/actions/setup-protoc
 

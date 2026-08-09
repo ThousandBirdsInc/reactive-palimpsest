@@ -1,0 +1,38 @@
+name: Free disk space
+description: >-
+  Reclaim disk on GitHub-hosted Linux runners by deleting preinstalled
+  toolchains this repo never uses. The workspace's test binaries (timely,
+  tonic, criterion, and the llvm-cov instrumented variants) do not fit in
+  the ~14 GB a stock ubuntu runner leaves free, which showed up as
+  "No space left on device" and as `rust-lld` dying with SIGBUS mid-link.
+runs:
+  using: composite
+  steps:
+    - name: Reclaim runner disk
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" != "Linux" ]; then
+          echo "Not a Linux runner; nothing to reclaim."
+          exit 0
+        fi
+
+        echo "Before:"
+        df -h /
+
+        # Each of these is a multi-GB preinstalled SDK/toolchain that no
+        # job in this repo touches. `|| true` because the exact set the
+        # runner image ships changes over time.
+        sudo rm -rf \
+          /usr/share/dotnet \
+          /usr/share/swift \
+          /usr/local/lib/android \
+          /usr/local/.ghcup \
+          /opt/ghc \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/local/share/powershell \
+          /usr/local/share/chromium \
+          /usr/local/share/boost || true
+        sudo docker image prune --all --force >/dev/null 2>&1 || true
+
+        echo "After:"
+        df -h /

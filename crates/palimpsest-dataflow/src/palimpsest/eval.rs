@@ -902,10 +902,9 @@ fn cast_datum(datum: Datum, target: ColumnType) -> Datum {
         },
         ColumnType::Numeric => match &datum {
             Numeric(_) => datum,
-            I64(_) | I32(_) | I16(_) | F64(_) | F32(_) | Text(_) => text_of(&datum)
-                .map_or(Null, |text| {
-                    Numeric(palimpsest_wal::BigDecimal::new(text))
-                }),
+            I64(_) | I32(_) | I16(_) | F64(_) | F32(_) | Text(_) => {
+                text_of(&datum).map_or(Null, |text| Numeric(palimpsest_wal::BigDecimal::new(text)))
+            }
             _ => Null,
         },
         ColumnType::Bytea => match datum {
@@ -928,11 +927,8 @@ fn parse_temporal_text(datum: &Datum, target: &palimpsest_wal::DatumType) -> Dat
     let Datum::Text(bytes) = datum else {
         return Datum::Null;
     };
-    palimpsest_wal::decode_column_value(
-        target,
-        palimpsest_wal::ColumnValue::Text(bytes.clone()),
-    )
-    .unwrap_or(Datum::Null)
+    palimpsest_wal::decode_column_value(target, palimpsest_wal::ColumnValue::Text(bytes.clone()))
+        .unwrap_or(Datum::Null)
 }
 
 /// `expr <op> ANY(array)` — true when the comparison holds for at least

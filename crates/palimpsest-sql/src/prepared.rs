@@ -700,8 +700,7 @@ impl QueryRegistry {
         let mut tables: Vec<String> = Vec::new();
         let mut leaky: Vec<String> = Vec::new();
         for index in bound.graph.base_table_indices() {
-            if let crate::mir::MirNodeKind::BaseTable { table, .. } = bound.graph.node_kind(index)
-            {
+            if let crate::mir::MirNodeKind::BaseTable { table, .. } = bound.graph.node_kind(index) {
                 if !tables.contains(table) {
                     tables.push(table.clone());
                 }
@@ -720,10 +719,12 @@ impl QueryRegistry {
         // must fail here, not at subscribe time. The dummy-bound
         // rendering is used so placeholders are typed literals.
         if let Some(catalog) = catalog {
-            let rendered = crate::parser::parse_single_query(&bound.sql, self.limits)
-                .map_err(|source| RegisterError::Unsupported {
-                    query: name.to_owned(),
-                    source,
+            let rendered =
+                crate::parser::parse_single_query(&bound.sql, self.limits).map_err(|source| {
+                    RegisterError::Unsupported {
+                        query: name.to_owned(),
+                        source,
+                    }
                 })?;
             crate::normalize::validate_statement_against_catalog(&rendered, catalog).map_err(
                 |source| RegisterError::Unsupported {
@@ -2099,10 +2100,7 @@ INSERT INTO cards (id) VALUES ($1);
                  );\n",
                 "queries.sql",
                 &Catalog::new([
-                    TableSchema::new(
-                        "cards",
-                        vec![ColumnSchema::new("id", ColumnType::Uuid)],
-                    ),
+                    TableSchema::new("cards", vec![ColumnSchema::new("id", ColumnType::Uuid)]),
                     TableSchema::new(
                         "hidden_cards",
                         vec![ColumnSchema::new("card_id", ColumnType::Uuid)],

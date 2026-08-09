@@ -904,11 +904,9 @@ fn parse_json_user_value(
             .as_str()
             .map(|value| UserValue::Enum(value.to_owned()))
             .ok_or_else(|| user_value_type_error(field, "string enum label", value)),
-        ColumnType::Bytea | ColumnType::Array | ColumnType::Unknown => {
-            Err(CliError::EvalPermissions(format!(
-                "unsupported user-context type for field '{field}'"
-            )))
-        }
+        ColumnType::Bytea | ColumnType::Array | ColumnType::Unknown => Err(
+            CliError::EvalPermissions(format!("unsupported user-context type for field '{field}'")),
+        ),
     }
 }
 
@@ -969,11 +967,9 @@ fn parse_user_value(
                 ))
             }),
         ColumnType::Enum => Ok(UserValue::Enum(raw_value.to_owned())),
-        ColumnType::Bytea | ColumnType::Array | ColumnType::Unknown => {
-            Err(CliError::EvalPermissions(format!(
-                "unsupported user-context type for field '{field}'"
-            )))
-        }
+        ColumnType::Bytea | ColumnType::Array | ColumnType::Unknown => Err(
+            CliError::EvalPermissions(format!("unsupported user-context type for field '{field}'")),
+        ),
     }
 }
 
@@ -1328,16 +1324,16 @@ async fn cmd_typegen(rest: &[String]) -> Result<(), CliError> {
         ));
     }
     let (catalog, tables) = load_catalog(&config).await?;
-    let registry = build_query_registry(&config.queries, &config_path, &catalog)?.ok_or_else(
-        || CliError::Usage("typegen needs [queries] files to generate types for".to_owned()),
-    )?;
+    let registry =
+        build_query_registry(&config.queries, &config_path, &catalog)?.ok_or_else(|| {
+            CliError::Usage("typegen needs [queries] files to generate types for".to_owned())
+        })?;
 
     let module = palimpsest_postgres::typescript_module(&registry, &tables)
         .map_err(CliError::BuildServer)?;
     match out {
         Some(path) => {
-            fs::write(&path, module)
-                .map_err(|err| CliError::ReadConfig(path.clone(), err))?;
+            fs::write(&path, module).map_err(|err| CliError::ReadConfig(path.clone(), err))?;
             info!(out = %path.display(), "wrote TypeScript types");
         }
         None => print!("{module}"),

@@ -3,6 +3,11 @@ version = 2
 allow = [
     "Apache-2.0",
     "BSD-3-Clause",
+    # `webpki-roots` ships Mozilla's CA bundle under the Community Data
+    # License Agreement (permissive variant). It is a data license with
+    # no copyleft or attribution obligations on our binaries; it appears
+    # because rustls pulls the trust anchors in.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "Unicode-3.0",

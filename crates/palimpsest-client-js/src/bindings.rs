@@ -506,11 +506,11 @@ fn datum_to_js(d: &WireDatum) -> JsValue {
         // Temporal datums surface as JS `Date` objects — no more
         // hand-written micros-to-Date decoding in application code.
         // Sub-millisecond precision is truncated (JS `Date` is ms).
-        WireDatum::Date(days) => js_sys::Date::new(&JsValue::from_f64(
-            f64::from(*days) * 86_400_000.0,
-        ))
-        .into(),
-        WireDatum::Timestamp(micros) | WireDatum::TimestampTz(micros) => {
+        WireDatum::Date(days) => {
+            js_sys::Date::new(&JsValue::from_f64(f64::from(*days) * 86_400_000.0)).into()
+        }
+        WireDatum::Timestamp(micros) | WireDatum::TimestampTz(micros) =>
+        {
             #[allow(clippy::cast_precision_loss)]
             js_sys::Date::new(&JsValue::from_f64((*micros as f64 / 1000.0).floor())).into()
         }

@@ -103,9 +103,7 @@ fn placeholder(spec: &ParamSpec) -> ParamValue {
         ColumnType::Bool => ParamValue::Bool(true),
         ColumnType::Int => ParamValue::Int(0),
         ColumnType::Float | ColumnType::Numeric => ParamValue::Float(0.0),
-        ColumnType::Uuid => {
-            ParamValue::Text("00000000-0000-0000-0000-000000000000".to_owned())
-        }
+        ColumnType::Uuid => ParamValue::Text("00000000-0000-0000-0000-000000000000".to_owned()),
         ColumnType::Timestamp | ColumnType::TimestampTz => {
             ParamValue::Text("2000-01-01 00:00:00".to_owned())
         }

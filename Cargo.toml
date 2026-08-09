@@ -103,6 +103,20 @@ cast_possible_wrap = "allow"
 # container bootstrap command), which are not Rust format strings.
 literal_string_with_formatting_args = "allow"
 
+# Debug builds carry `debuginfo = 2` by default, which for this workspace
+# means multi-gigabyte test binaries (timely + tonic + criterion, times
+# every integration test, times the llvm-cov instrumented copies). That
+# does not fit in the ~14 GB a GitHub-hosted runner leaves free: CI was
+# failing with "No space left on device" and with `rust-lld` taking
+# SIGBUS mid-link. Line tables keep panic backtraces pointing at real
+# files and lines; third-party crates get no debug info at all, since we
+# never step through them.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # Used by `xtask check-wasm-size` and the React example's build:
 # squeeze the wasm bundle hard. `panic = "abort"` drops the panic
 # unwinding tables, `lto = true` runs cross-crate inlining,

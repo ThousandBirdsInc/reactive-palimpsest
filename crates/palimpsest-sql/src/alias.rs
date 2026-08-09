@@ -155,9 +155,9 @@ fn resolve_select(select: &mut Select, outer: &[Scope]) -> Scope {
                 | JoinOperator::LeftAnti(constraint)
                 | JoinOperator::RightAnti(constraint)
                 | JoinOperator::AsOf { constraint, .. } => Some(constraint),
-                JoinOperator::CrossJoin
-                | JoinOperator::CrossApply
-                | JoinOperator::OuterApply => None,
+                JoinOperator::CrossJoin | JoinOperator::CrossApply | JoinOperator::OuterApply => {
+                    None
+                }
             };
             if let Some(JoinConstraint::On(expr)) = constraint {
                 resolve_expr(expr, &scopes);
@@ -438,8 +438,7 @@ mod tests {
 
     #[test]
     fn qualified_wildcard_and_order_by_resolve() {
-        let resolved =
-            resolve("SELECT t.* FROM tickets AS t ORDER BY t.created_at DESC LIMIT 10");
+        let resolved = resolve("SELECT t.* FROM tickets AS t ORDER BY t.created_at DESC LIMIT 10");
         assert_eq!(
             resolved,
             "SELECT tickets.* FROM tickets ORDER BY tickets.created_at DESC LIMIT 10"
@@ -467,9 +466,8 @@ mod tests {
 
     #[test]
     fn cte_reference_alias_resolves_to_cte_name() {
-        let resolved = resolve(
-            "WITH recent AS (SELECT id FROM tickets) SELECT r.id FROM recent AS r",
-        );
+        let resolved =
+            resolve("WITH recent AS (SELECT id FROM tickets) SELECT r.id FROM recent AS r");
         assert_eq!(
             resolved,
             "WITH recent AS (SELECT id FROM tickets) SELECT recent.id FROM recent"

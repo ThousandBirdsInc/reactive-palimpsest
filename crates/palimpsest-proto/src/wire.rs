@@ -625,15 +625,8 @@ mod tests {
 
         // A timestamp datum on a timestamptz column is still a
         // mismatch — the variants are distinct on purpose.
-        let bad = encode_rows(&[vec![
-            WireDatum::Timestamp(0),
-            WireDatum::Null,
-        ]])
-        .unwrap();
-        let diff = Diff {
-            rows: bad,
-            ..diff
-        };
+        let bad = encode_rows(&[vec![WireDatum::Timestamp(0), WireDatum::Null]]).unwrap();
+        let diff = Diff { rows: bad, ..diff };
         let err = decode_diff(&diff, &schema).unwrap_err();
         assert!(matches!(
             err,
