@@ -23,10 +23,22 @@
 //!   first run and resumed afterwards; the initial snapshot is fenced
 //!   against the slot's change stream by transaction-id visibility so
 //!   no change is missed or double-applied.
-//! * **Ingest** — pgoutput frames are decoded, TOAST placeholders are
-//!   resolved against the in-memory mirror, and complete transactions
-//!   are applied to a bounded diff journal that refuses a truncated
-//!   resume rather than serving a gap.
+//! * **Streaming ingest** — a real walsender session
+//!   (`START_REPLICATION` over `COPY_BOTH`) delivers changes as they
+//!   commit. `tokio-postgres` cannot open one, so the session speaks
+//!   the frontend/backend protocol directly (see `stream`);
+//!   the slot's confirmed position advances only for what has been
+//!   applied, so a crash replays rather than loses. pgoutput frames
+//!   are decoded, TOAST placeholders resolved against the in-memory
+//!   mirror, and complete transactions applied to a bounded diff
+//!   journal that refuses a truncated resume rather than serving a
+//!   gap.
+//! * **TLS** — DSNs asking for TLS negotiate it on *both* the
+//!   management connection and the replication stream. Without a root
+//!   CA the session is encrypted but the server is unauthenticated
+//!   (libpq `sslmode=require`); supplying
+//!   [`PostgresRuntimeConfig::tls_root_ca_pem`] upgrades to full
+//!   chain + hostname verification.
 //! * **Reconnect with reconciliation** — on connection loss the
 //!   runtime re-snapshots, diffs against the mirror, and emits only
 //!   the difference as one transaction. Credentials never appear in
@@ -34,17 +46,9 @@
 //! * **Drift detection** — a `Relation` frame that no longer matches
 //!   the introspected shape stops ingest with a named error instead of
 //!   silently mis-decoding rows.
-//!
-//! # Limitations
-//!
-//! Change ingest currently polls
-//! `pg_logical_slot_get_binary_changes()` (default every 100 ms):
-//! `tokio-postgres` has no `COPY_BOTH` support, so `START_REPLICATION`
-//! streaming is unreachable through it. Polling consumes the slot
-//! destructively, but because the mirror and journal live in process
-//! memory, a crash simply re-snapshots on restart — the reconnect
-//! reconciliation path makes the polling loss-window invisible to
-//! subscribers. TLS DSNs are not yet supported (`sslmode=disable`).
+//! * **Client types** — [`typescript_module`] emits row and parameter
+//!   types for every registered query from the same catalog, so
+//!   clients generate their row types instead of transcribing them.
 
 #![warn(missing_docs)]
 
@@ -52,8 +56,15 @@ mod error;
 mod introspect;
 mod replication;
 mod runtime;
+mod stream;
+mod tls;
+mod typegen;
 
 pub use error::PostgresRuntimeError;
-pub use introspect::{introspect_tables, sql_catalog, IntrospectedColumn, IntrospectedTable};
+pub use introspect::{
+    introspect_all_tables, introspect_tables, sql_catalog, IntrospectedColumn, IntrospectedTable,
+};
+pub use replication::introspect_database;
 pub use replication::ReplicationHandle;
 pub use runtime::{PostgresRuntimeConfig, PostgresWalRuntime};
+pub use typegen::typescript_module;

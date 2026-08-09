@@ -183,6 +183,7 @@ impl WalSourceState {
             | DecodedEvent::Resync { .. }
             | DecodedEvent::Truncate(_)
             | DecodedEvent::Origin(_)
+            | DecodedEvent::Type(_)
             | DecodedEvent::Stream(_)
             | DecodedEvent::TwoPhase(_) => None,
         }

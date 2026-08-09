@@ -86,6 +86,15 @@ pub enum PostgresRuntimeError {
     #[error("logical decoding failed: {0}")]
     Decode(#[from] palimpsest_wal::WalError),
 
+    /// The replication (walsender) session failed. Transport-level;
+    /// the ingest loop treats these as reconnectable.
+    #[error("replication stream: {0}")]
+    Stream(String),
+
+    /// TLS could not be configured or negotiated.
+    #[error("tls: {0}")]
+    Tls(String),
+
     /// A `Relation` frame no longer matches the introspected shape.
     /// The runtime refuses to continue rather than mis-decode rows.
     #[error(

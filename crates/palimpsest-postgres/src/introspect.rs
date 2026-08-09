@@ -98,17 +98,21 @@ impl IntrospectedTable {
 /// database schema instead of a hand-maintained (or demo) catalog.
 #[must_use]
 pub fn sql_catalog(tables: &[IntrospectedTable]) -> palimpsest_sql::Catalog {
-    palimpsest_sql::Catalog::new(tables.iter().map(|table| {
-        palimpsest_sql::TableSchema::new(
+    palimpsest_sql::Catalog::new(tables.iter().flat_map(|table| {
+        // Register under both the bare and schema-qualified name so
+        // queries can write either.
+        let columns: Vec<_> = table
+            .columns
+            .iter()
+            .map(|column| {
+                palimpsest_sql::ColumnSchema::new(column.name.clone(), column.column_type)
+            })
+            .collect();
+        [
             table.name.clone(),
-            table
-                .columns
-                .iter()
-                .map(|column| {
-                    palimpsest_sql::ColumnSchema::new(column.name.clone(), column.column_type)
-                })
-                .collect(),
-        )
+            format!("{}.{}", table.namespace, table.name),
+        ]
+        .map(|name| palimpsest_sql::TableSchema::new(name, columns.clone()))
     }))
 }
 
@@ -138,6 +142,44 @@ LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary
 WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
   AND n.nspname = $1 AND c.relname = $2
 ORDER BY a.attnum";
+
+/// Every non-system table, as `namespace.relation`, in catalog order.
+const ALL_TABLES_SQL: &str = "\
+SELECT n.nspname AS namespace, c.relname AS table_name
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND n.nspname NOT LIKE 'pg_temp%'
+ORDER BY n.nspname, c.relname";
+
+/// Introspects every user table in the database.
+///
+/// The CLI uses this to build the SQL catalog *before* the query
+/// registry exists — registration needs a catalog, and the streamed
+/// table set is then derived from the registered queries. Tables in
+/// the `public` schema are also reachable by their bare name.
+///
+/// # Errors
+/// [`PostgresRuntimeError::Query`] on catalog failures.
+pub async fn introspect_all_tables(
+    client: &Client,
+) -> Result<Vec<IntrospectedTable>, PostgresRuntimeError> {
+    let rows = client
+        .query(ALL_TABLES_SQL, &[])
+        .await
+        .map_err(|source| PostgresRuntimeError::query("table enumeration", source))?;
+    let names: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let namespace: String = row.get("namespace");
+            let name: String = row.get("table_name");
+            format!("{namespace}.{name}")
+        })
+        .collect();
+    introspect_tables(client, &names).await
+}
 
 /// Splits a registered table reference into `(namespace, relation)`,
 /// defaulting the namespace to `public`.

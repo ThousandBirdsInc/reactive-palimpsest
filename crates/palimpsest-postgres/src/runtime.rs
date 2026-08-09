@@ -37,8 +37,15 @@ pub struct PostgresRuntimeConfig {
     pub slot: String,
     /// Publication name.
     pub publication: String,
-    /// Poll interval for slot changes.
-    pub poll_interval: Duration,
+    /// PEM-encoded root CA used to verify the server certificate.
+    /// When set, TLS uses full chain + hostname verification
+    /// (`sslmode=verify-full` semantics); when unset, a TLS-enabled
+    /// DSN encrypts without authenticating the server, matching
+    /// libpq's `sslmode=require`.
+    pub tls_root_ca_pem: Option<String>,
+    /// How often to send a standby status update while idle. Also
+    /// bounds how long a `Resync` takes to notice a dead connection.
+    pub keepalive_interval: Duration,
     /// Bound on the in-memory diff journal (in row diffs). When the
     /// journal overflows, the oldest diffs are dropped and any cursor
     /// that would need them refuses to resume instead of serving a
@@ -61,7 +68,8 @@ impl PostgresRuntimeConfig {
             tables: Vec::new(),
             slot: "palimpsest".to_owned(),
             publication: "palimpsest".to_owned(),
-            poll_interval: Duration::from_millis(100),
+            tls_root_ca_pem: None,
+            keepalive_interval: Duration::from_secs(10),
             journal_capacity: 262_144,
             manage_replica_identity: true,
         }
@@ -129,6 +137,11 @@ pub(crate) struct SharedState {
     journal: Mutex<Journal>,
     /// Last applied commit LSN (also the snapshot clock).
     clock: AtomicU64,
+    /// Number of reconnect reconciliations performed. Zero means
+    /// every diff since startup arrived over the replication stream;
+    /// tests assert on this so a silently-broken stream cannot hide
+    /// behind the re-snapshot path.
+    reconciles: AtomicU64,
     /// Latched fatal error (schema drift). Once set, snapshots and
     /// cursors refuse rather than risk serving mis-decoded rows.
     failed: Mutex<Option<String>>,
@@ -167,6 +180,7 @@ impl PostgresWalRuntime {
                 mirror: Mutex::new(BTreeMap::new()),
                 journal: Mutex::new(Journal::new(journal_capacity)),
                 clock: AtomicU64::new(0),
+                reconciles: AtomicU64::new(0),
                 failed: Mutex::new(None),
             }),
         }
@@ -196,6 +210,13 @@ impl PostgresWalRuntime {
             .expect("failed latch")
             .clone()
             .map_or(Ok(()), Err)
+    }
+
+    /// How many times the runtime has re-snapshotted and reconciled
+    /// after losing the replication stream. Zero on a healthy run.
+    #[must_use]
+    pub fn reconcile_count(&self) -> u64 {
+        self.state.reconciles.load(Ordering::SeqCst)
     }
 
     /// Current logical clock (last applied commit LSN).
@@ -314,6 +335,7 @@ impl PostgresWalRuntime {
     /// as one transaction at `lsn`, then adopts the snapshot as the
     /// new mirror.
     pub(crate) fn reconcile_snapshot(&self, lsn: u64, fresh: BTreeMap<TableId, Vec<Row>>) {
+        self.state.reconciles.fetch_add(1, Ordering::SeqCst);
         let mut mirror = self.state.mirror.lock().expect("mirror");
         let mut journal = self.state.journal.lock().expect("journal");
         let at = Lsn::new(lsn);

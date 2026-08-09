@@ -21,6 +21,7 @@ slot-info = ["dep:tokio-postgres"]
 
 [dependencies]
 palimpsest-permissions = { path = "../palimpsest-permissions", version = "0.1.1" }
+palimpsest-postgres = { path = "../palimpsest-postgres", version = "0.1.1" }
 palimpsest-server = { path = "../palimpsest-server", version = "0.1.1" }
 palimpsest-sql = { path = "../palimpsest-sql", version = "0.1.1" }
 serde = { workspace = true, features = ["derive"] }

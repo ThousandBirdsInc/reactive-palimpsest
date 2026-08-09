@@ -18,6 +18,8 @@ use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 use crate::error::PostgresRuntimeError;
 use crate::introspect::{introspect_tables, IntrospectedTable};
 use crate::runtime::{PostgresRuntimeConfig, PostgresWalRuntime};
+use crate::stream::{ReplicationStream, StreamEvent};
+use crate::tls::TlsSettings;
 
 /// Handle to the background replication task. Dropping it leaves the
 /// task running; call [`Self::shutdown`] for a clean stop.
@@ -49,7 +51,8 @@ impl PostgresWalRuntime {
     pub async fn connect(
         config: PostgresRuntimeConfig,
     ) -> Result<(Self, ReplicationHandle), PostgresRuntimeError> {
-        let client = open_client(&config.dsn).await?;
+        let tls = TlsSettings::new(config.tls_root_ca_pem.clone());
+        let client = open_client(&config.dsn, &tls).await?;
 
         let tables = introspect_tables(&client, &config.tables).await?;
         ensure_replica_identity(&client, &tables, config.manage_replica_identity).await?;
@@ -69,11 +72,15 @@ impl PostgresWalRuntime {
             "postgres runtime seeded"
         );
 
+        // The management connection is done its job (introspection,
+        // DDL, snapshot); the ingest task holds its own walsender
+        // session and re-dials for reconciliation as needed.
+        drop(client);
+
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(ingest_task(
             config.clone(),
             runtime.clone(),
-            client,
             fence,
             shutdown_rx,
         ));
@@ -88,9 +95,47 @@ impl PostgresWalRuntime {
     }
 }
 
-/// Opens a client and spawns its connection driver.
-async fn open_client(dsn: &str) -> Result<Client, PostgresRuntimeError> {
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls)
+/// Introspects every user table in the database behind `dsn`.
+///
+/// Callers need this before a query registry exists: registration
+/// validates against a catalog, and the streamed table set is then
+/// derived from the queries that registered. `tls_root_ca_pem`
+/// follows [`PostgresRuntimeConfig::tls_root_ca_pem`] semantics.
+///
+/// # Errors
+/// Connection and catalog failures, with the DSN redacted.
+pub async fn introspect_database(
+    dsn: &str,
+    tls_root_ca_pem: Option<String>,
+) -> Result<Vec<IntrospectedTable>, PostgresRuntimeError> {
+    let tls = TlsSettings::new(tls_root_ca_pem);
+    let client = open_client(dsn, &tls).await?;
+    crate::introspect::introspect_all_tables(&client).await
+}
+
+/// Opens a management client and spawns its connection driver. TLS is
+/// negotiated when the DSN asks for it (`sslmode` other than
+/// `disable`).
+async fn open_client(dsn: &str, tls: &TlsSettings) -> Result<Client, PostgresRuntimeError> {
+    let config: tokio_postgres::Config = dsn
+        .parse()
+        .map_err(|err| PostgresRuntimeError::Connect(format!("unparseable DSN: {err}")))?;
+
+    if config.get_ssl_mode() == tokio_postgres::config::SslMode::Disable {
+        let (client, connection) = config
+            .connect(NoTls)
+            .await
+            .map_err(|err| PostgresRuntimeError::Connect(err.to_string()))?;
+        tokio::spawn(async move {
+            if let Err(err) = connection.await {
+                tracing::warn!(error = %err, "postgres connection closed");
+            }
+        });
+        return Ok(client);
+    }
+
+    let (client, connection) = config
+        .connect(tls.management_connector()?)
         .await
         .map_err(|err| PostgresRuntimeError::Connect(err.to_string()))?;
     tokio::spawn(async move {
@@ -434,16 +479,101 @@ struct PendingTransaction {
     truncates: Vec<TableId>,
 }
 
-/// Background task: poll the slot, decode frames, apply transactions;
-/// on connection failure, reconnect with backoff, re-snapshot, and
-/// reconcile the difference.
+/// Background task: hold a walsender session open, decode streamed
+/// frames, apply complete transactions; on stream failure, reconnect
+/// with backoff, re-snapshot, reconcile, and resume streaming.
 async fn ingest_task(
     config: PostgresRuntimeConfig,
     runtime: PostgresWalRuntime,
-    client: Client,
     fence: SnapshotFence,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
+    let tls = TlsSettings::new(config.tls_root_ca_pem.clone());
+    let mut fence = fence;
+    let mut backoff = ReconnectBackoff::default();
+    let mut first_attempt = true;
+
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+
+        // Every attempt after the first re-snapshots and reconciles:
+        // the mirror may have missed changes while the stream was
+        // down, and the fresh snapshot's fence covers them.
+        if !first_attempt {
+            let delay = backoff.next_delay();
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                () = tokio::time::sleep(delay) => {}
+            }
+            match reconcile_after_disconnect(&config, &runtime, &tls).await {
+                Ok(fresh_fence) => {
+                    tracing::info!("postgres runtime reconnected and reconciled");
+                    fence = fresh_fence;
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "postgres reconcile failed; backing off");
+                    continue;
+                }
+            }
+        }
+        first_attempt = false;
+
+        match stream_session(&config, &runtime, &tls, &fence, &mut shutdown).await {
+            SessionOutcome::Shutdown => return,
+            SessionOutcome::Fatal(message) => {
+                runtime.fail(message);
+                return;
+            }
+            SessionOutcome::Disconnected(detail) => {
+                tracing::warn!(error = %detail, "replication stream ended; will reconnect");
+                backoff = ReconnectBackoff::default();
+            }
+        }
+    }
+}
+
+/// How one streaming session ended.
+enum SessionOutcome {
+    /// The caller asked us to stop.
+    Shutdown,
+    /// Transport-level failure — reconnect and reconcile.
+    Disconnected(String),
+    /// Unrecoverable (schema drift) — latch the runtime failed.
+    Fatal(String),
+}
+
+/// Opens a walsender session and pumps it until it fails or shutdown
+/// is requested.
+async fn stream_session(
+    config: &PostgresRuntimeConfig,
+    runtime: &PostgresWalRuntime,
+    tls: &TlsSettings,
+    fence: &SnapshotFence,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> SessionOutcome {
+    let pg_config = match config.dsn.parse::<tokio_postgres::Config>() {
+        Ok(parsed) => parsed,
+        Err(err) => return SessionOutcome::Fatal(format!("unparseable DSN: {err}")),
+    };
+    let mut session = match ReplicationStream::connect(&pg_config, tls).await {
+        Ok(session) => session,
+        Err(err) => return SessionOutcome::Disconnected(err.to_string()),
+    };
+    // Start position 0 tells the server to resume from the slot's
+    // confirmed position; the snapshot's xid fence discards whatever
+    // that replays which the snapshot already contains.
+    if let Err(err) = session.start(&config.slot, &config.publication, 0).await {
+        // A missing REPLICATION grant is configuration, not
+        // transport: name it and stop rather than retry forever.
+        if matches!(err, PostgresRuntimeError::MissingReplicationPrivilege { .. }) {
+            return SessionOutcome::Fatal(err.to_string());
+        }
+        return SessionOutcome::Disconnected(err.to_string());
+    }
+    tracing::info!(slot = %config.slot, "replication stream started");
+
     // The wal catalog is seeded from introspection so pgoutput tuples
     // decode with the real types (enums as labels, arrays with their
     // element type) — a stock Relation-frame mapping would coarsen
@@ -453,175 +583,176 @@ async fn ingest_task(
         catalog.upsert_relation(table.relation_schema());
     }
 
-    let mut client = Some(client);
-    let mut fence = fence;
-    let mut backoff = ReconnectBackoff::default();
+    let mut pending: Option<PendingTransaction> = None;
+    // Only what we have actually applied is reported as flushed, so
+    // the slot never advances past durable state.
+    let mut applied_lsn = 0_u64;
+    let mut received_lsn = 0_u64;
 
     loop {
-        if *shutdown.borrow() {
-            return;
-        }
-        let Some(active) = client.as_ref() else {
-            // Reconnect path: backoff, dial, re-snapshot, reconcile.
-            let delay = backoff.next_delay();
-            tokio::select! {
-                _ = shutdown.changed() => return,
-                () = tokio::time::sleep(delay) => {}
+        let event = tokio::select! {
+            _ = shutdown.changed() => {
+                let _ = session.standby_status(received_lsn, applied_lsn, false).await;
+                return SessionOutcome::Shutdown;
             }
-            match reconnect(&config, &runtime).await {
-                Ok((fresh_client, fresh_fence)) => {
-                    tracing::info!("postgres runtime reconnected and reconciled");
-                    backoff = ReconnectBackoff::default();
-                    fence = fresh_fence;
-                    client = Some(fresh_client);
+            () = tokio::time::sleep(config.keepalive_interval) => {
+                if let Err(err) = session.standby_status(received_lsn, applied_lsn, false).await {
+                    return SessionOutcome::Disconnected(err.to_string());
                 }
-                Err(err) => {
-                    tracing::warn!(error = %err, "postgres reconnect failed; backing off");
-                }
+                continue;
             }
-            continue;
+            event = session.next_event() => event,
         };
 
-        match poll_once(active, &config, &runtime, &mut catalog, &fence).await {
-            Ok(applied) => {
-                if !applied {
-                    tokio::select! {
-                        _ = shutdown.changed() => return,
-                        () = tokio::time::sleep(config.poll_interval) => {}
+        let event = match event {
+            Ok(event) => event,
+            Err(err) => return SessionOutcome::Disconnected(err.to_string()),
+        };
+
+        match event {
+            StreamEvent::Closed => {
+                return SessionOutcome::Disconnected("server closed the copy stream".to_owned());
+            }
+            StreamEvent::Keepalive { wal_end, reply } => {
+                received_lsn = received_lsn.max(wal_end);
+                if reply {
+                    if let Err(err) = session
+                        .standby_status(received_lsn, applied_lsn, false)
+                        .await
+                    {
+                        return SessionOutcome::Disconnected(err.to_string());
                     }
                 }
             }
-            Err(PollError::Fatal(message)) => {
-                runtime.fail(message);
-                return;
-            }
-            Err(PollError::Connection(err)) => {
-                tracing::warn!(error = %err, "postgres poll failed; will reconnect");
-                client = None;
+            StreamEvent::XLogData { wal_end, payload } => {
+                received_lsn = received_lsn.max(wal_end);
+                match apply_frame(runtime, &mut catalog, fence, &mut pending, payload) {
+                    Ok(Some(commit_lsn)) => applied_lsn = applied_lsn.max(commit_lsn),
+                    Ok(None) => {}
+                    Err(FrameError::Fatal(message)) => return SessionOutcome::Fatal(message),
+                    Err(FrameError::Transport(detail)) => {
+                        return SessionOutcome::Disconnected(detail)
+                    }
+                }
             }
         }
     }
 }
 
-enum PollError {
-    /// Connection-level failure — reconnect and reconcile.
-    Connection(String),
-    /// Unrecoverable (schema drift) — latch the runtime failed.
+enum FrameError {
+    Transport(String),
     Fatal(String),
 }
 
-/// Drains one batch of slot changes. Returns whether anything applied.
-async fn poll_once(
-    client: &Client,
-    config: &PostgresRuntimeConfig,
+/// Decodes one pgoutput frame and, at a commit boundary, applies the
+/// assembled transaction. Returns the applied commit LSN when a
+/// transaction landed.
+fn apply_frame(
     runtime: &PostgresWalRuntime,
     catalog: &mut Catalog,
     fence: &SnapshotFence,
-) -> Result<bool, PollError> {
-    let rows = client
-        .query(
-            "SELECT data FROM pg_logical_slot_get_binary_changes($1, NULL, NULL, \
-             'proto_version', '1', 'publication_names', $2)",
-            &[&config.slot, &config.publication],
-        )
-        .await
-        .map_err(|err| PollError::Connection(err.to_string()))?;
-
-    let mut pending: Option<PendingTransaction> = None;
-    let mut applied = false;
-
-    for row in rows {
-        let data: &[u8] = row.get(0);
-        let event = decode_pgoutput_message(catalog, Bytes::copy_from_slice(data))
-            .map_err(|err| PollError::Connection(format!("pgoutput decode: {err}")))?;
-        match event {
-            DecodedEvent::Begin { xid, .. } => {
-                pending = Some(PendingTransaction {
-                    xid,
-                    ..PendingTransaction::default()
-                });
-            }
-            DecodedEvent::Row {
-                table, op, old, new
-            } => {
-                if runtime.table_by_id(table).is_some() {
-                    if let Some(pending) = pending.as_mut() {
-                        pending.changes.push((table, op, old, new));
-                    }
-                }
-            }
-            DecodedEvent::Truncate(truncate) => {
-                if let Some(pending) = pending.as_mut() {
-                    pending.truncates.extend(
-                        truncate
-                            .tables
-                            .into_iter()
-                            .filter(|table| runtime.table_by_id(*table).is_some()),
-                    );
-                }
-            }
-            DecodedEvent::Commit { commit_lsn, .. } => {
-                if let Some(transaction) = pending.take() {
-                    if fence.already_in_snapshot(transaction.xid) {
-                        continue;
-                    }
-                    if !transaction.truncates.is_empty() {
-                        runtime.apply_truncate(commit_lsn.get(), &transaction.truncates);
-                        applied = true;
-                    }
-                    if !transaction.changes.is_empty() {
-                        runtime.apply_transaction(commit_lsn.get(), transaction.changes);
-                        applied = true;
-                    }
-                }
-            }
-            DecodedEvent::Schema { table, columns } => {
-                // Drift check: a Relation frame that no longer matches
-                // the introspected shape means rows would mis-decode.
-                // Stop loudly instead.
-                if let Some(known) = runtime.table_by_id(table) {
-                    let streamed: Vec<&str> =
-                        columns.iter().map(|column| column.name.as_str()).collect();
-                    let introspected: Vec<&str> = known
-                        .columns
-                        .iter()
-                        .map(|column| column.name.as_str())
-                        .collect();
-                    if streamed == introspected {
-                        // Re-assert the richer introspected types over
-                        // the stock mapping the decoder just stored.
-                        catalog.upsert_relation(known.relation_schema());
-                    } else {
-                        return Err(PollError::Fatal(
-                            crate::error::PostgresRuntimeError::SchemaDrift {
-                                table: known.name.clone(),
-                                detail: format!(
-                                    "columns changed from [{}] to [{}]",
-                                    introspected.join(", "),
-                                    streamed.join(", ")
-                                ),
-                            }
-                            .to_string(),
-                        ));
-                    }
-                }
-            }
-            _ => {}
+    pending: &mut Option<PendingTransaction>,
+    payload: Bytes,
+) -> Result<Option<u64>, FrameError> {
+    let event = decode_pgoutput_message(catalog, payload)
+        .map_err(|err| FrameError::Transport(format!("pgoutput decode: {err}")))?;
+    match event {
+        DecodedEvent::Begin { xid, .. } => {
+            *pending = Some(PendingTransaction {
+                xid,
+                ..PendingTransaction::default()
+            });
+            Ok(None)
         }
+        DecodedEvent::Row {
+            table,
+            op,
+            old,
+            new,
+        } => {
+            if runtime.table_by_id(table).is_some() {
+                if let Some(pending) = pending.as_mut() {
+                    pending.changes.push((table, op, old, new));
+                }
+            }
+            Ok(None)
+        }
+        DecodedEvent::Truncate(truncate) => {
+            if let Some(pending) = pending.as_mut() {
+                pending.truncates.extend(
+                    truncate
+                        .tables
+                        .into_iter()
+                        .filter(|table| runtime.table_by_id(*table).is_some()),
+                );
+            }
+            Ok(None)
+        }
+        DecodedEvent::Commit { commit_lsn, .. } => {
+            let Some(transaction) = pending.take() else {
+                return Ok(None);
+            };
+            if fence.already_in_snapshot(transaction.xid) {
+                // Already reflected in the snapshot the mirror was
+                // seeded from; the commit is still durable for slot
+                // purposes.
+                return Ok(Some(commit_lsn.get()));
+            }
+            if !transaction.truncates.is_empty() {
+                runtime.apply_truncate(commit_lsn.get(), &transaction.truncates);
+            }
+            if !transaction.changes.is_empty() {
+                runtime.apply_transaction(commit_lsn.get(), transaction.changes);
+            }
+            Ok(Some(commit_lsn.get()))
+        }
+        DecodedEvent::Schema { table, columns } => {
+            // Drift check: a Relation frame that no longer matches the
+            // introspected shape means rows would mis-decode. Stop
+            // loudly instead.
+            let Some(known) = runtime.table_by_id(table) else {
+                return Ok(None);
+            };
+            let streamed: Vec<&str> = columns.iter().map(|column| column.name.as_str()).collect();
+            let introspected: Vec<&str> = known
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect();
+            if streamed == introspected {
+                // Re-assert the richer introspected types over the
+                // stock mapping the decoder just stored.
+                catalog.upsert_relation(known.relation_schema());
+                Ok(None)
+            } else {
+                Err(FrameError::Fatal(
+                    PostgresRuntimeError::SchemaDrift {
+                        table: known.name.clone(),
+                        detail: format!(
+                            "columns changed from [{}] to [{}]",
+                            introspected.join(", "),
+                            streamed.join(", ")
+                        ),
+                    }
+                    .to_string(),
+                ))
+            }
+        }
+        _ => Ok(None),
     }
-    Ok(applied)
 }
 
 /// Re-dials Postgres and reconciles: fresh snapshot, bag-diff against
-/// the mirror, one reconciliation transaction.
-async fn reconnect(
+/// the mirror, one reconciliation transaction. Returns the new fence.
+async fn reconcile_after_disconnect(
     config: &PostgresRuntimeConfig,
     runtime: &PostgresWalRuntime,
-) -> Result<(Client, SnapshotFence), PostgresRuntimeError> {
-    let client = open_client(&config.dsn).await?;
+    tls: &TlsSettings,
+) -> Result<SnapshotFence, PostgresRuntimeError> {
+    let client = open_client(&config.dsn, tls).await?;
     let (lsn, fence, rows) = fenced_snapshot(&client, runtime).await?;
     runtime.reconcile_snapshot(lsn, rows);
-    Ok((client, fence))
+    Ok(fence)
 }
 
 #[cfg(test)]
