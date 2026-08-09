@@ -22,8 +22,12 @@ version = 2
 yanked = "deny"
 # Documented, justified exceptions only. Each entry below is an
 # *unmaintained* advisory (informational; not a vulnerability) for which no
-# safe upgrade exists, and each crate is a transitive/indirect dependency we
-# do not select directly. Revisit when an upstream replacement lands.
+# safe upgrade exists. Revisit when an upstream replacement lands.
+#
+# `.cargo/audit.toml` carries the same list for the weekly `cargo audit`
+# job, plus `RUSTSEC-2022-0054` (`wee_alloc`): cargo-audit scans the raw
+# lockfile, while cargo-deny resolves features first and never sees that
+# opt-in dependency.
 ignore = [
     # `paste` (proc-macro) archived by its author. Transitive via
     # columnation -> timely (dataflow). No drop-in replacement adopted upstream.
