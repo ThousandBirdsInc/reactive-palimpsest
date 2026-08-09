@@ -29,6 +29,9 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
 
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
       - name: Install protoc
         uses: ./.github/actions/setup-protoc
 

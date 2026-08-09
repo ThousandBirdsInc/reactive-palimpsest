@@ -13,9 +13,8 @@
 
 use std::sync::Arc;
 
-use rustls::client::danger::{
-    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
@@ -38,7 +37,7 @@ impl TlsSettings {
     pub(crate) fn client_config(&self) -> Result<Arc<ClientConfig>, PostgresRuntimeError> {
         let config = if let Some(pem) = &self.root_ca_pem {
             let mut roots = RootCertStore::empty();
-            let certs = rustls_pemfile::certs(&mut pem.as_bytes())
+            let certs = CertificateDer::pem_slice_iter(pem.as_bytes())
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|err| PostgresRuntimeError::Tls(format!("unreadable root CA: {err}")))?;
             if certs.is_empty() {

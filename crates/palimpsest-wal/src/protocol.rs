@@ -273,7 +273,15 @@ fn decode_delete(catalog: &Catalog, decoder: &mut Decoder) -> Result<DecodedEven
 fn decode_truncate(decoder: &mut Decoder) -> Result<DecodedEvent> {
     let relation_count = decoder.u32("truncate relation count")?;
     let options = decoder.u8("truncate options")?;
-    let mut tables = Vec::with_capacity(usize::try_from(relation_count).unwrap_or(usize::MAX));
+    // `relation_count` comes off the wire and can claim up to ~4 billion
+    // relations, which reserved ~16 GB and got the process OOM-killed
+    // before the loop below ever noticed the ids were not there. Every
+    // id costs four bytes, so reserve only what the rest of the buffer
+    // could actually hold and let the loop report the truncated message.
+    let capacity = usize::try_from(relation_count)
+        .unwrap_or(usize::MAX)
+        .min(decoder.remaining() / 4);
+    let mut tables = Vec::with_capacity(capacity);
     for _ in 0..relation_count {
         tables.push(TableId::new(decoder.u32("truncate relation id")?));
     }
@@ -326,6 +334,10 @@ struct Decoder {
 impl Decoder {
     const fn new(bytes: Bytes) -> Self {
         Self { bytes }
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.remaining()
     }
 
     fn finish(&self) -> Result<()> {
@@ -602,6 +614,24 @@ mod tests {
     fn truncated_type_message_is_rejected_not_silently_accepted() {
         let mut catalog = Catalog::new();
         assert!(decode_pgoutput_message(&mut catalog, Bytes::from_static(b"Y")).is_err());
+    }
+
+    #[test]
+    fn truncate_with_an_absurd_relation_count_errors_instead_of_allocating() {
+        // Found by the `pgoutput_decoder` fuzz target: the relation count
+        // was trusted as a capacity hint, so a four-byte lie reserved
+        // gigabytes and the process was OOM-killed before decoding the
+        // (absent) relation ids.
+        let mut catalog = Catalog::new();
+        let mut bytes = BytesMut::new();
+        bytes.put_u8(b'T');
+        bytes.put_u32(u32::MAX);
+        bytes.put_u8(0);
+        bytes.put_u32(1);
+        assert!(matches!(
+            decode_pgoutput_message(&mut catalog, bytes.freeze()),
+            Err(WalError::UnexpectedEof("truncate relation id"))
+        ));
     }
 
     fn relation(table: TableId, columns: &[(&str, u32)]) -> Bytes {

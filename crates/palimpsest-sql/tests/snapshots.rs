@@ -84,7 +84,7 @@ fn render_build_plan(mir: &palimpsest_sql::mir::MirGraph) -> String {
         lines.push(format!(
             "{}: {:?} <- [{}]",
             node.index(),
-            &mir.graph()[node],
+            mir.graph()[node],
             inputs
         ));
     }

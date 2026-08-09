@@ -249,12 +249,13 @@ async fn ensure_publication(
                 quote_ident(publication),
                 table_list
             );
-            client.simple_query(&ddl).await.map_err(|err| {
-                PostgresRuntimeError::Publication {
+            client
+                .simple_query(&ddl)
+                .await
+                .map_err(|err| PostgresRuntimeError::Publication {
                     publication: publication.to_owned(),
                     detail: err.to_string(),
-                }
-            })?;
+                })?;
             tracing::info!(%publication, "publication reconciled to the derived table set");
         }
     } else {
@@ -263,12 +264,13 @@ async fn ensure_publication(
             quote_ident(publication),
             table_list
         );
-        client.simple_query(&ddl).await.map_err(|err| {
-            PostgresRuntimeError::Publication {
+        client
+            .simple_query(&ddl)
+            .await
+            .map_err(|err| PostgresRuntimeError::Publication {
                 publication: publication.to_owned(),
                 detail: err.to_string(),
-            }
-        })?;
+            })?;
         tracing::info!(%publication, "publication created");
     }
     Ok(())
@@ -397,10 +399,11 @@ async fn snapshot_in_transaction(
             table: "<fence>".to_owned(),
             detail: "pg_current_snapshot() returned no row".to_owned(),
         })?;
-    let fence = SnapshotFence::parse(&fence_text).ok_or_else(|| PostgresRuntimeError::Snapshot {
-        table: "<fence>".to_owned(),
-        detail: format!("unparseable snapshot '{fence_text}'"),
-    })?;
+    let fence =
+        SnapshotFence::parse(&fence_text).ok_or_else(|| PostgresRuntimeError::Snapshot {
+            table: "<fence>".to_owned(),
+            detail: format!("unparseable snapshot '{fence_text}'"),
+        })?;
     let lsn: u64 = lsn_text
         .parse()
         .map_err(|_| PostgresRuntimeError::Snapshot {
@@ -436,13 +439,14 @@ async fn snapshot_table(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!("SELECT {column_list} FROM {}", qualified_name(table));
-    let messages = client
-        .simple_query(&sql)
-        .await
-        .map_err(|err| PostgresRuntimeError::Snapshot {
-            table: table.name.clone(),
-            detail: err.to_string(),
-        })?;
+    let messages =
+        client
+            .simple_query(&sql)
+            .await
+            .map_err(|err| PostgresRuntimeError::Snapshot {
+                table: table.name.clone(),
+                detail: err.to_string(),
+            })?;
 
     let mut rows = Vec::new();
     for message in &messages {
@@ -567,7 +571,10 @@ async fn stream_session(
     if let Err(err) = session.start(&config.slot, &config.publication, 0).await {
         // A missing REPLICATION grant is configuration, not
         // transport: name it and stop rather than retry forever.
-        if matches!(err, PostgresRuntimeError::MissingReplicationPrivilege { .. }) {
+        if matches!(
+            err,
+            PostgresRuntimeError::MissingReplicationPrivilege { .. }
+        ) {
             return SessionOutcome::Fatal(err.to_string());
         }
         return SessionOutcome::Disconnected(err.to_string());

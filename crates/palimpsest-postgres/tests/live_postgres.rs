@@ -111,8 +111,7 @@ impl Cluster {
             .and_then(|listener| listener.local_addr())
             .map_err(|err| format!("pick port: {err}"))?
             .port();
-        let data_dir =
-            std::env::temp_dir().join(format!("{prefix}-{}-{port}", std::process::id()));
+        let data_dir = std::env::temp_dir().join(format!("{prefix}-{}-{port}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
         std::fs::create_dir_all(&data_dir).map_err(|err| format!("mkdir: {err}"))?;
 
@@ -130,8 +129,16 @@ impl Cluster {
             // verification has something to match.
             let status = Command::new("openssl")
                 .args([
-                    "req", "-new", "-x509", "-days", "1", "-nodes", "-text", "-subj",
-                    "/CN=localhost", "-out",
+                    "req",
+                    "-new",
+                    "-x509",
+                    "-days",
+                    "1",
+                    "-nodes",
+                    "-text",
+                    "-subj",
+                    "/CN=localhost",
+                    "-out",
                 ])
                 .arg(cluster.data_dir.join("server.crt"))
                 .arg("-keyout")
@@ -484,10 +491,9 @@ async fn postgres_runtime_streams_over_tls() {
 
         // Prove the walsender session is actually encrypted rather
         // than inferring it from the absence of an error.
-        let (check, connection) =
-            tokio_postgres::connect(&cluster.dsn(), tokio_postgres::NoTls)
-                .await
-                .expect("check connect");
+        let (check, connection) = tokio_postgres::connect(&cluster.dsn(), tokio_postgres::NoTls)
+            .await
+            .expect("check connect");
         tokio::spawn(async move {
             let _ = connection.await;
         });

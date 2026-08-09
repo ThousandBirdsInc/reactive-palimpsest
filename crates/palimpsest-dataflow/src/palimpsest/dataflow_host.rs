@@ -887,11 +887,7 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert(
             TableId::new(40),
-            vec![row(vec![
-                Datum::I64(7),
-                ticket_name.clone(),
-                Datum::I64(3),
-            ])],
+            vec![row(vec![Datum::I64(7), ticket_name.clone(), Datum::I64(3)])],
         );
         inputs.insert(
             TableId::new(41),

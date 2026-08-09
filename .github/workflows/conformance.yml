@@ -25,31 +25,21 @@ jobs:
     name: pg${{ matrix.pg }} conformance
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The failure path auto-files a P1 issue, which the default
+    # read-only token cannot do.
+    permissions:
+      contents: read
+      issues: write
     strategy:
       fail-fast: false
       matrix:
         pg: [16, 17]
-    services:
-      postgres:
-        image: postgres:${{ matrix.pg }}
-        env:
-          POSTGRES_USER: palimpsest
-          POSTGRES_PASSWORD: palimpsest
-          POSTGRES_DB: palimpsest
-        ports:
-          - 5432:5432
-        # `wal_level=logical` is required for §18.13.3 (replication)
-        # and §18.13.6 (replication smoke). The other settings just
-        # raise the slot/sender counts so the harness can run idempotent
-        # drop+create cycles.
-        options: >-
-          --health-cmd "pg_isready -U palimpsest -d palimpsest"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-          -c wal_level=logical
-          -c max_replication_slots=8
-          -c max_wal_senders=8
+    # Postgres is started with an explicit `docker run` rather than a
+    # `services:` block. Service `options:` are spliced into `docker
+    # create`, where `-c` is `--cpu-shares`, so the server flags below
+    # made every run die with `invalid argument "wal_level=logical" for
+    # "-c, --cpu-shares"`. Server flags have to follow the image name,
+    # which only a plain `docker run` allows.
     env:
       PALIMPSEST_PG_URL: postgres://palimpsest:palimpsest@localhost:5432/palimpsest
     steps:
@@ -91,6 +81,21 @@ jobs:
           restore-keys: |
             ubuntu-stable-conformance-target-pg${{ matrix.pg }}-
 
+      - name: Start Postgres
+        run: |
+          # `wal_level=logical` is required for §18.13.3 (replication)
+          # and §18.13.6 (replication smoke). The other settings just
+          # raise the slot/sender counts so the harness can run
+          # idempotent drop+create cycles.
+          docker run -d --name palimpsest-pg -p 5432:5432 \
+            -e POSTGRES_USER=palimpsest \
+            -e POSTGRES_PASSWORD=palimpsest \
+            -e POSTGRES_DB=palimpsest \
+            postgres:${{ matrix.pg }} \
+            -c wal_level=logical \
+            -c max_replication_slots=8 \
+            -c max_wal_senders=8
+
       - name: Wait for Postgres
         run: |
           for i in $(seq 1 30); do
@@ -100,6 +105,7 @@ jobs:
             sleep 2
           done
           echo "Postgres did not become ready"
+          docker logs palimpsest-pg || true
           exit 1
 
       - name: Show Postgres version + replication settings

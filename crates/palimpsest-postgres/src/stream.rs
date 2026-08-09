@@ -532,8 +532,9 @@ pub(crate) fn format_lsn(lsn: u64) -> String {
 fn pg_now_micros() -> i64 {
     let unix_micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|elapsed| i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX))
-        .unwrap_or(0);
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX)
+        });
     unix_micros - PG_EPOCH_OFFSET_MICROS
 }
 

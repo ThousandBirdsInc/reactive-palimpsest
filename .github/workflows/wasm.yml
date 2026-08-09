@@ -24,6 +24,9 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy
 
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
       - name: Install protoc
         uses: ./.github/actions/setup-protoc
 
@@ -72,6 +75,9 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
 
       - name: Install protoc
         uses: ./.github/actions/setup-protoc

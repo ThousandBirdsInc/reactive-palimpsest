@@ -1,0 +1,24 @@
+# `cargo audit --deny warnings` (weekly, `.github/workflows/audit.yml`)
+# treats informational advisories as failures so that anything new gets
+# a look. These four are known, have no upgrade available, and are
+# re-reviewed when that changes.
+#
+# `deny.toml` carries the same list for the per-PR `cargo deny` gate,
+# minus `RUSTSEC-2022-0054`: cargo-audit scans the raw lockfile, while
+# cargo-deny resolves features first and so never sees `wee_alloc`.
+# Vulnerabilities are never ignored in either file.
+
+[advisories]
+ignore = [
+    # `memmap` unmaintained. Transitive via the dataflow/timely stack.
+    "RUSTSEC-2020-0077",
+    # `wee_alloc` unmaintained. Optional, off by default; only reachable
+    # by opting into the `palimpsest-client-js/wee_alloc` feature for a
+    # smaller wasm payload. Present in the lockfile either way.
+    "RUSTSEC-2022-0054",
+    # `paste` (proc-macro) archived by its author. Transitive via
+    # columnation -> timely. No drop-in replacement adopted upstream.
+    "RUSTSEC-2024-0436",
+    # `bincode` 1.x unmaintained advisory. Transitive only.
+    "RUSTSEC-2025-0141",
+]
