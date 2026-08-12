@@ -847,6 +847,7 @@ fn handle_event(
         | DecodedEvent::Stream(_)
         | DecodedEvent::TwoPhase(_)
         | DecodedEvent::Truncate(_)
+        | DecodedEvent::Type(_)
         | DecodedEvent::Reconnect { .. }
         | DecodedEvent::Resync { .. } => {
             // Demo doesn't react to these yet. A production consumer

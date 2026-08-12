@@ -17,6 +17,8 @@
 //! | POST   | `/api/accounts/withdraw`     | `{ "actor_user_id": …, "amount_cents": … }` |
 //! | POST   | `/api/accounts/transfer`     | `{ "actor_user_id": …, "to_user_id": …, "amount_cents": … }` |
 //! | GET    | `/api/orders/stats`          | -                                     |
+//! | GET    | `/api/permissions`           | -                                     |
+//! | PUT    | `/api/permissions`           | `{ "toml": "..." }`                   |
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -32,6 +34,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::warn;
 
 use crate::auth::{lookup, mint_token, USERS};
+use crate::permissions::{PermissionsState, DEFAULT_PERMISSIONS_TOML};
 use crate::state::{OrderStore, Post, Store};
 use crate::ws::{ws_subscribe, WsState};
 
@@ -47,6 +50,9 @@ pub struct AppState {
     pub store: Arc<Store>,
     /// Read-side mirror of `orders`. Same lag semantics as `store`.
     pub orders: Arc<OrderStore>,
+    /// Permissions-DSL playground: applied TOML source + the handle
+    /// that hot-swaps compiled rules onto the running `SyncEngine`.
+    pub permissions: Arc<PermissionsState>,
 }
 
 pub fn router(state: AppState, grpc_addr: SocketAddr) -> Router {
@@ -66,6 +72,10 @@ pub fn router(state: AppState, grpc_addr: SocketAddr) -> Router {
         .route("/api/accounts/deposit", axum::routing::post(deposit))
         .route("/api/accounts/withdraw", axum::routing::post(withdraw))
         .route("/api/accounts/transfer", axum::routing::post(transfer))
+        .route(
+            "/api/permissions",
+            get(get_permissions).put(put_permissions),
+        )
         .with_state(state);
 
     let ws = Router::new()
@@ -256,6 +266,42 @@ async fn bulk_add_orders(
 
 async fn order_stats(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "total_rows": state.orders.row_count() }))
+}
+
+/// Currently-applied permissions DSL source, its rule summaries, and
+/// the boot default (so the editor's reset button doesn't hardcode
+/// the TOML client-side).
+async fn get_permissions(State(state): State<AppState>) -> Json<Value> {
+    let (toml, rules) = state.permissions.snapshot();
+    Json(json!({
+        "toml": toml,
+        "default_toml": DEFAULT_PERMISSIONS_TOML,
+        "rules": rules,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PutPermissionsRequest {
+    toml: String,
+}
+
+/// Compile the submitted DSL and hot-swap it onto the running server.
+/// Parse/compile failures return 422 with the compiler's message and
+/// leave the active rule set untouched.
+async fn put_permissions(
+    State(state): State<AppState>,
+    Json(body): Json<PutPermissionsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match state.permissions.apply(&body.toml) {
+        Ok(rules) => Ok(Json(json!({ "rules": rules }))),
+        Err(err) => {
+            warn!(%err, "permissions update rejected");
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": err.to_string() })),
+            ))
+        }
+    }
 }
 
 #[derive(Deserialize)]

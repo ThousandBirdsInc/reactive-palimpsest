@@ -19,13 +19,14 @@
 mod api;
 mod auth;
 mod db;
+mod permissions;
 mod state;
 mod ws;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use palimpsest_permissions::{compile_rules, PermissionRule, UserContextSchema};
+use palimpsest_permissions::parse_config;
 use palimpsest_server::{JwtAuthenticator, Palimpsest};
 use palimpsest_sql::{Catalog, ColumnSchema, ColumnType, TableSchema};
 use palimpsest_wal::TableId;
@@ -145,27 +146,13 @@ async fn main() -> std::process::ExitCode {
     let grpc_addr = addr_from_env("PALIMPSEST_DEMO_GRPC_ADDR", DEFAULT_GRPC_ADDR);
     let http_addr = addr_from_env("PALIMPSEST_DEMO_HTTP_ADDR", DEFAULT_HTTP_ADDR);
 
-    let user_schema = UserContextSchema::new([
-        ("id".to_owned(), ColumnType::Text),
-        ("is_admin".to_owned(), ColumnType::Bool),
-    ]);
-    let permission_rules = compile_rules(
-        &[
-            PermissionRule::new(
-                "posts_visibility",
-                "posts",
-                "published = true OR $user.is_admin = true",
-            ),
-            PermissionRule::new(
-                "accounts_visibility",
-                "accounts",
-                "owner_user_id = $user.id OR $user.is_admin = true",
-            ),
-        ],
-        &demo_catalog(),
-        &user_schema,
-    )
-    .expect("compile permission rules");
+    // Boot rules live as TOML so the permissions playground can hand
+    // the same source to the browser editor and round-trip edits
+    // through `parse_config` (see `permissions.rs`).
+    let permission_rules = parse_config(permissions::DEFAULT_PERMISSIONS_TOML)
+        .expect("parse default permissions TOML")
+        .compile(&demo_catalog())
+        .expect("compile permission rules");
 
     let palimpsest = Palimpsest::builder()
         .with_wal(DemoWalRuntime::new(
@@ -187,6 +174,14 @@ async fn main() -> std::process::ExitCode {
         .build()
         .expect("palimpsest build");
 
+    // Handle captured before `palimpsest` moves into the serve task;
+    // the write API uses it to hot-swap rules from the playground.
+    let permissions_state = Arc::new(permissions::PermissionsState::new(
+        demo_catalog(),
+        palimpsest.handle(),
+        permissions::DEFAULT_PERMISSIONS_TOML,
+    ));
+
     let (shutdown_grpc_tx, shutdown_grpc_rx) = oneshot::channel::<()>();
     let (shutdown_http_tx, shutdown_http_rx) = oneshot::channel::<()>();
 
@@ -206,6 +201,7 @@ async fn main() -> std::process::ExitCode {
         pg: Arc::clone(&pg.client),
         store: Arc::clone(&store),
         orders: Arc::clone(&order_store),
+        permissions: permissions_state,
     };
     let http_handle = tokio::spawn(async move {
         info!(%http_addr, "write API listening");

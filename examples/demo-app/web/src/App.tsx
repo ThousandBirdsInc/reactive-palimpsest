@@ -5,7 +5,13 @@ import {
   usePalimpsestSubscription,
 } from "@palimpsest/client/react";
 import * as wasm from "../pkg/palimpsest_client_js";
-import { ApiClient, DemoUser, PALIMPSEST_URL } from "./api";
+import {
+  ApiClient,
+  DemoUser,
+  PALIMPSEST_URL,
+  PermissionRuleSummary,
+  PermissionsSnapshot,
+} from "./api";
 
 interface Post {
   id: bigint;
@@ -143,14 +149,76 @@ const SECTOR_LABEL: Record<Sector, string> = {
   media: "Media",
 };
 
-/// Permission rule as configured on the server (see
-/// `examples/demo-app/server/src/main.rs::permission_rules`). Shown
-/// verbatim so the user can read the same predicate the SyncEngine's
-/// rewriter compiles into the query graph.
-const PERMISSION_RULE = {
-  table: "posts",
-  predicate: "published = true OR $user.is_admin = true",
-};
+/// Example rule sets for the permissions playground. Each chip loads
+/// its TOML into the editor (it is NOT auto-applied — the user clicks
+/// Apply so the compile step stays visible). The `[[user_context]]`
+/// block always declares `id`/`is_admin` because those are the only
+/// fields the demo JWT supplies.
+const DSL_USER_CONTEXT = `[[user_context]]
+name = "id"
+type = "text"
+
+[[user_context]]
+name = "is_admin"
+type = "bool"`;
+
+const DSL_ACCOUNTS_RULE = `[[rule]]
+name = "accounts_visibility"
+table = "accounts"
+predicate = "owner_user_id = $user.id OR $user.is_admin = true"`;
+
+const DSL_PRESETS: { id: string; label: string; toml: string }[] = [
+  {
+    id: "published-only",
+    label: "Hide drafts from everyone",
+    toml: `${DSL_USER_CONTEXT}
+
+[[rule]]
+name = "posts_published_only"
+table = "posts"
+predicate = "published = true"
+
+${DSL_ACCOUNTS_RULE}
+`,
+  },
+  {
+    id: "admins-only",
+    label: "Posts: admins only",
+    toml: `${DSL_USER_CONTEXT}
+
+[[rule]]
+name = "posts_admins_only"
+table = "posts"
+predicate = "$user.is_admin = true"
+
+${DSL_ACCOUNTS_RULE}
+`,
+  },
+  {
+    id: "open-accounts",
+    label: "Drop the accounts rule",
+    toml: `${DSL_USER_CONTEXT}
+
+[[rule]]
+name = "posts_visibility"
+table = "posts"
+predicate = "published = true OR $user.is_admin = true"
+`,
+  },
+  {
+    id: "broken",
+    label: "Compile error demo",
+    toml: `${DSL_USER_CONTEXT}
+
+[[rule]]
+name = "posts_by_author"
+table = "posts"
+predicate = "author_id = $user.id"
+
+${DSL_ACCOUNTS_RULE}
+`,
+  },
+];
 
 function listSqlFor(filter: Filter): string {
   const where = FILTERS.find((f) => f.id === filter)?.predicate;
@@ -175,6 +243,30 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<DemoUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+
+  // Permissions playground state. `perms` mirrors what the server has
+  // actually applied (source + parsed rules); the editor keeps its own
+  // draft and reports successful applies back through `onPermsApplied`.
+  const [perms, setPerms] = useState<PermissionsSnapshot | null>(null);
+  const [permsLoadError, setPermsLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .getPermissions()
+      .then((snap) => {
+        if (alive) setPerms(snap);
+      })
+      .catch((e) => {
+        if (alive) setPermsLoadError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+
+  const rulesFor = (table: string): PermissionRuleSummary[] =>
+    (perms?.rules ?? []).filter((r) => r.table === table);
 
   // Load the persona list once; default to the first entry so the
   // page has a connection on first paint.
@@ -472,8 +564,8 @@ export default function App() {
           </div>
         </header>
         <p className="rule-text">
-          Active permission rule on <code>{PERMISSION_RULE.table}</code>:{" "}
-          <code>{PERMISSION_RULE.predicate}</code>
+          Active rule{rulesFor("posts").length === 1 ? "" : "s"} on{" "}
+          <code>posts</code>: <RuleList rules={rulesFor("posts")} />
         </p>
         <p className="rule-text">
           User context: <code>$user.id = "{currentUser?.id ?? "—"}"</code>
@@ -484,6 +576,18 @@ export default function App() {
         </p>
         {authError && <div className="error-banner">{authError}</div>}
       </section>
+
+      <PermissionsPlayground
+        perms={perms}
+        loadError={permsLoadError}
+        onApply={async (toml) => {
+          const rules = await api.updatePermissions(toml);
+          setPerms((prev) =>
+            prev ? { ...prev, toml, rules } : prev,
+          );
+          return rules;
+        }}
+      />
 
       <p>
         connection:{" "}
@@ -635,10 +739,10 @@ export default function App() {
         </header>
         <pre className="sql">{ACCOUNTS_SQL}</pre>
         <p className="rule-text">
-          Account visibility rule:{" "}
-          <code>owner_user_id = $user.id OR $user.is_admin = true</code>. Writes
-          are stricter: each persona can deposit to, withdraw from, and transfer
-          out of only their own account.
+          Account visibility rule{rulesFor("accounts").length === 1 ? "" : "s"}:{" "}
+          <RuleList rules={rulesFor("accounts")} />. Writes are stricter: each
+          persona can deposit to, withdraw from, and transfer out of only their
+          own account.
         </p>
 
         <div className="account-controls">
@@ -763,6 +867,192 @@ export default function App() {
         by <code>JwtAuthenticator</code>.
       </footer>
     </>
+  );
+}
+
+/// Renders the predicates guarding one table. Rules over a table are
+/// disjunctive (a row is visible iff at least one predicate passes),
+/// so multiple predicates join with "OR". No rule means no policy —
+/// the table is visible to everyone.
+function RuleList({ rules }: { rules: PermissionRuleSummary[] }) {
+  if (rules.length === 0) {
+    return <em>none — table visible to every persona</em>;
+  }
+  return (
+    <>
+      {rules.map((rule, i) => (
+        <span key={rule.name}>
+          {i > 0 && " OR "}
+          <code>{rule.predicate}</code>
+        </span>
+      ))}
+    </>
+  );
+}
+
+interface PermissionsPlaygroundProps {
+  perms: PermissionsSnapshot | null;
+  loadError: string | null;
+  /// Submits the draft to the server; resolves with the parsed rules
+  /// on success, throws with the compiler's message on rejection.
+  onApply: (toml: string) => Promise<PermissionRuleSummary[]>;
+}
+
+/// Editor + controls for the permission-rule TOML DSL. Apply compiles
+/// the draft server-side and hot-swaps the rule set on the running
+/// SyncEngine; every live subscription is sent
+/// `Resync(PermissionsChanged)` and resubscribes under the new rules,
+/// so the other panels re-filter immediately. A rejected draft leaves
+/// the active rules untouched and shows the compile error inline.
+function PermissionsPlayground({
+  perms,
+  loadError,
+  onApply,
+}: PermissionsPlaygroundProps) {
+  const [draft, setDraft] = useState("");
+  const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [applied, setApplied] = useState<{
+    count: number;
+    nonce: number;
+  } | null>(null);
+
+  // Seed the editor once the first snapshot lands; after that the
+  // draft belongs to the user and applies flow back through `perms`.
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (perms && !seeded.current) {
+      seeded.current = true;
+      setDraft(perms.toml);
+    }
+  }, [perms]);
+
+  const dirty = perms !== null && draft !== perms.toml;
+
+  function loadIntoEditor(toml: string) {
+    setDraft(toml);
+    setApplyError(null);
+  }
+
+  async function apply() {
+    if (!perms || applying) return;
+    setApplying(true);
+    setApplyError(null);
+    try {
+      const rules = await onApply(draft);
+      setApplied((prev) => ({
+        count: rules.length,
+        nonce: (prev?.nonce ?? 0) + 1,
+      }));
+    } catch (e) {
+      setApplied(null);
+      setApplyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  return (
+    <section className="panel">
+      <header className="panel-head">
+        <h2>Permissions DSL — live rule editor</h2>
+        <div className="filters" role="group" aria-label="Permissions actions">
+          <button
+            type="button"
+            className="chip"
+            disabled={!perms || draft === perms.default_toml}
+            onClick={() => perms && loadIntoEditor(perms.default_toml)}
+          >
+            Reset to default
+          </button>
+          <button
+            type="button"
+            className="chip chip-active"
+            disabled={!perms || applying || !dirty}
+            onClick={apply}
+          >
+            {applying ? "Compiling…" : "Apply rules"}
+          </button>
+        </div>
+      </header>
+
+      <p className="rule-text">
+        This is the same TOML DSL the server loads from configuration:{" "}
+        <code>[[user_context]]</code> declares the fields{" "}
+        <code>$user.*</code> may reference, and each <code>[[rule]]</code>{" "}
+        guards one table. Applying compiles the rules against the catalog and
+        hot-swaps them onto the running SyncEngine — every live subscription
+        gets <code>Resync(PermissionsChanged)</code> and resubscribes under
+        the new rules, so the panels below re-filter without a reload. Try a
+        preset, tweak it, and switch personas to see the effect.
+      </p>
+
+      <div className="filters dsl-presets" role="group" aria-label="Example rule sets">
+        {DSL_PRESETS.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            className="chip"
+            disabled={!perms}
+            title="Load this rule set into the editor (does not apply it)"
+            onClick={() => loadIntoEditor(preset.toml)}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+
+      <textarea
+        className="dsl-editor"
+        spellCheck={false}
+        value={perms ? draft : "loading current rules…"}
+        disabled={!perms}
+        onChange={(e) => setDraft(e.target.value)}
+        aria-label="Permissions DSL source"
+      />
+
+      {loadError && (
+        <div className="error-banner">
+          failed to load current rules: {loadError}
+        </div>
+      )}
+      {applyError && (
+        <div className="error-banner">
+          <strong>rejected — </strong>
+          {applyError}
+        </div>
+      )}
+      {applied && !applyError && (
+        <motion.div
+          key={applied.nonce}
+          className="dsl-flash"
+          initial={{ opacity: 0.4, y: -2 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ type: "spring", stiffness: 320, damping: 24 }}
+          aria-live="polite"
+        >
+          applied — {applied.count} rule{applied.count === 1 ? "" : "s"}{" "}
+          compiled, active subscriptions resynced
+        </motion.div>
+      )}
+
+      <div className="dsl-rules" aria-label="Active compiled rules">
+        <span className="dsl-rules-title">active rules</span>
+        {(perms?.rules ?? []).length === 0 && (
+          <p className="empty">
+            No rules — every table is visible to every persona.
+          </p>
+        )}
+        {(perms?.rules ?? []).map((rule) => (
+          <div className="dsl-rule" key={rule.name}>
+            <span className="dsl-rule-name">{rule.name}</span>
+            <span className="dsl-rule-table">{rule.table}</span>
+            <span className="dsl-rule-mode">{rule.mode}</span>
+            <code className="dsl-rule-pred">{rule.predicate}</code>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
