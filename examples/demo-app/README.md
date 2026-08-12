@@ -21,6 +21,11 @@ one long-lived connection.
   - counts-by-status query using a CTE
 - Snapshot delivery and live insert/update/delete diffs from the demo
   WAL journal.
+- A permissions-DSL playground: edit the TOML rule DSL in the browser,
+  apply it to the running SyncEngine (`PUT /api/permissions` →
+  `PalimpsestHandle::update_permissions`), and watch every live
+  subscription resync under the new rules. Rejected rule sets surface
+  the compile error inline and leave the active rules untouched.
 
 ## Architecture
 
@@ -41,6 +46,8 @@ server container
   |     POST   /api/posts
   |     PATCH  /api/posts/:id
   |     DELETE /api/posts/:id
+  |     GET    /api/permissions
+  |     PUT    /api/permissions
   |
   |-- WebSocket bridge (:3000/ws/subscribe)
   |     browser binary WS frames

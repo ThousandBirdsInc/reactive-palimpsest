@@ -214,6 +214,46 @@
       }
 
       .chip:disabled { opacity: 0.45; cursor: not-allowed; }
+
+      .dsl-presets { flex-wrap: wrap; margin: 0 0 10px; }
+      .dsl-editor {
+        display: block; width: 100%; box-sizing: border-box;
+        min-height: 240px; resize: vertical;
+        font: 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        background: #f7f9fc; color: #1a1a1a;
+        border: 1px solid #e1e7ef; border-left: 3px solid #a64ac9;
+        border-radius: 4px; padding: 10px 12px;
+      }
+      .dsl-editor:focus {
+        outline: none; border-color: #a64ac9;
+        box-shadow: 0 0 0 2px rgba(166, 74, 201, 0.15);
+      }
+      .dsl-editor:disabled { color: #999; }
+      .dsl-flash {
+        margin: 8px 0; padding: 6px 12px; border-radius: 4px;
+        background: #e6f4ec; border: 1px solid #bfe0cc;
+        color: #137333; font-size: 13px;
+      }
+      .dsl-rules { margin-top: 12px; display: grid; gap: 6px; }
+      .dsl-rules-title {
+        font-size: 11px; font-weight: 600; color: #6b7280;
+        text-transform: uppercase; letter-spacing: 0.05em;
+      }
+      .dsl-rule {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+        border: 1px solid #eee; border-radius: 6px; padding: 6px 10px;
+      }
+      .dsl-rule-name {
+        font: 600 12px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        color: #1f2937;
+      }
+      .dsl-rule-table, .dsl-rule-mode {
+        font-size: 11px; padding: 1px 6px; border-radius: 3px;
+        text-transform: uppercase; letter-spacing: 0.05em;
+      }
+      .dsl-rule-table { background: #e8f0fe; color: #1a56b0; }
+      .dsl-rule-mode  { background: #f3e8fd; color: #7b2fa3; }
+      .dsl-rule-pred  { margin-left: auto; }
       .rule-text { margin: 4px 0; font-size: 13px; color: #444; }
       .status { font-size: 12px; padding: 2px 8px; border-radius: 4px;
                 background: #eee; color: #444; }

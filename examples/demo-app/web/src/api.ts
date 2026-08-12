@@ -36,6 +36,25 @@ export interface TokenResponse {
   user: DemoUser;
 }
 
+export type PermissionRuleMode = "row_visibility" | "subscribe" | "both";
+
+/// One `[[rule]]` block as the server parsed it — echoed back so the
+/// UI can show what's actually active rather than what was typed.
+export interface PermissionRuleSummary {
+  name: string;
+  table: string;
+  predicate: string;
+  mode: PermissionRuleMode;
+}
+
+export interface PermissionsSnapshot {
+  /// TOML source currently applied to the running SyncEngine.
+  toml: string;
+  /// TOML the server booted with (used by the reset button).
+  default_toml: string;
+  rules: PermissionRuleSummary[];
+}
+
 export class ApiClient {
   constructor(public readonly base = DEFAULT_API_URL) {}
 
@@ -125,6 +144,35 @@ export class ApiClient {
       to_user_id: toUserId,
       amount_cents: amountCents,
     });
+  }
+
+  async getPermissions(): Promise<PermissionsSnapshot> {
+    const res = await fetch(`${this.base}/api/permissions`);
+    if (!res.ok) throw new Error(`getPermissions: ${res.status}`);
+    return (await res.json()) as PermissionsSnapshot;
+  }
+
+  /// Submit edited DSL source. On a 422 the server's parse/compile
+  /// error message is surfaced as the thrown Error's message so the
+  /// editor can display it verbatim.
+  async updatePermissions(toml: string): Promise<PermissionRuleSummary[]> {
+    const res = await fetch(`${this.base}/api/permissions`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ toml }),
+    });
+    if (!res.ok) {
+      let detail = `updatePermissions: ${res.status}`;
+      try {
+        const body = (await res.json()) as { error?: string };
+        if (body.error) detail = body.error;
+      } catch {
+        // Non-JSON error body; keep the status-code message.
+      }
+      throw new Error(detail);
+    }
+    const body = (await res.json()) as { rules: PermissionRuleSummary[] };
+    return body.rules;
   }
 
   private async accountWrite(
