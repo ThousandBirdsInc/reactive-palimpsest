@@ -290,6 +290,67 @@
         color: #999; font-size: 12px; }
       code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px;
         font-size: 12px; }
+
+      /* ---- page nav ---- */
+      nav.top-nav { display: flex; gap: 4px; margin: 0 0 20px;
+        border-bottom: 1px solid #e5e5e5; }
+      nav.top-nav a { padding: 8px 14px; font-size: 13px; color: #555;
+        text-decoration: none; border: 1px solid transparent;
+        border-bottom: none; border-radius: 6px 6px 0 0; }
+      nav.top-nav a:hover { background: #f5f5f5; }
+      nav.top-nav a.top-nav-active { color: #1a73e8; font-weight: 600;
+        background: white; border-color: #e5e5e5;
+        margin-bottom: -1px; padding-bottom: 9px; }
+
+      /* ---- local-first page ---- */
+      .lf-status-row { display: flex; flex-wrap: wrap; gap: 8px;
+        margin: 10px 0 0; }
+      .lf-chip { display: inline-flex; align-items: center; gap: 6px;
+        font-size: 12px; padding: 3px 10px; border-radius: 999px;
+        border: 1px solid #ddd; background: #fafafa; color: #333;
+        font-variant-numeric: tabular-nums; }
+      .lf-chip-label { text-transform: uppercase; letter-spacing: 0.05em;
+        font-size: 10px; color: #888; }
+      .lf-chip-ok { border-color: #b7dfc4; background: #e6f4ea;
+        color: #137333; }
+      .lf-chip-ok .lf-chip-label { color: #137333aa; }
+      .lf-chip-warn { border-color: #f2dda2; background: #fef7e0;
+        color: #b06000; }
+      .lf-chip-warn .lf-chip-label { color: #b06000aa; }
+      .lf-chip-err { border-color: #f3b6b3; background: #fce8e6;
+        color: #c5221f; }
+      .lf-chip-err .lf-chip-label { color: #c5221faa; }
+
+      .lf-compare { display: grid; grid-template-columns: 1fr 1fr;
+        gap: 14px; }
+      @media (max-width: 700px) { .lf-compare { grid-template-columns: 1fr; } }
+      .lf-col-title { margin: 0 0 8px; font-size: 12px; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
+      .lf-col-hint { font-weight: 400; text-transform: none;
+        letter-spacing: 0; color: #999; }
+
+      table.lf-table { width: 100%; border-collapse: collapse;
+        font-size: 12.5px; font-variant-numeric: tabular-nums; }
+      table.lf-table th { text-align: left; font-weight: 600; color: #666;
+        border-bottom: 1px solid #e1e7ef; padding: 4px 8px; }
+      table.lf-table td { border-bottom: 1px solid #f0f0f0;
+        padding: 4px 8px; }
+
+      ul.lf-events { list-style: none; padding: 0; margin: 0;
+        font-size: 12.5px; }
+      ul.lf-events li { display: flex; align-items: baseline; gap: 10px;
+        padding: 4px 2px; border-bottom: 1px dashed #f0f0f0; }
+      .lf-event-time { color: #999; font-variant-numeric: tabular-nums;
+        font-size: 11px; }
+      .lf-event-kind { font-size: 10.5px; padding: 1px 7px;
+        border-radius: 999px; text-transform: uppercase;
+        letter-spacing: 0.04em; background: #eef1f5; color: #556; }
+      .lf-event-applied { background: #e8f0fe; color: #1a56b8; }
+      .lf-event-mutationSettled { background: #e6f4ea; color: #137333; }
+      .lf-event-mutationConflicted { background: #fef7e0; color: #b06000; }
+      .lf-event-mutationFailed { background: #fce8e6; color: #c5221f; }
+      .lf-event-mirrorError { background: #fce8e6; color: #c5221f; }
+      .lf-event-detail { color: #444; }
     </style>
   </head>
   <body>

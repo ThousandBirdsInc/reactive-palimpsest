@@ -137,7 +137,12 @@ docker compose down
 
 ## Using the App
 
-The page starts with three seeded posts. You can:
+The app has two pages behind a hash router:
+
+- `#/` — **Live queries** (default): the live-subscription demo below.
+- `#/local-first` — **Local-first replica**: see the next section.
+
+The live-queries page starts with three seeded posts. You can:
 
 - create a new published post
 - filter the live list by all, published, or drafts
@@ -148,6 +153,30 @@ The page starts with three seeded posts. You can:
 Both panels subscribe through Palimpsest. Writes go through the HTTP API,
 mutate the in-memory store, append `RawDiff` entries to the demo journal,
 and flow back to active subscriptions as live diffs.
+
+## Local-First Replica Page
+
+The `#/local-first` page (see [docs/LOCAL-FIRST.md](../../docs/LOCAL-FIRST.md)
+for the architecture) runs a real Postgres-in-WASM engine —
+[pglite](https://github.com/electric-sql/pglite), loaded lazily so the
+live-queries page doesn't pay for it — inside the tab and points a
+Palimpsest `LocalReplica` at it:
+
+- The replica mirrors the **permissioned subset** of `posts` into the
+  local engine (one atomic local transaction per remote commit) and
+  acks LSNs so reconnects resume incrementally.
+- The "same query, two engines" panel runs identical SQL as a live
+  server subscription *and* against the local mirror, timing the local
+  answer — including the CTE aggregate.
+- Writes are optimistic: `replica.mutate(...)` applies locally at once
+  and forwards through the demo's ordinary HTTP write API (`writer`
+  callback). Inserts use client-chosen timestamp-scale ids so the
+  optimistic row and the WAL row share a primary key. The event log
+  shows each mutation settling on the WAL round-trip (or rolling back
+  when the API rejects it).
+- Switching personas — or applying different rules in the permissions
+  playground on the other page — re-snapshots the local database to a
+  different permissioned subset, live.
 
 ## HTTP API
 

@@ -130,24 +130,45 @@ struct CreatePost {
     title: String,
     #[serde(default)]
     published: bool,
+    /// Optional client-chosen id. The local-first demo page assigns
+    /// ids client-side so its optimistic insert and the WAL row share
+    /// a primary key (that's how the replica settles the optimistic
+    /// overlay). Clients use timestamp-scale ids far above the
+    /// BIGSERIAL sequence, so the two ranges never collide.
+    #[serde(default)]
+    id: Option<i64>,
 }
 
 async fn create_post(
     State(state): State<AppState>,
     Json(body): Json<CreatePost>,
 ) -> Result<(StatusCode, Json<Post>), StatusCode> {
-    let row = state
-        .pg
-        .query_one(
-            "INSERT INTO posts (title, published) VALUES ($1, $2)
-             RETURNING id, title, published",
-            &[&body.title, &body.published],
-        )
-        .await
-        .map_err(|err| {
-            warn!(?err, "create_post failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let insert = match body.id {
+        Some(id) => {
+            state
+                .pg
+                .query_one(
+                    "INSERT INTO posts (id, title, published) VALUES ($1, $2, $3)
+                     RETURNING id, title, published",
+                    &[&id, &body.title, &body.published],
+                )
+                .await
+        }
+        None => {
+            state
+                .pg
+                .query_one(
+                    "INSERT INTO posts (title, published) VALUES ($1, $2)
+                     RETURNING id, title, published",
+                    &[&body.title, &body.published],
+                )
+                .await
+        }
+    };
+    let row = insert.map_err(|err| {
+        warn!(?err, "create_post failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let post = Post {
         id: row.get::<_, i64>(0),
         title: row.get::<_, String>(1),

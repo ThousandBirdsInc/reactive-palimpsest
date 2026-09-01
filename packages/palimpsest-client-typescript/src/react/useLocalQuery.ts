@@ -105,7 +105,15 @@ export function useLocalQuery(
 type Listener = (event: ReplicaEvent) => void;
 const listeners = new WeakMap<LocalReplicaHandle, Set<Listener>>();
 
-function subscribeReplicaEvents(
+/**
+ * Shared event fan-out for a replica. The wasm replica delivers events
+ * to a single `onEvent` consumer, so anything living alongside
+ * {@link useLocalQuery} (an event log, a status badge) must subscribe
+ * through here rather than calling `replica.onEvent` directly —
+ * whichever registers first would otherwise starve the other. Returns
+ * an unsubscribe function.
+ */
+export function subscribeReplicaEvents(
   replica: LocalReplicaHandle,
   listener: Listener,
 ): () => void {

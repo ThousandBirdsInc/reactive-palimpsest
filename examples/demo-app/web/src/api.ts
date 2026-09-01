@@ -73,11 +73,13 @@ export class ApiClient {
     return (await res.json()) as TokenResponse;
   }
 
-  async createPost(title: string, published = true): Promise<Post> {
+  /// `id` is optional: the local-first page assigns ids client-side so
+  /// its optimistic insert and the WAL row share a primary key.
+  async createPost(title: string, published = true, id?: number): Promise<Post> {
     const res = await fetch(`${this.base}/api/posts`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title, published }),
+      body: JSON.stringify(id === undefined ? { title, published } : { id, title, published }),
     });
     if (!res.ok) throw new Error(`createPost: ${res.status}`);
     return (await res.json()) as Post;

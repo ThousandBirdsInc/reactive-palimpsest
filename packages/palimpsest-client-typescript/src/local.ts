@@ -37,16 +37,22 @@ export interface SqlDriver {
  * Adapt a pgrust/pglite-style instance (`query(sql, params, options)`
  * returning `{rows}`) to the {@link SqlDriver} contract, forcing
  * array-mode rows.
+ *
+ * The parameter is deliberately loose (`rows: unknown[]`) so real
+ * engine instances — whose default row type is an object map — are
+ * structurally assignable; `rowMode: "array"` makes the runtime shape
+ * match {@link SqlDriverResult}.
  */
 export function postgresWasmDriver(pg: {
   query(
     sql: string,
     params?: unknown[],
-    options?: { rowMode?: string },
-  ): Promise<{ rows: unknown[][] }>;
+    options?: { rowMode?: "array" },
+  ): Promise<{ rows: unknown[] }>;
 }): SqlDriver {
   return {
-    exec: (sql, params) => pg.query(sql, params, { rowMode: "array" }),
+    exec: (sql, params) =>
+      pg.query(sql, params, { rowMode: "array" }) as Promise<SqlDriverResult>,
   };
 }
 

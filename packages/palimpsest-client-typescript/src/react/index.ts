@@ -15,6 +15,7 @@ export {
   type UseSubscriptionResult,
 } from "./usePalimpsestSubscription.js";
 export {
+  subscribeReplicaEvents,
   useLocalQuery,
   type LocalQueryStatus,
   type UseLocalQueryOptions,
