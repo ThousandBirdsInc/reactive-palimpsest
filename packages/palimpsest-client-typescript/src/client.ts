@@ -5,6 +5,7 @@
 // connect() in every hook.
 
 import { decodeRow, decodeRows, type RowDecoderOptions } from "./codec.js";
+import { LocalReplicaHandle, type LocalReplicaOptions } from "./local.js";
 import {
   diffOpFromRaw,
   schemaFromRaw,
@@ -200,6 +201,22 @@ export class PalimpsestClient {
       ...this.defaultDecoder,
       ...(options.decoder ?? {}),
     });
+  }
+
+  /**
+   * Start a local-first replica: stream the server's permissioned
+   * subset of each mirror into a local Postgres-compatible WASM engine
+   * (pgrust/pglite-style), run the same SQL against it locally, and
+   * apply optimistic mutations that reconcile when the authoritative
+   * change comes back through the WAL.
+   */
+  async localReplica(options: LocalReplicaOptions): Promise<LocalReplicaHandle> {
+    const wasmReplica = await this.wasmClient.localReplica({
+      database: options.database,
+      mirrors: options.mirrors,
+      writer: options.writer,
+    });
+    return new LocalReplicaHandle(wasmReplica);
   }
 
   /** Close the underlying connection. */

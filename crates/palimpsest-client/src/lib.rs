@@ -31,6 +31,7 @@ mod auth;
 mod cache;
 mod connection;
 mod error;
+pub mod local;
 mod reconnect;
 mod runtime;
 mod subscription;
@@ -50,7 +51,7 @@ pub use cache::{LocalCache, PrimaryKey};
 pub use connection::ConnectionState;
 pub use error::ClientError;
 pub use palimpsest_proto::palimpsest::sync::v1::{
-    var_value, DatumType, DiffOp, ResyncReason, VarList, VarValue,
+    var_value, Column, DatumType, DiffOp, ResyncReason, Schema, VarList, VarValue,
 };
 pub use palimpsest_proto::wire::{WireDatum, WireRow};
 pub use reconnect::BackoffConfig;
@@ -202,12 +203,33 @@ impl Client {
         query: connection::QuerySpec,
         vars: HashMap<String, VarValue>,
     ) -> Result<Subscription, ClientError> {
+        self.subscribe_spec_with_cache(query, vars, self.config.cache_enabled)
+            .await
+    }
+
+    /// Subscription used by the local-first replica: the replica keeps
+    /// full table state in the local database, so the per-subscription
+    /// primary-key cache would just double the memory.
+    pub(crate) async fn subscribe_spec_uncached(
+        &self,
+        query: connection::QuerySpec,
+        vars: HashMap<String, VarValue>,
+    ) -> Result<Subscription, ClientError> {
+        self.subscribe_spec_with_cache(query, vars, false).await
+    }
+
+    async fn subscribe_spec_with_cache(
+        &self,
+        query: connection::QuerySpec,
+        vars: HashMap<String, VarValue>,
+        cache_enabled: bool,
+    ) -> Result<Subscription, ClientError> {
         let id = format!(
             "sub-{}",
             self.next_subscription_id.fetch_add(1, Ordering::Relaxed)
         );
         let (events_tx, events_rx) = mpsc::channel(256);
-        let cache = if self.config.cache_enabled {
+        let cache = if cache_enabled {
             Some(Arc::new(Mutex::new(LocalCache::default())))
         } else {
             None

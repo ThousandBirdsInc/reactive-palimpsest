@@ -39,6 +39,9 @@
     // the value, but clippy's heuristic doesn't see across the
     // `to_string()` call.
     clippy::needless_pass_by_value,
+    // Helpers shared with the sibling `local` module are `pub(crate)`;
+    // the module itself is private but re-exported wholesale.
+    clippy::redundant_pub_crate,
 )]
 
 use std::collections::HashMap;
@@ -75,6 +78,15 @@ fn auth_from_js(token: &JsValue) -> Auth {
 #[wasm_bindgen]
 pub struct Client {
     inner: RustClient,
+}
+
+impl Client {
+    /// Crate-internal access to the wrapped Rust client (used by the
+    /// local-first replica bindings).
+    #[must_use]
+    pub(crate) const fn rust(&self) -> &RustClient {
+        &self.inner
+    }
 }
 
 #[wasm_bindgen]
@@ -225,7 +237,11 @@ fn parse_params(value: &JsValue) -> Result<HashMap<String, VarValue>, JsValue> {
     Ok(out)
 }
 
-fn param_to_var(value: &JsValue, key: &str, allow_list: bool) -> Result<VarValue, JsValue> {
+pub(crate) fn param_to_var(
+    value: &JsValue,
+    key: &str,
+    allow_list: bool,
+) -> Result<VarValue, JsValue> {
     let kind = if value.is_null() || value.is_undefined() {
         var_value::Kind::NullValue(true)
     } else if let Some(text) = value.as_string() {
@@ -481,11 +497,11 @@ fn error_payload(message: &str) -> JsValue {
     obj.into()
 }
 
-fn set(obj: &Object, key: &str, value: &JsValue) {
+pub(crate) fn set(obj: &Object, key: &str, value: &JsValue) {
     let _ = Reflect::set(obj, &JsValue::from_str(key), value);
 }
 
-fn datum_to_js(d: &WireDatum) -> JsValue {
+pub(crate) fn datum_to_js(d: &WireDatum) -> JsValue {
     match d {
         WireDatum::Bool(b) => JsValue::from_bool(*b),
         WireDatum::I16(n) => JsValue::from_f64(f64::from(*n)),

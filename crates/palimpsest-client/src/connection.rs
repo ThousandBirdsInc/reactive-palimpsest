@@ -111,6 +111,15 @@ pub(crate) struct ConnectionInbox {
 }
 
 impl ConnectionInbox {
+    /// Detached inbox for unit tests that drive a [`crate::Subscription`]
+    /// by hand (no manager task); the returned receiver observes the
+    /// commands (acks, updates) the code under test issues.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn detached() -> (Self, mpsc::Receiver<Command>) {
+        let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
+        (Self { tx }, rx)
+    }
+
     pub(crate) async fn send(&self, cmd: Command) -> Result<(), ClientError> {
         self.tx
             .send(cmd)
