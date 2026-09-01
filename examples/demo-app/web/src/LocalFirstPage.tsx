@@ -2,17 +2,17 @@
 //
 // A real Postgres-in-WASM engine (pglite) runs inside this tab. The
 // Palimpsest `LocalReplica` streams the server's *permissioned* subset
-// of `posts` into it — one atomic local transaction per remote commit —
-// so the same SQL that powers the live subscriptions on the other page
-// runs here against local storage: instant answers, no round trip.
+// of `issues` into it — one atomic local transaction per remote commit
+// — so the same SQL that powers the board and the analytics runs here
+// against local storage: instant answers, no round trip.
 //
 // Writes are optimistic: `replica.mutate(...)` updates the local
 // engine immediately, forwards the mutation through the demo's regular
-// HTTP write API, and reconciles when the authoritative change comes
-// back through the WAL (settle / rebase / conflict / rollback). The
-// event log at the bottom shows each step happening.
+// HTTP write API, and reconciles when the change comes back through
+// the WAL (settle / rebase / conflict / rollback). The event log at
+// the bottom shows each step happening.
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { PGlite } from "@electric-sql/pglite";
 import {
   postgresWasmDriver,
@@ -24,11 +24,18 @@ import {
 import {
   subscribeReplicaEvents,
   useLocalQuery,
-  usePalimpsestClient,
   usePalimpsestSubscription,
 } from "@palimpsest/client/react";
-import * as wasm from "../pkg/palimpsest_client_js";
-import { ApiClient, DemoUser, PALIMPSEST_URL } from "./api";
+import { useSession } from "./session";
+import {
+  IssueRow,
+  nextStatus,
+  PRIORITIES,
+  PROJECT_BY_ID,
+  Status,
+  STATUS_LABEL,
+  todayEpochDay,
+} from "./issues";
 
 // ---------------------------------------------------------------------------
 // Local engine (one per tab)
@@ -49,103 +56,48 @@ function getLocalPostgres(): Promise<PGlite> {
 /// live dataflows; pglite executes them locally against the mirror.
 const QUERY_PRESETS: { id: string; label: string; sql: string }[] = [
   {
-    id: "list",
-    label: "Filtered list",
-    sql: `SELECT id, title, published
-FROM posts
-WHERE published = true
-ORDER BY id`,
+    id: "urgent",
+    label: "Urgent & high, open",
+    sql: `SELECT id, title, status, priority, assignee
+FROM issues
+WHERE priority >= 3 AND status IN ('todo', 'in_progress', 'in_review')
+ORDER BY priority DESC, id DESC
+LIMIT 15`,
   },
   {
     id: "counts",
-    label: "Counts by status (CTE)",
-    sql: `WITH stats AS (
-  SELECT published, COUNT(*) AS n
-  FROM posts
-  GROUP BY published
+    label: "Counts by stage (CTE)",
+    sql: `WITH stages AS (
+  SELECT status, COUNT(*) AS n
+  FROM issues
+  GROUP BY status
 )
-SELECT published, n
-FROM stats
-ORDER BY published`,
+SELECT status, n
+FROM stages
+ORDER BY n DESC`,
   },
   {
-    id: "search",
-    label: "Title search",
-    sql: `SELECT id, title, published
-FROM posts
-WHERE title LIKE '%o%'
-ORDER BY id`,
+    id: "workload",
+    label: "Workload by assignee",
+    sql: `SELECT assignee, COUNT(*) AS open_issues, SUM(estimate) AS points
+FROM issues
+WHERE status IN ('todo', 'in_progress', 'in_review')
+GROUP BY assignee
+ORDER BY points DESC`,
   },
 ];
 
-const POSTS_SQL = "SELECT id, title, published FROM posts ORDER BY id";
-
-interface PostRow {
-  id: bigint | number;
-  title: string;
-  published: boolean;
-}
+const MY_QUEUE_SQL = `SELECT id, title, status, priority, project, estimate
+FROM issues
+WHERE status IN ('todo', 'in_progress', 'in_review')
+ORDER BY id DESC
+LIMIT 20`;
 
 // ---------------------------------------------------------------------------
 // Page
 
 export default function LocalFirstPage() {
-  const api = useMemo(() => new ApiClient(), []);
-
-  // Persona/token handling — same flow as the live-queries page: the
-  // replica's mirror runs under this persona's permission rules, so
-  // switching personas re-snapshots the local database to a different
-  // permissioned subset.
-  const [users, setUsers] = useState<DemoUser[]>([]);
-  const [currentUser, setCurrentUser] = useState<DemoUser | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [authError, setAuthError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    api
-      .listUsers()
-      .then((list) => {
-        if (!alive) return;
-        setUsers(list);
-        setCurrentUser((prev) => prev ?? list[0] ?? null);
-      })
-      .catch((e) => {
-        if (alive) setAuthError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      alive = false;
-    };
-  }, [api]);
-
-  useEffect(() => {
-    if (!currentUser) return;
-    let alive = true;
-    setAuthError(null);
-    api
-      .fetchToken(currentUser.id)
-      .then((res) => {
-        if (alive) setToken(res.token);
-      })
-      .catch((e) => {
-        if (!alive) return;
-        setAuthError(e instanceof Error ? e.message : String(e));
-        setToken(null);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [api, currentUser]);
-
-  const clientOpts = useMemo(
-    () =>
-      token
-        ? { url: PALIMPSEST_URL, wasm, token }
-        : { url: "", wasm, token: undefined },
-    [token],
-  );
-  const { client, connection, error: clientError } =
-    usePalimpsestClient(clientOpts);
+  const { api, client, currentUser } = useSession();
 
   // -------------------------------------------------------------------------
   // Replica lifecycle: (client, pglite) -> LocalReplica
@@ -165,23 +117,35 @@ export default function LocalFirstPage() {
     // never inserts itself into the write path. Rejecting rolls the
     // optimistic local change back.
     const writer = async (req: WriteRequest) => {
-      if (req.table !== "posts") {
+      if (req.table !== "issues") {
         throw new Error(`no write path for table \`${req.table}\``);
       }
       if (req.kind === "insert") {
-        await api.createPost(
-          String(req.values.title ?? ""),
-          Boolean(req.values.published),
-          Number(req.values.id),
-        );
+        await api.createIssue({
+          id: Number(req.values.id),
+          title: String(req.values.title ?? ""),
+          status: String(req.values.status ?? "todo"),
+          priority: Number(req.values.priority ?? 2),
+          assignee: String(req.values.assignee ?? ""),
+          project: String(req.values.project ?? "sync-engine"),
+          estimate: Number(req.values.estimate ?? 3),
+        });
       } else if (req.kind === "update") {
-        const keys = Object.keys(req.set);
-        if (keys.length !== 1 || keys[0] !== "published") {
-          throw new Error("demo write API only supports toggling `published`");
+        const body: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(req.set)) {
+          if (key === "status") body.status = String(value);
+          else if (key === "priority") body.priority = Number(value);
+          else if (key === "assignee") body.assignee = String(value);
+          else if (key === "title") body.title = String(value);
+          // completed_day / cycle_days are derived server-side on the
+          // status transition; skip forwarding them.
         }
-        await api.setPublished(Number(req.key.id), Boolean(req.set.published));
+        if (Object.keys(body).length === 0) {
+          throw new Error("no forwardable columns in update");
+        }
+        await api.updateIssue(Number(req.key.id), body);
       } else {
-        await api.deletePost(Number(req.key.id));
+        await api.deleteIssue(Number(req.key.id));
       }
     };
 
@@ -189,7 +153,7 @@ export default function LocalFirstPage() {
       const pg = await getLocalPostgres();
       const handle = await client.localReplica({
         database: postgresWasmDriver(pg),
-        mirrors: ["posts"],
+        mirrors: ["issues"],
         writer,
       });
       if (!alive) {
@@ -213,33 +177,33 @@ export default function LocalFirstPage() {
   // -------------------------------------------------------------------------
   // Replica events → sync status, pending count, event log
 
-  const [postsState, setPostsState] = useState<TableSyncStatus | null>(null);
+  const [issuesState, setIssuesState] = useState<TableSyncStatus | null>(null);
   const [pending, setPending] = useState(0);
   const [events, setEvents] = useState<
     { at: string; nonce: number; event: ReplicaEvent }[]
   >([]);
-  const eventNonce = useRef(0);
 
   useEffect(() => {
     if (!replica) {
-      setPostsState(null);
+      setIssuesState(null);
       setPending(0);
       setEvents([]);
       return;
     }
-    setPostsState(replica.tableStates()["posts"] ?? null);
+    let nonce = 0;
+    setIssuesState(replica.tableStates()["issues"] ?? null);
     const unsubscribe = subscribeReplicaEvents(replica, (event) => {
-      if (event.kind === "tableState" && event.table === "posts") {
-        setPostsState(event.state);
+      if (event.kind === "tableState" && event.table === "issues") {
+        setIssuesState(event.state);
       }
-      eventNonce.current += 1;
+      nonce += 1;
       const entry = {
         at: new Date().toLocaleTimeString(undefined, { hour12: false }),
-        nonce: eventNonce.current,
+        nonce,
         event,
       };
-      setEvents((prev) => [entry, ...prev].slice(0, 14));
-      void replica.pendingMutations("posts").then(setPending);
+      setEvents((prev) => [entry, ...prev].slice(0, 12));
+      void replica.pendingMutations("issues").then(setPending);
     });
     return unsubscribe;
   }, [replica]);
@@ -253,7 +217,7 @@ export default function LocalFirstPage() {
   // Server side: an ordinary live subscription.
   const { rows: serverRows, status: serverStatus } = usePalimpsestSubscription<
     Record<string, unknown>
-  >(client, sql, { decoder: { coerceSafeIntegersToNumber: false } });
+  >(client, sql, { decoder: { coerceSafeIntegersToNumber: true } });
 
   // Local side: the same SQL against pglite, re-run on every applied
   // batch. Timed so the "no round trip" point is visible.
@@ -305,13 +269,19 @@ export default function LocalFirstPage() {
   }, [replica, sql]);
 
   // -------------------------------------------------------------------------
-  // Panel 2 — optimistic mutations over the mirrored posts
+  // Panel 2 — optimistic mutations over the mirrored queue
 
-  const postsQuery = useLocalQuery(replica, POSTS_SQL, { tables: ["posts"] });
-  const posts: PostRow[] = postsQuery.rows.map((row) => ({
+  const queueQuery = useLocalQuery(replica, MY_QUEUE_SQL, {
+    tables: ["issues"],
+  });
+  const queue: IssueRow[] = queueQuery.rows.map((row) => ({
     id: row[0] as bigint | number,
     title: String(row[1] ?? ""),
-    published: Boolean(row[2]),
+    status: String(row[2] ?? "todo") as Status,
+    priority: row[3] as bigint | number,
+    project: String(row[4] ?? ""),
+    estimate: row[5] as bigint | number,
+    assignee: "",
   }));
 
   const [draftTitle, setDraftTitle] = useState("");
@@ -322,7 +292,7 @@ export default function LocalFirstPage() {
     setMutateError(null);
     try {
       await replica.mutate(mutation);
-      void replica.pendingMutations("posts").then(setPending);
+      void replica.pendingMutations("issues").then(setPending);
     } catch (e) {
       setMutateError(e instanceof Error ? e.message : String(e));
     }
@@ -337,64 +307,58 @@ export default function LocalFirstPage() {
     // BIGSERIAL sequence) so the optimistic row and the WAL row share
     // a primary key — that's what lets the insert settle.
     await mutate({
-      table: "posts",
-      insert: { id: Date.now(), title, published: true },
+      table: "issues",
+      insert: {
+        id: Date.now(),
+        title,
+        status: "todo",
+        priority: 2,
+        assignee: currentUser?.id ?? "",
+        project: "clients",
+        estimate: 3,
+        created_day: todayEpochDay(),
+        completed_day: 0,
+        cycle_days: 0,
+      },
     });
   }
 
-  const live = postsState?.kind === "live";
+  const live = issuesState?.kind === "live";
 
   return (
     <>
       <h1>Local-first replica</h1>
       <p className="tagline">
         A Postgres-in-WASM engine (pglite) runs in this tab. Palimpsest
-        streams the <em>permissioned subset</em> of <code>posts</code> into it
-        and reconciles optimistic writes against the WAL — reads are local,
-        writes are instant, the server stays authoritative.
+        streams the <em>permissioned subset</em> of <code>issues</code> into
+        it and reconciles optimistic writes against the WAL — reads are
+        local, writes are instant, the server stays authoritative.
       </p>
 
       <section className="panel">
         <header className="panel-head">
-          <h2>Persona &amp; sync state</h2>
-          <div className="filters" role="group" aria-label="Choose user">
-            {users.map((u) => (
-              <button
-                key={u.id}
-                type="button"
-                className={`chip ${currentUser?.id === u.id ? "chip-active" : ""}`}
-                onClick={() => setCurrentUser(u)}
-              >
-                {u.display_name}
-              </button>
-            ))}
-          </div>
+          <h2>Mirror state</h2>
         </header>
         <p className="rule-text">
-          Switching personas re-subscribes the mirror under the new
-          user&apos;s permission rules — watch the local snapshot get replaced
-          with a different subset. The permissions playground on the other
-          page applies here too: rule changes resync this mirror live.
+          Switching personas in the top bar re-subscribes the mirror under
+          the new user&apos;s permission rules — watch the local snapshot get
+          replaced with a different subset. Rule changes from the board
+          page&apos;s permissions playground resync this mirror live.
         </p>
         <p className="lf-status-row">
           <StatusChip
-            label="connection"
-            tone={connection?.kind === "connected" ? "ok" : "warn"}
-            value={connection?.kind ?? "starting"}
-          />
-          <StatusChip
-            label="posts mirror"
-            tone={live ? "ok" : postsState?.kind === "errored" ? "err" : "warn"}
+            label="issues mirror"
+            tone={live ? "ok" : issuesState?.kind === "errored" ? "err" : "warn"}
             value={
-              postsState
-                ? postsState.kind === "live"
-                  ? `live @ lsn ${postsState.lsn.toString()}`
-                  : postsState.kind === "errored"
-                    ? `errored — ${postsState.message}`
-                    : postsState.kind
+              issuesState
+                ? issuesState.kind === "live"
+                  ? `live @ lsn ${issuesState.lsn.toString()}`
+                  : issuesState.kind === "errored"
+                    ? `errored — ${issuesState.message}`
+                    : issuesState.kind
                 : replica
                   ? "starting"
-                  : "waiting for local engine"
+                  : "starting local engine"
             }
           />
           <StatusChip
@@ -403,14 +367,6 @@ export default function LocalFirstPage() {
             value={String(pending)}
           />
         </p>
-        {authError && <div className="error-banner">{authError}</div>}
-        {clientError && (
-          <div className="error-banner">
-            {"code" in clientError
-              ? `${clientError.code}: ${clientError.message}`
-              : clientError.message}
-          </div>
-        )}
         {replicaError && <div className="error-banner">{replicaError}</div>}
       </section>
 
@@ -465,7 +421,7 @@ export default function LocalFirstPage() {
 
       <section className="panel">
         <header className="panel-head">
-          <h2>Optimistic writes</h2>
+          <h2>Optimistic writes — the 20 newest open issues</h2>
         </header>
         <p className="rule-text">
           Every action lands in the local engine <em>immediately</em>, then
@@ -478,7 +434,7 @@ export default function LocalFirstPage() {
         <form className="create" onSubmit={onCreate}>
           <input
             type="text"
-            placeholder="New post title (optimistic insert)…"
+            placeholder="New issue title (optimistic insert)…"
             value={draftTitle}
             onChange={(e) => setDraftTitle(e.target.value)}
           />
@@ -487,47 +443,56 @@ export default function LocalFirstPage() {
           </button>
         </form>
         {mutateError && <div className="error-banner">{mutateError}</div>}
-
-        {postsQuery.status === "error" && (
-          <div className="error-banner">{postsQuery.error}</div>
+        {queueQuery.status === "error" && (
+          <div className="error-banner">{queueQuery.error}</div>
         )}
-        {posts.length === 0 && live && (
-          <p className="empty">
-            No posts visible for {currentUser?.display_name ?? "you"}.
-          </p>
+
+        {queue.length === 0 && live && (
+          <p className="empty">No open issues visible for this persona.</p>
         )}
         <ul className="posts">
-          {posts.map((post) => (
-            <li key={String(post.id)}>
-              <span className="post-id">#{String(post.id)}</span>
-              <span className="post-title">{post.title}</span>
-              <span className={`badge ${post.published ? "published" : "draft"}`}>
-                {post.published ? "published" : "draft"}
-              </span>
-              <button
-                className="row-action"
-                disabled={!live}
-                onClick={() =>
-                  mutate({
-                    table: "posts",
-                    key: { id: post.id },
-                    set: { published: !post.published },
-                  })
-                }
-              >
-                {post.published ? "Unpublish" : "Publish"}
-              </button>
-              <button
-                className="row-action"
-                disabled={!live}
-                onClick={() =>
-                  mutate({ table: "posts", key: { id: post.id }, delete: true })
-                }
-              >
-                Delete
-              </button>
-            </li>
-          ))}
+          {queue.map((issue) => {
+            const forward = nextStatus(issue.status);
+            return (
+              <li key={String(issue.id)}>
+                <span className="post-id">PAL-{String(issue.id)}</span>
+                <span className="post-title">{issue.title}</span>
+                <span className="badge lf-stage" data-status={issue.status}>
+                  {STATUS_LABEL[issue.status]}
+                </span>
+                <span className="post-id">
+                  {PRIORITIES[Number(issue.priority)]?.short ?? "?"} ·{" "}
+                  {PROJECT_BY_ID.get(issue.project)?.label ?? issue.project}
+                </span>
+                <button
+                  className="row-action"
+                  disabled={!forward}
+                  onClick={() =>
+                    forward &&
+                    mutate({
+                      table: "issues",
+                      key: { id: issue.id },
+                      set: { status: forward },
+                    })
+                  }
+                >
+                  {forward ? `→ ${STATUS_LABEL[forward]}` : "—"}
+                </button>
+                <button
+                  className="row-action"
+                  onClick={() =>
+                    mutate({
+                      table: "issues",
+                      key: { id: issue.id },
+                      delete: true,
+                    })
+                  }
+                >
+                  Delete
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </section>
 
@@ -550,9 +515,9 @@ export default function LocalFirstPage() {
       </section>
 
       <footer>
-        Local engine: pglite (Postgres compiled to WASM) ·
-        mirror transport: the same WebSocket/gRPC subscription stream as the
-        live-queries page · write path: the demo&apos;s HTTP API.
+        Local engine: pglite (Postgres compiled to WASM) · mirror transport:
+        the same WebSocket/gRPC subscription stream as the board · write
+        path: the tracker&apos;s HTTP API.
       </footer>
     </>
   );
@@ -638,5 +603,8 @@ function ResultTable({
 function formatCell(cell: unknown): string {
   if (cell === null || cell === undefined) return "∅";
   if (typeof cell === "boolean") return cell ? "true" : "false";
+  if (typeof cell === "number" && !Number.isInteger(cell)) {
+    return cell.toFixed(1);
+  }
   return String(cell);
 }

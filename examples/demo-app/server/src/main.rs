@@ -1,14 +1,12 @@
-//! Demo backend: an axum write API on :3000 and a Palimpsest gRPC-Web
-//! service on :50051, both driven by a Postgres logical-replication
-//! slot.
+//! Tracker backend: an axum write API on :3000 and a Palimpsest
+//! gRPC-Web service on :50051, both driven by a Postgres
+//! logical-replication slot.
 //!
 //! Topology (single binary, three concurrent tasks):
 //!
 //! 1. **Postgres consumer** — tails the `palimpsest_demo` slot,
-//!    decodes pgoutput frames, mirrors `posts`, `orders`, and `accounts`
-//!    in-memory,
-//!    and appends to the per-table journals the WAL runtime cursor
-//!    consumes.
+//!    decodes pgoutput frames, mirrors `issues` in-memory, and
+//!    appends to the journal the WAL runtime cursor consumes.
 //! 2. **Write API (axum)** — issues SQL through tokio-postgres;
 //!    Postgres writes the WAL, the consumer picks the changes up
 //!    after a ~100ms hop, and subscribers see them via the dataflow.
@@ -28,7 +26,6 @@ use std::sync::Arc;
 
 use palimpsest_permissions::parse_config;
 use palimpsest_server::{JwtAuthenticator, Palimpsest};
-use palimpsest_sql::{Catalog, ColumnSchema, ColumnType, TableSchema};
 use palimpsest_wal::TableId;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -36,7 +33,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::api::{router, AppState};
-use crate::state::{AccountStore, DemoWalRuntime, OrderStore, Store};
+use crate::state::{issues_catalog, DemoWalRuntime, IssueStore};
 
 const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:3000";
 const DEFAULT_GRPC_ADDR: &str = "0.0.0.0:50051";
@@ -97,51 +94,25 @@ async fn main() -> std::process::ExitCode {
         }
     };
 
-    let posts_snapshot = match db::snapshot_posts(&pg.client).await {
+    let issues_snapshot = match db::snapshot_issues(&pg.client).await {
         Ok(rows) => rows,
         Err(err) => {
-            error!(%err, "posts snapshot failed");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-    let orders_snapshot = match db::snapshot_orders(&pg.client).await {
-        Ok(rows) => rows,
-        Err(err) => {
-            error!(%err, "orders snapshot failed");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-    let accounts_snapshot = match db::snapshot_accounts(&pg.client).await {
-        Ok(rows) => rows,
-        Err(err) => {
-            error!(%err, "accounts snapshot failed");
+            error!(%err, "issues snapshot failed");
             return std::process::ExitCode::FAILURE;
         }
     };
     info!(
-        posts = posts_snapshot.len(),
-        orders = orders_snapshot.len(),
-        accounts = accounts_snapshot.len(),
+        issues = issues_snapshot.len(),
         "initial snapshot loaded from postgres",
     );
 
-    let store = Arc::new(Store::from_snapshot(posts_snapshot));
-    let order_store = Arc::new(OrderStore::from_snapshot(orders_snapshot));
-    let account_store = Arc::new(AccountStore::from_snapshot(accounts_snapshot));
+    let store = Arc::new(IssueStore::from_snapshot(issues_snapshot));
 
     // -------------------------------------------------------------
     // Start consuming the replication slot. The consumer owns its
     // own Postgres connection so the write client isn't blocked.
     // -------------------------------------------------------------
-    let _consumer = db::spawn_consumer(
-        pg.settings.clone(),
-        pg.posts_oid,
-        pg.orders_oid,
-        pg.accounts_oid,
-        Arc::clone(&store),
-        Arc::clone(&order_store),
-        Arc::clone(&account_store),
-    );
+    let _consumer = db::spawn_consumer(pg.settings.clone(), pg.issues_oid, Arc::clone(&store));
 
     let grpc_addr = addr_from_env("PALIMPSEST_DEMO_GRPC_ADDR", DEFAULT_GRPC_ADDR);
     let http_addr = addr_from_env("PALIMPSEST_DEMO_HTTP_ADDR", DEFAULT_HTTP_ADDR);
@@ -151,17 +122,13 @@ async fn main() -> std::process::ExitCode {
     // through `parse_config` (see `permissions.rs`).
     let permission_rules = parse_config(permissions::DEFAULT_PERMISSIONS_TOML)
         .expect("parse default permissions TOML")
-        .compile(&demo_catalog())
+        .compile(&issues_catalog())
         .expect("compile permission rules");
 
     let palimpsest = Palimpsest::builder()
         .with_wal(DemoWalRuntime::new(
             Arc::clone(&store),
-            Arc::clone(&order_store),
-            Arc::clone(&account_store),
-            TableId::new(pg.posts_oid),
-            TableId::new(pg.orders_oid),
-            TableId::new(pg.accounts_oid),
+            TableId::new(pg.issues_oid),
         ))
         .with_auth(
             JwtAuthenticator::from_config(auth::jwt_auth_config())
@@ -177,7 +144,7 @@ async fn main() -> std::process::ExitCode {
     // Handle captured before `palimpsest` moves into the serve task;
     // the write API uses it to hot-swap rules from the playground.
     let permissions_state = Arc::new(permissions::PermissionsState::new(
-        demo_catalog(),
+        issues_catalog(),
         palimpsest.handle(),
         permissions::DEFAULT_PERMISSIONS_TOML,
     ));
@@ -200,8 +167,8 @@ async fn main() -> std::process::ExitCode {
     let http_state = AppState {
         pg: Arc::clone(&pg.client),
         store: Arc::clone(&store),
-        orders: Arc::clone(&order_store),
         permissions: permissions_state,
+        sim_rng: Arc::new(std::sync::Mutex::new(db::DemoRng::new(0x_AC71_0000_5EED))),
     };
     let http_handle = tokio::spawn(async move {
         info!(%http_addr, "write API listening");
@@ -237,18 +204,4 @@ async fn main() -> std::process::ExitCode {
     let _ = shutdown_http_tx.send(());
     let _ = tokio::join!(grpc_handle, http_handle);
     std::process::ExitCode::SUCCESS
-}
-
-fn demo_catalog() -> Catalog {
-    let mut tables: Vec<TableSchema> = Catalog::demo().tables().cloned().collect();
-    tables.push(TableSchema::new(
-        "accounts",
-        vec![
-            ColumnSchema::new("id", ColumnType::Int),
-            ColumnSchema::new("owner_user_id", ColumnType::Text),
-            ColumnSchema::new("display_name", ColumnType::Text),
-            ColumnSchema::new("balance_cents", ColumnType::Int),
-        ],
-    ));
-    Catalog::new(tables)
 }

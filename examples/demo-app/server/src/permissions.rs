@@ -34,14 +34,9 @@ name = "is_admin"
 type = "bool"
 
 [[rule]]
-name = "posts_visibility"
-table = "posts"
-predicate = "published = true OR $user.is_admin = true"
-
-[[rule]]
-name = "accounts_visibility"
-table = "accounts"
-predicate = "owner_user_id = $user.id OR $user.is_admin = true"
+name = "issues_visibility"
+table = "issues"
+predicate = "project != 'security' OR $user.is_admin = true"
 "#;
 
 /// Currently-applied DSL source plus its parsed rule list, guarded

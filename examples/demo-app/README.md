@@ -1,11 +1,12 @@
-# Palimpsest Demo App
+# Palimpsest Tracker — Demo App
 
-End-to-end demo that runs a React + WASM browser client against a Rust
-write API and an embedded Palimpsest SyncEngine.
+A Linear-style issue tracker where **every view is a live SQL
+subscription**: a React + WASM browser client against a Rust write API,
+a real Postgres, and an embedded Palimpsest SyncEngine.
 
-The demo is intentionally small, but it exercises the production shape:
-the application owns writes through HTTP, Palimpsest owns live SQL
-subscriptions, and the browser keeps multiple result sets updated from
+The demo exercises the production shape: the application owns writes
+through HTTP, Postgres owns the data, Palimpsest tails the WAL and owns
+live SQL subscriptions, and the browser keeps every view updated from
 one long-lived connection.
 
 ## What You Get
@@ -14,18 +15,29 @@ one long-lived connection.
 - Rust `axum` write API on `http://localhost:13017`.
 - Embedded Palimpsest gRPC SyncEngine on `localhost:56051`.
 - Browser-compatible WebSocket bridge at `/ws/subscribe`.
-- In-memory `posts` table with create, publish/unpublish, and delete
-  actions.
-- Two live subscriptions:
-  - filtered `SELECT id, title, published FROM posts` list
-  - counts-by-status query using a CTE
-- Snapshot delivery and live insert/update/delete diffs from the demo
-  WAL journal.
+- A Postgres-backed `issues` table seeded with ~1,400 issues of
+  believable history (statuses, priorities, assignees, projects,
+  completion dates) so the analytics land populated.
+- **Board** (`#/`): a five-column kanban driven by two subscriptions —
+  open issues as row-level WAL diffs, and a "recently done" column
+  maintained as an incremental `ORDER BY … LIMIT` TopK. Create, move,
+  reprioritize, assign, and delete issues.
+- **Analytics** (`#/analytics`): live `GROUP BY`/CTE aggregates — KPI
+  tiles, issues by workflow stage, daily throughput, workload by
+  assignee, and cycle time by project. The browser only ever receives
+  the aggregate rows.
+- **Local-first** (`#/local-first`): a pglite (Postgres-in-WASM) mirror
+  of the permissioned subset with optimistic writes reconciled against
+  the WAL — see [docs/LOCAL-FIRST.md](../../docs/LOCAL-FIRST.md).
+- An **activity simulator** (top bar): synthetic team events pushed
+  through the ordinary write API so every page visibly moves.
 - A permissions-DSL playground: edit the TOML rule DSL in the browser,
   apply it to the running SyncEngine (`PUT /api/permissions` →
   `PalimpsestHandle::update_permissions`), and watch every live
-  subscription resync under the new rules. Rejected rule sets surface
-  the compile error inline and leave the active rules untouched.
+  subscription resync under the new rules. The default rule hides the
+  `security` project from non-admin personas. Rejected rule sets
+  surface the compile error inline and leave the active rules
+  untouched.
 
 ## Architecture
 
@@ -137,22 +149,23 @@ docker compose down
 
 ## Using the App
 
-The app has two pages behind a hash router:
+The app has three pages behind a hash router, all sharing one persona
+picker and one WebSocket connection:
 
-- `#/` — **Live queries** (default): the live-subscription demo below.
-- `#/local-first` — **Local-first replica**: see the next section.
+- `#/` — **Board**: the kanban. Hover a card for its actions (move
+  between columns, change priority, assign, delete). Create issues with
+  the composer; filter by project or "only mine". The permissions
+  playground lives at the bottom of this page.
+- `#/analytics` — **Analytics**: live aggregate dashboards. Turn on
+  "team activity" in the top bar and watch the KPIs, the throughput
+  columns, and the workload bars move as the simulator files, triages,
+  progresses, and completes issues through the ordinary write API.
+- `#/local-first` — **Local-first**: see the next section.
 
-The live-queries page starts with three seeded posts. You can:
-
-- create a new published post
-- filter the live list by all, published, or drafts
-- publish or unpublish an existing row
-- delete a row
-- watch the counts-by-status chart update independently
-
-Both panels subscribe through Palimpsest. Writes go through the HTTP API,
-mutate the in-memory store, append `RawDiff` entries to the demo journal,
-and flow back to active subscriptions as live diffs.
+Switching personas (Alice is an admin; Bob and Carol are members) mints
+a fresh JWT and reconnects every subscription under the new `$user.*`
+context — with the default rules, `security`-project issues vanish for
+members on all three pages.
 
 ## Local-First Replica Page
 
@@ -174,8 +187,8 @@ Palimpsest `LocalReplica` at it:
   optimistic row and the WAL row share a primary key. The event log
   shows each mutation settling on the WAL round-trip (or rolling back
   when the API rejects it).
-- Switching personas — or applying different rules in the permissions
-  playground on the other page — re-snapshots the local database to a
+- Switching personas — or applying different rules in the board
+  page's permissions playground — re-snapshots the local database to a
   different permissioned subset, live.
 
 ## HTTP API
@@ -188,87 +201,106 @@ The API speaks JSON.
 curl http://localhost:13017/api/health
 ```
 
-Response:
-
-```json
-{"status":"ok"}
-```
-
-### List Posts
+### List Issues
 
 ```sh
-curl http://localhost:13017/api/posts
+curl http://localhost:13017/api/issues
 ```
 
-Response:
-
-```json
-[
-  {"id":1,"title":"Welcome to Palimpsest","published":true}
-]
-```
-
-### Create Post
+### Create Issue
 
 ```sh
-curl -X POST http://localhost:13017/api/posts \
+curl -X POST http://localhost:13017/api/issues \
   -H 'content-type: application/json' \
-  -d '{"title":"Hello from curl","published":true}'
+  -d '{"title":"Hello from curl","project":"clients","priority":3}'
 ```
 
-### Update Publish State
+Optional fields: `id` (client-chosen, used by the local-first page),
+`status`, `assignee`, `estimate`.
+
+### Update Issue
+
+Any of `title`, `status`, `priority`, `assignee`, `estimate`. Moving an
+issue into `done` stamps `completed_day`/`cycle_days`; moving it out
+clears them.
 
 ```sh
-curl -X PATCH http://localhost:13017/api/posts/1 \
+curl -X PATCH http://localhost:13017/api/issues/1 \
   -H 'content-type: application/json' \
-  -d '{"published":false}'
+  -d '{"status":"in_progress"}'
 ```
 
-### Delete Post
+### Delete Issue
 
 ```sh
-curl -X DELETE http://localhost:13017/api/posts/1
+curl -X DELETE http://localhost:13017/api/issues/1
 ```
+
+### Simulate Team Activity
+
+```sh
+curl -X POST http://localhost:13017/api/simulate \
+  -H 'content-type: application/json' \
+  -d '{"events":10}'
+```
+
+Applies up to 200 synthetic events per call (create / progress /
+triage / cancel), each as its own transaction so subscribers see one
+diff batch per event.
 
 ## Frontend Subscriptions
 
-The list view subscribes to one of these SQL queries depending on the
-selected filter:
+The board subscribes to open issues and a TopK of recent completions:
 
 ```sql
-SELECT id, title, published
-FROM posts
+SELECT id, title, status, priority, assignee, project, estimate
+FROM issues
+WHERE status IN ('backlog', 'todo', 'in_progress', 'in_review')
 ```
 
 ```sql
-SELECT id, title, published
-FROM posts
-WHERE published = true
+SELECT id, title, status, priority, assignee, project, estimate, completed_day
+FROM issues
+WHERE status = 'done'
+ORDER BY completed_day DESC, id DESC
+LIMIT 12
+```
+
+The analytics page runs live aggregates — for example:
+
+```sql
+SELECT status, COUNT(*) AS n
+FROM issues
+GROUP BY status
 ```
 
 ```sql
-SELECT id, title, published
-FROM posts
-WHERE published = false
+SELECT completed_day, COUNT(*) AS n, SUM(estimate) AS points
+FROM issues
+WHERE status = 'done'
+GROUP BY completed_day
+ORDER BY completed_day DESC
+LIMIT 42
 ```
 
-The chart view subscribes to:
-
 ```sql
-WITH stats AS (
-  SELECT published, COUNT(*) AS n
-  FROM posts
-  GROUP BY published
+WITH completed AS (
+  SELECT project, cycle_days
+  FROM issues
+  WHERE status = 'done'
 )
-SELECT published, n
-FROM stats
-ORDER BY published
+SELECT project, COUNT(*) AS n, AVG(cycle_days) AS avg_cycle_days
+FROM completed
+GROUP BY project
 ```
 
-The current demo server still returns raw `posts` rows for the CTE
-subscription, so the React app performs the chart aggregation
-client-side. The SQL is still sent through the client and server parsing
-path, which is the useful part for this example.
+The dataflow compiles each into an incremental plan
+(BaseTable → Filter → Aggregate → TopK) and ships aggregate-row
+retract/assert deltas, never raw issues. One current engine limit worth
+knowing: the compiled plan advertises output column 0 as the row
+identity, so live queries group by exactly **one** key each (the
+workload chart runs one `GROUP BY assignee` subscription per stage
+rather than a two-key `GROUP BY assignee, status`).
 
 ## Local Development Without Docker
 
