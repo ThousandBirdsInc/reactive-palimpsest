@@ -25,6 +25,17 @@ export type {
 } from "./types.js";
 export { decodeRow, decodeRows, primaryKey } from "./codec.js";
 export type { ColumnDecoder, RowDecoderOptions } from "./codec.js";
+export { LocalReplicaHandle, postgresWasmDriver } from "./local.js";
+export type {
+  LocalMutation,
+  LocalReplicaOptions,
+  MirrorSpec,
+  ReplicaEvent,
+  SqlDriver,
+  SqlDriverResult,
+  TableSyncStatus,
+  WriteRequest,
+} from "./local.js";
 export type {
   NamedQueryParam,
   RawAcceptedEvent,

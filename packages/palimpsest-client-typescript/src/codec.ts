@@ -19,15 +19,16 @@ export interface RowDecoderOptions {
    */
   decoders?: Record<string, ColumnDecoder>;
   /**
-   * If `true`, narrow JS-safe-integer `bigint` columns (i.e. those
-   * declared `i16`/`i32`/`i64`) to a `number` when the value fits in
-   * `Number.MAX_SAFE_INTEGER`. Defaults to `false` — the wasm side
-   * already widens `i64` to `bigint` to avoid silent precision loss.
+   * If `true`, narrow `bigint` values to `number` when they fit in
+   * `Number.MAX_SAFE_INTEGER` (the wasm side widens `i64` to `bigint`
+   * to avoid silent precision loss; `i16`/`i32` already arrive as
+   * `number`). Values outside the safe range stay `bigint`. Defaults
+   * to `false`.
    */
   coerceSafeIntegersToNumber?: boolean;
 }
 
-const SMALL_INT_TYPES = new Set([1, 2]); // DatumType.I16, I32
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 
 /**
  * Project a single raw row into the caller's row type.
@@ -52,7 +53,8 @@ export function decodeRow<T>(
     } else if (
       options.coerceSafeIntegersToNumber &&
       typeof value === "bigint" &&
-      SMALL_INT_TYPES.has(col.type)
+      value <= MAX_SAFE &&
+      value >= -MAX_SAFE
     ) {
       value = Number(value);
     }

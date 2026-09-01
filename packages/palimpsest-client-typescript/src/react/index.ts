@@ -14,3 +14,10 @@ export {
   type UseSubscriptionOptions,
   type UseSubscriptionResult,
 } from "./usePalimpsestSubscription.js";
+export {
+  subscribeReplicaEvents,
+  useLocalQuery,
+  type LocalQueryStatus,
+  type UseLocalQueryOptions,
+  type UseLocalQueryResult,
+} from "./useLocalQuery.js";

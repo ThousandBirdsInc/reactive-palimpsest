@@ -1,4 +1,4 @@
-// Thin fetch wrapper around the write API.
+// Thin fetch wrapper around the tracker's write API.
 
 // Default to same-origin so we go through whatever reverse proxy is in
 // front of the SPA (nginx in the docker-compose setup). Override with
@@ -7,22 +7,45 @@
 const DEFAULT_API_URL =
   (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
-export interface Post {
+/** JSON shape the write API returns for one issue. */
+export interface ApiIssue {
   id: number;
   title: string;
-  published: boolean;
+  status: string;
+  priority: number;
+  assignee: string;
+  project: string;
+  estimate: number;
+  created_day: number;
+  completed_day: number;
+  cycle_days: number;
 }
 
-export interface BulkAddOrdersResponse {
-  inserted: number;
-  category_id: number;
-  total_rows: number;
+export interface CreateIssueBody {
+  title: string;
+  /** Client-chosen id — used by the local-first page so its
+   *  optimistic insert and the WAL row share a primary key. */
+  id?: number;
+  status?: string;
+  priority?: number;
+  assignee?: string;
+  project?: string;
+  estimate?: number;
 }
 
-export interface AccountWriteResponse {
-  updated?: number;
-  debited?: number;
-  credited?: number;
+export interface UpdateIssueBody {
+  title?: string;
+  status?: string;
+  priority?: number;
+  assignee?: string;
+  estimate?: number;
+}
+
+export interface SimulateResponse {
+  created: number;
+  progressed: number;
+  triaged: number;
+  cancelled: number;
 }
 
 export interface DemoUser {
@@ -73,77 +96,43 @@ export class ApiClient {
     return (await res.json()) as TokenResponse;
   }
 
-  async createPost(title: string, published = true): Promise<Post> {
-    const res = await fetch(`${this.base}/api/posts`, {
+  async createIssue(body: CreateIssueBody): Promise<ApiIssue> {
+    const res = await fetch(`${this.base}/api/issues`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title, published }),
+      body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`createPost: ${res.status}`);
-    return (await res.json()) as Post;
+    if (!res.ok) throw new Error(`createIssue: ${res.status}`);
+    return (await res.json()) as ApiIssue;
   }
 
-  async setPublished(id: number, published: boolean): Promise<Post> {
-    const res = await fetch(`${this.base}/api/posts/${id}`, {
+  async updateIssue(id: number, body: UpdateIssueBody): Promise<ApiIssue> {
+    const res = await fetch(`${this.base}/api/issues/${id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ published }),
+      body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`setPublished: ${res.status}`);
-    return (await res.json()) as Post;
+    if (!res.ok) throw new Error(`updateIssue: ${res.status}`);
+    return (await res.json()) as ApiIssue;
   }
 
-  async deletePost(id: number): Promise<void> {
-    const res = await fetch(`${this.base}/api/posts/${id}`, {
+  async deleteIssue(id: number): Promise<void> {
+    const res = await fetch(`${this.base}/api/issues/${id}`, {
       method: "DELETE",
     });
-    if (!res.ok && res.status !== 404) throw new Error(`deletePost: ${res.status}`);
+    if (!res.ok && res.status !== 404)
+      throw new Error(`deleteIssue: ${res.status}`);
   }
 
-  async bulkAddOrders(
-    categoryId: number,
-    count: number,
-    floorCents: number,
-    spreadCents: number,
-  ): Promise<BulkAddOrdersResponse> {
-    const res = await fetch(`${this.base}/api/orders/bulk-add`, {
+  /** Apply `events` synthetic team events server-side. */
+  async simulate(events: number): Promise<SimulateResponse> {
+    const res = await fetch(`${this.base}/api/simulate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        category_id: categoryId,
-        count,
-        floor_cents: floorCents,
-        spread_cents: spreadCents,
-      }),
+      body: JSON.stringify({ events }),
     });
-    if (!res.ok) throw new Error(`bulkAddOrders: ${res.status}`);
-    return (await res.json()) as BulkAddOrdersResponse;
-  }
-
-  async deposit(actorUserId: string, amountCents: number): Promise<AccountWriteResponse> {
-    return this.accountWrite("/api/accounts/deposit", {
-      actor_user_id: actorUserId,
-      amount_cents: amountCents,
-    });
-  }
-
-  async withdraw(actorUserId: string, amountCents: number): Promise<AccountWriteResponse> {
-    return this.accountWrite("/api/accounts/withdraw", {
-      actor_user_id: actorUserId,
-      amount_cents: amountCents,
-    });
-  }
-
-  async transfer(
-    actorUserId: string,
-    toUserId: string,
-    amountCents: number,
-  ): Promise<AccountWriteResponse> {
-    return this.accountWrite("/api/accounts/transfer", {
-      actor_user_id: actorUserId,
-      to_user_id: toUserId,
-      amount_cents: amountCents,
-    });
+    if (!res.ok) throw new Error(`simulate: ${res.status}`);
+    return (await res.json()) as SimulateResponse;
   }
 
   async getPermissions(): Promise<PermissionsSnapshot> {
@@ -173,19 +162,6 @@ export class ApiClient {
     }
     const body = (await res.json()) as { rules: PermissionRuleSummary[] };
     return body.rules;
-  }
-
-  private async accountWrite(
-    path: string,
-    body: Record<string, string | number>,
-  ): Promise<AccountWriteResponse> {
-    const res = await fetch(`${this.base}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`${path}: ${res.status}`);
-    return (await res.json()) as AccountWriteResponse;
   }
 }
 

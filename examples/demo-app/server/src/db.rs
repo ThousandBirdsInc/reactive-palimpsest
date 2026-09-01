@@ -2,11 +2,12 @@
 //!
 //! Three responsibilities:
 //!
-//! 1. **Bootstrap** — connect, create tables + publication + slot,
-//!    seed if empty, return the live `Client` the write API uses.
-//! 2. **Initial snapshot** — `SELECT * FROM posts` / `orders` /
-//!    `accounts` so the in-memory mirror starts populated; the cursor
-//!    for diffs starts *after* the snapshot LSN.
+//! 1. **Bootstrap** — connect, create the `issues` table + publication
+//!    + slot, seed a believable project history if empty, return the
+//!    live `Client` the write API uses.
+//! 2. **Initial snapshot** — `SELECT * FROM issues` so the in-memory
+//!    mirror starts populated; the cursor for diffs starts *after* the
+//!    snapshot LSN.
 //! 3. **Replication consumer** — a tokio task that polls
 //!    `pg_logical_slot_get_binary_changes` every 100ms, feeds the
 //!    bytes through `palimpsest_wal::decode_pgoutput_message`, and
@@ -25,175 +26,99 @@ use tokio_postgres::{Client, Config, NoTls};
 use tracing::{debug, info, warn};
 
 use crate::auth::USERS;
-use crate::state::{
-    Account, AccountChange, AccountStore, Order, OrderChange, OrderStore, Post, PostChange, Store,
-};
+use crate::state::{Issue, IssueChange, IssueStore};
 
 /// Replication slot + publication names the demo uses. Picked to be
 /// stable across reboots so the slot retains WAL across restarts.
 const PUBLICATION: &str = "palimpsest_pub";
 const SLOT: &str = "palimpsest_demo";
 
-/// Approximate number of synthetic orders the seed generates. The
-/// actual row count depends on the per-category volume weights (see
-/// `CATEGORY_PROFILES`) but lands close to 600k for a comfortably
-/// big "live aggregate over high-volume data" demo.
-const SEED_ORDERS_TARGET: i64 = 600_000;
+/// Number of issues the seed generates. Enough history that the
+/// analytics page has meaningful distributions (a quarter's worth of
+/// throughput, per-project cycle times) without slowing boot down.
+const SEED_ISSUES: usize = 1_400;
 
-/// Realistic e-commerce category profiles used by the seed and the
-/// auto-write generator on the client. The `weight` column drives
-/// relative volume: the seed allocates approximately
-/// `SEED_ORDERS_TARGET * weight / sum(weights)` rows to each
-/// category, so high-volume / low-ticket categories (snacks) end up
-/// with many small orders and low-volume / high-ticket categories
-/// (laptops) end up with few large ones — exactly the shape the
-/// bubble chart's two axes are meant to reveal.
-///
-/// The same catalog lives client-side in `web/src/App.tsx` so the
-/// frontend can label bubbles by name and color by sector. Keep
-/// the two lists in sync.
-struct CategoryProfile {
-    id: i64,
-    floor_cents: i64,
-    spread_cents: i64,
-    weight: i64,
-}
+/// How far back the seeded history reaches, in days.
+pub const SEED_HISTORY_DAYS: i64 = 120;
 
-const CATEGORY_PROFILES: &[CategoryProfile] = &[
-    // Tech — low volume, high ticket
-    CategoryProfile {
-        id: 1,
-        floor_cents: 40_000,
-        spread_cents: 80_000,
-        weight: 3,
-    },
-    CategoryProfile {
-        id: 2,
-        floor_cents: 60_000,
-        spread_cents: 140_000,
-        weight: 2,
-    },
-    CategoryProfile {
-        id: 3,
-        floor_cents: 5_000,
-        spread_cents: 12_000,
-        weight: 8,
-    },
-    CategoryProfile {
-        id: 4,
-        floor_cents: 30_000,
-        spread_cents: 90_000,
-        weight: 1,
-    },
-    // Apparel — mid volume, mid ticket
-    CategoryProfile {
-        id: 5,
-        floor_cents: 1_500,
-        spread_cents: 3_000,
-        weight: 25,
-    },
-    CategoryProfile {
-        id: 6,
-        floor_cents: 4_000,
-        spread_cents: 7_000,
-        weight: 12,
-    },
-    CategoryProfile {
-        id: 7,
-        floor_cents: 6_000,
-        spread_cents: 15_000,
-        weight: 10,
-    },
-    CategoryProfile {
-        id: 8,
-        floor_cents: 8_000,
-        spread_cents: 20_000,
-        weight: 5,
-    },
-    // Grocery — high volume, low ticket
-    CategoryProfile {
-        id: 9,
-        floor_cents: 300,
-        spread_cents: 600,
-        weight: 60,
-    },
-    CategoryProfile {
-        id: 10,
-        floor_cents: 400,
-        spread_cents: 800,
-        weight: 45,
-    },
-    CategoryProfile {
-        id: 11,
-        floor_cents: 500,
-        spread_cents: 1_200,
-        weight: 35,
-    },
-    CategoryProfile {
-        id: 12,
-        floor_cents: 800,
-        spread_cents: 1_800,
-        weight: 28,
-    },
-    // Home — varied
-    CategoryProfile {
-        id: 13,
-        floor_cents: 4_000,
-        spread_cents: 12_000,
-        weight: 6,
-    },
-    CategoryProfile {
-        id: 14,
-        floor_cents: 5_000,
-        spread_cents: 9_000,
-        weight: 4,
-    },
-    CategoryProfile {
-        id: 15,
-        floor_cents: 2_500,
-        spread_cents: 6_000,
-        weight: 8,
-    },
-    CategoryProfile {
-        id: 16,
-        floor_cents: 15_000,
-        spread_cents: 60_000,
-        weight: 2,
-    },
-    // Media — mid-low volume
-    CategoryProfile {
-        id: 17,
-        floor_cents: 1_500,
-        spread_cents: 2_500,
-        weight: 18,
-    },
-    CategoryProfile {
-        id: 18,
-        floor_cents: 4_000,
-        spread_cents: 4_000,
-        weight: 9,
-    },
-    CategoryProfile {
-        id: 19,
-        floor_cents: 2_000,
-        spread_cents: 1_500,
-        weight: 14,
-    },
-    CategoryProfile {
-        id: 20,
-        floor_cents: 2_500,
-        spread_cents: 4_000,
-        weight: 6,
-    },
+/// Issue workflow states, in board order. The same list lives
+/// client-side in `web/src/issues.ts`; keep the two in sync.
+pub const STATUSES: &[&str] = &[
+    "backlog",
+    "todo",
+    "in_progress",
+    "in_review",
+    "done",
+    "cancelled",
 ];
+
+/// Projects issues belong to. `security` is the interesting one: the
+/// default permission rule hides it from non-admin personas. The same
+/// list lives client-side in `web/src/issues.ts`.
+pub const PROJECTS: &[&str] = &["sync-engine", "dataflow", "clients", "infra", "security"];
+
+/// Story-point estimates the tracker uses (Fibonacci-ish).
+const ESTIMATES: &[i64] = &[1, 2, 3, 5, 8];
 
 /// Total wait time for Postgres to start accepting connections.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Replication-poll cadence. 100ms gives perceptually-live updates
-/// (snappier than the previous 50ms tick on a 300k-row dataflow
-/// rerun) without burning Postgres CPU.
+/// without burning Postgres CPU.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Days since the Unix epoch, "today" from the server's clock.
+pub fn today_epoch_day() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    i64::try_from(secs / 86_400).unwrap_or(0)
+}
+
+/// Tiny deterministic PRNG (xorshift64*) so the seed and the activity
+/// simulator don't need a rand dependency and reseed reproducibly.
+pub struct DemoRng(u64);
+
+impl DemoRng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed.max(1))
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// Uniform integer in `[0, bound)`.
+    pub fn below(&mut self, bound: usize) -> usize {
+        if bound == 0 {
+            return 0;
+        }
+        usize::try_from(self.next_u64() % bound as u64).unwrap_or(0)
+    }
+
+    /// Pick an index from a weight table.
+    pub fn weighted(&mut self, weights: &[u32]) -> usize {
+        let total: u64 = weights.iter().map(|w| u64::from(*w)).sum();
+        if total == 0 {
+            return 0;
+        }
+        let mut roll = self.next_u64() % total;
+        for (idx, w) in weights.iter().enumerate() {
+            let w = u64::from(*w);
+            if roll < w {
+                return idx;
+            }
+            roll -= w;
+        }
+        weights.len() - 1
+    }
+}
 
 /// Connection parameters sourced from env vars so docker-compose can
 /// wire them. Default values match the demo compose file so a
@@ -257,20 +182,15 @@ pub struct PgBootstrap {
     /// Client used by HTTP handlers for INSERT/UPDATE/DELETE.
     pub client: Arc<Client>,
     /// Stable settings — kept around so the consumer task can open
-    /// its own connection (replication slot polling shares the same
-    /// connection but the future may split).
+    /// its own connection.
     pub settings: PgSettings,
-    /// Postgres OID for the `posts` table — used as the `TableId`
+    /// Postgres OID for the `issues` table — used as the `TableId`
     /// throughout the dataflow.
-    pub posts_oid: u32,
-    /// Postgres OID for the `orders` table.
-    pub orders_oid: u32,
-    /// Postgres OID for the `accounts` table.
-    pub accounts_oid: u32,
+    pub issues_oid: u32,
 }
 
 /// Connect, ensure schema + publication + slot, seed if empty, and
-/// resolve the table OIDs the rest of the server uses as `TableId`s.
+/// resolve the table OID the rest of the server uses as `TableId`.
 pub async fn bootstrap() -> Result<PgBootstrap, String> {
     let settings = PgSettings::from_env();
     let client = connect_with_retry(&settings).await?;
@@ -282,17 +202,12 @@ pub async fn bootstrap() -> Result<PgBootstrap, String> {
     // consumer would replay those same INSERTs and double-apply them
     // on top of the SELECT-based snapshot below.
     drain_slot(&client, &settings).await?;
-    let (posts_oid, orders_oid, accounts_oid) = discover_oids(&client).await?;
-    info!(
-        posts_oid,
-        orders_oid, accounts_oid, "postgres bootstrap complete",
-    );
+    let issues_oid = discover_oid(&client).await?;
+    info!(issues_oid, "postgres bootstrap complete");
     Ok(PgBootstrap {
         client: Arc::new(client),
         settings,
-        posts_oid,
-        orders_oid,
-        accounts_oid,
+        issues_oid,
     })
 }
 
@@ -333,39 +248,29 @@ async fn connect_once(settings: &PgSettings) -> Result<Client, String> {
     Ok(client)
 }
 
-/// Create the demo's two tables if they don't exist. Posts is the
-/// permission-rule demo. Orders is the high-volume aggregate demo —
-/// shape (id, category_id, amount_cents) so the dataflow can run a
-/// GROUP BY category_id with COUNT / SUM / AVG against it.
+/// Create the tracker's `issues` table if it doesn't exist. Everything
+/// the analytics page needs is denormalized into Int/Text columns
+/// (`created_day` / `completed_day` / `cycle_days`) so throughput and
+/// cycle-time queries are plain GROUP BYs over base columns.
 async fn init_schema(client: &Client) -> Result<(), String> {
     let sql = r"
-        CREATE TABLE IF NOT EXISTS posts (
-            id        BIGSERIAL PRIMARY KEY,
-            title     TEXT      NOT NULL,
-            published BOOLEAN   NOT NULL DEFAULT FALSE
+        CREATE TABLE IF NOT EXISTS issues (
+            id            BIGSERIAL PRIMARY KEY,
+            title         TEXT   NOT NULL,
+            status        TEXT   NOT NULL DEFAULT 'todo',
+            priority      BIGINT NOT NULL DEFAULT 2,
+            assignee      TEXT   NOT NULL DEFAULT '',
+            project       TEXT   NOT NULL DEFAULT 'sync-engine',
+            estimate      BIGINT NOT NULL DEFAULT 3,
+            created_day   BIGINT NOT NULL,
+            completed_day BIGINT NOT NULL DEFAULT 0,
+            cycle_days    BIGINT NOT NULL DEFAULT 0
         );
 
         -- `REPLICA IDENTITY FULL` makes UPDATE/DELETE WAL records
         -- carry the *old* row in full, not just the primary key.
         -- The dataflow's diff stream needs that to compute retracts.
-        ALTER TABLE posts REPLICA IDENTITY FULL;
-
-        CREATE TABLE IF NOT EXISTS orders (
-            id            BIGSERIAL PRIMARY KEY,
-            category_id   BIGINT    NOT NULL,
-            amount_cents  BIGINT    NOT NULL
-        );
-
-        ALTER TABLE orders REPLICA IDENTITY FULL;
-
-        CREATE TABLE IF NOT EXISTS accounts (
-            id             BIGSERIAL PRIMARY KEY,
-            owner_user_id  TEXT      NOT NULL UNIQUE,
-            display_name   TEXT      NOT NULL,
-            balance_cents  BIGINT    NOT NULL CHECK (balance_cents >= 0)
-        );
-
-        ALTER TABLE accounts REPLICA IDENTITY FULL;
+        ALTER TABLE issues REPLICA IDENTITY FULL;
     ";
     client
         .batch_execute(sql)
@@ -374,11 +279,9 @@ async fn init_schema(client: &Client) -> Result<(), String> {
     Ok(())
 }
 
-/// Create `palimpsest_pub` and `palimpsest_demo` if they don't yet
-/// exist. Both are idempotent — repeated boots are a no-op.
+/// Create the publication and slot if they don't yet exist. Both are
+/// idempotent — repeated boots are a no-op.
 async fn ensure_publication_and_slot(client: &Client, settings: &PgSettings) -> Result<(), String> {
-    // Publication: covers both tables. Postgres complains if the
-    // publication already exists, so check first.
     let pub_exists: bool = client
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
@@ -387,9 +290,18 @@ async fn ensure_publication_and_slot(client: &Client, settings: &PgSettings) -> 
         .await
         .map_err(|err| err.to_string())?
         .get(0);
-    if !pub_exists {
+    if pub_exists {
         let pub_sql = format!(
-            "CREATE PUBLICATION {} FOR TABLE posts, orders, accounts",
+            "ALTER PUBLICATION {} SET TABLE issues",
+            quote_ident(&settings.publication),
+        );
+        client
+            .batch_execute(&pub_sql)
+            .await
+            .map_err(|err| format!("ALTER PUBLICATION: {err}"))?;
+    } else {
+        let pub_sql = format!(
+            "CREATE PUBLICATION {} FOR TABLE issues",
             quote_ident(&settings.publication),
         );
         client
@@ -397,19 +309,8 @@ async fn ensure_publication_and_slot(client: &Client, settings: &PgSettings) -> 
             .await
             .map_err(|err| format!("CREATE PUBLICATION: {err}"))?;
         info!(publication = %settings.publication, "created publication");
-    } else {
-        let pub_sql = format!(
-            "ALTER PUBLICATION {} SET TABLE posts, orders, accounts",
-            quote_ident(&settings.publication),
-        );
-        client
-            .batch_execute(&pub_sql)
-            .await
-            .map_err(|err| format!("ALTER PUBLICATION: {err}"))?;
     }
 
-    // Replication slot: only create if missing. We deliberately use
-    // a *named* slot so WAL is retained across server restarts.
     let slot_exists: bool = client
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
@@ -431,107 +332,169 @@ async fn ensure_publication_and_slot(client: &Client, settings: &PgSettings) -> 
     Ok(())
 }
 
-/// Seed both demo tables on first boot. `posts` gets three
-/// hand-written rows; `orders` gets ~600k synthetic rows distributed
-/// across the 20 categories in `CATEGORY_PROFILES` with realistic
-/// per-category price floors and volume weights.
-///
-/// The orders seed is one big `UNION ALL` of 20 per-category inserts,
-/// so Postgres plans + executes it as one statement. We wrap it in
-/// a single transaction (explicit since `batch_execute` is
-/// statement-by-statement) so the replication consumer's
-/// transaction-boundary batching collapses the whole seed into one
-/// LSN. Idempotent — once orders has any rows we leave it alone.
+// ---------------------------------------------------------------------------
+// Seed: a believable quarter of project history.
+// ---------------------------------------------------------------------------
+
+const TITLE_VERBS: &[&str] = &[
+    "Fix",
+    "Implement",
+    "Refactor",
+    "Design",
+    "Investigate",
+    "Document",
+    "Optimize",
+    "Migrate",
+    "Add",
+    "Remove",
+    "Harden",
+    "Profile",
+];
+
+const TITLE_SUBJECTS: &[&str] = &[
+    "WAL cursor backpressure",
+    "snapshot chunking",
+    "permission rewriter caching",
+    "reconnect backoff jitter",
+    "TopK spill path",
+    "diff coalescing",
+    "JWT clock skew handling",
+    "schema-change resync",
+    "browser transport framing",
+    "slot recovery runbook",
+    "replica ack batching",
+    "dataflow arrangement compaction",
+    "CTE reuse detection",
+    "gRPC-Web trailer handling",
+    "flaky conformance test",
+    "memory ceiling alerts",
+    "TLS cert rotation",
+    "metrics cardinality",
+    "onboarding docs",
+    "load-suite scenario drift",
+    "bincode wire budget",
+    "pgoutput TOAST columns",
+    "subscription fan-out lock",
+    "type generation for enums",
+];
+
+/// Per-status weights for seeded issues (indexes line up with
+/// [`STATUSES`]). Most history is done; a healthy chunk is queued.
+const SEED_STATUS_WEIGHTS: &[u32] = &[16, 14, 7, 4, 55, 4];
+
+/// Per-priority weights (`0` none … `4` urgent).
+const SEED_PRIORITY_WEIGHTS: &[u32] = &[8, 22, 38, 24, 8];
+
+/// Per-project weights (indexes line up with [`PROJECTS`]).
+const SEED_PROJECT_WEIGHTS: &[u32] = &[30, 24, 22, 16, 8];
+
+/// Generate one synthetic issue. `id` is left to BIGSERIAL.
+fn seed_issue(rng: &mut DemoRng, today: i64) -> Issue {
+    let status = STATUSES[rng.weighted(SEED_STATUS_WEIGHTS)];
+    let priority = i64::try_from(rng.weighted(SEED_PRIORITY_WEIGHTS)).unwrap_or(2);
+    let project = PROJECTS[rng.weighted(SEED_PROJECT_WEIGHTS)];
+    let estimate = ESTIMATES[rng.below(ESTIMATES.len())];
+    // Assignment: done/in-flight issues always have an owner; queued
+    // ones are unassigned about a third of the time.
+    let assigned = matches!(status, "done" | "in_progress" | "in_review") || rng.below(3) > 0;
+    let assignee = if assigned {
+        USERS[rng.below(USERS.len())].id.to_owned()
+    } else {
+        String::new()
+    };
+    let age = 1 + i64::try_from(rng.below(usize::try_from(SEED_HISTORY_DAYS).unwrap_or(120)))
+        .unwrap_or(1);
+    let created_day = today - age;
+    // Cycle time skews with priority: urgent work lands in days,
+    // low-priority work meanders for weeks.
+    let (completed_day, cycle_days) = if status == "done" {
+        let base = match priority {
+            4 => 1 + i64::try_from(rng.below(3)).unwrap_or(0),
+            3 => 1 + i64::try_from(rng.below(6)).unwrap_or(0),
+            2 => 2 + i64::try_from(rng.below(10)).unwrap_or(0),
+            _ => 3 + i64::try_from(rng.below(21)).unwrap_or(0),
+        };
+        let cycle = base.min(age.max(1));
+        (created_day + cycle, cycle)
+    } else {
+        (0, 0)
+    };
+    let title = format!(
+        "{} {}",
+        TITLE_VERBS[rng.below(TITLE_VERBS.len())],
+        TITLE_SUBJECTS[rng.below(TITLE_SUBJECTS.len())],
+    );
+    Issue {
+        id: 0,
+        title,
+        status: status.to_owned(),
+        priority,
+        assignee,
+        project: project.to_owned(),
+        estimate,
+        created_day,
+        completed_day,
+        cycle_days,
+    }
+}
+
+/// Seed the tracker on first boot: `SEED_ISSUES` issues distributed
+/// over the past `SEED_HISTORY_DAYS` days. Inserted in one explicit
+/// transaction so the replication consumer's transaction-boundary
+/// batching collapses the whole seed into a single mirror LSN.
+/// Idempotent — once the table has any rows we leave it alone.
 async fn seed_if_empty(client: &Client) -> Result<(), String> {
-    let posts_count: i64 = client
-        .query_one("SELECT COUNT(*) FROM posts", &[])
+    let count: i64 = client
+        .query_one("SELECT COUNT(*) FROM issues", &[])
         .await
         .map_err(|err| err.to_string())?
         .get(0);
-    if posts_count == 0 {
-        client
-            .batch_execute(
-                r"
-                INSERT INTO posts (title, published) VALUES
-                    ('Welcome to Palimpsest', TRUE),
-                    ('Subscribe to a live SQL view', TRUE),
-                    ('Draft: in-progress writeup', FALSE);
-                ",
-            )
-            .await
-            .map_err(|err| format!("seed posts: {err}"))?;
-        info!("seeded posts (3 rows)");
+    if count > 0 {
+        return Ok(());
     }
 
-    let orders_count: i64 = client
-        .query_one("SELECT COUNT(*) FROM orders", &[])
-        .await
-        .map_err(|err| err.to_string())?
-        .get(0);
-    if orders_count == 0 {
-        let total_weight: i64 = CATEGORY_PROFILES.iter().map(|p| p.weight).sum();
-        let mut sql = String::from(
-            "SELECT setseed(0.42);\n\
-             INSERT INTO orders (category_id, amount_cents)\n",
-        );
-        for (i, profile) in CATEGORY_PROFILES.iter().enumerate() {
-            let rows = SEED_ORDERS_TARGET * profile.weight / total_weight;
-            if i > 0 {
-                sql.push_str("UNION ALL\n");
-            }
-            // Floor + uniform(0, spread). Cast random()*spread to
-            // bigint so the resulting amount_cents column type lines
-            // up with the table.
-            sql.push_str(&format!(
-                "SELECT {cat}::bigint, ({floor} + (random() * {spread}))::bigint
-                 FROM generate_series(1, {rows})\n",
-                cat = profile.id,
-                floor = profile.floor_cents,
-                spread = profile.spread_cents,
-            ));
+    let today = today_epoch_day();
+    let mut rng = DemoRng::new(0x_5EED_1CE5);
+    let mut sql = String::from(
+        "BEGIN;\nINSERT INTO issues \
+         (title, status, priority, assignee, project, estimate, \
+          created_day, completed_day, cycle_days) VALUES\n",
+    );
+    for i in 0..SEED_ISSUES {
+        let issue = seed_issue(&mut rng, today);
+        if i > 0 {
+            sql.push_str(",\n");
         }
-        sql.push(';');
-        client
-            .batch_execute(&sql)
-            .await
-            .map_err(|err| format!("seed orders: {err}"))?;
-        let actual: i64 = client
-            .query_one("SELECT COUNT(*) FROM orders", &[])
-            .await
-            .map_err(|err| err.to_string())?
-            .get(0);
-        info!(
-            categories = CATEGORY_PROFILES.len(),
-            rows = actual,
-            "seeded orders across realistic e-commerce categories"
-        );
+        sql.push_str(&format!(
+            "({}, {}, {}, {}, {}, {}, {}, {}, {})",
+            quote_literal(&issue.title),
+            quote_literal(&issue.status),
+            issue.priority,
+            quote_literal(&issue.assignee),
+            quote_literal(&issue.project),
+            issue.estimate,
+            issue.created_day,
+            issue.completed_day,
+            issue.cycle_days,
+        ));
     }
-
-    let accounts_count: i64 = client
-        .query_one("SELECT COUNT(*) FROM accounts", &[])
+    sql.push_str(";\nCOMMIT;");
+    client
+        .batch_execute(&sql)
         .await
-        .map_err(|err| err.to_string())?
-        .get(0);
-    if accounts_count == 0 {
-        for (idx, user) in USERS.iter().enumerate() {
-            let balance_cents = 25_000 + i64::try_from(idx).unwrap_or(0) * 7_500;
-            client
-                .execute(
-                    "INSERT INTO accounts (owner_user_id, display_name, balance_cents)
-                     VALUES ($1, $2, $3)",
-                    &[&user.id, &user.display_name, &balance_cents],
-                )
-                .await
-                .map_err(|err| format!("seed accounts: {err}"))?;
-        }
-        info!(rows = USERS.len(), "seeded demo accounts");
-    }
-
+        .map_err(|err| format!("seed issues: {err}"))?;
+    info!(rows = SEED_ISSUES, "seeded issue history");
     Ok(())
 }
 
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+/// Quote a text value as a SQL literal (single quotes doubled). Seed
+/// titles come from fixed word lists, but quote anyway.
+fn quote_literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
 }
 
 /// Read every pending WAL frame from the slot and throw it away,
@@ -556,83 +519,43 @@ async fn drain_slot(client: &Client, settings: &PgSettings) -> Result<(), String
     Ok(())
 }
 
-/// Resolve `posts.regclass::oid` + `orders.regclass::oid`. These
-/// values feed directly into the `TableId` Palimpsest tags every
-/// row with — the dataflow doesn't dereference them, but they have
-/// to be consistent end-to-end so the consumer's
-/// `DecodedEvent::Row { table, .. }` lands in the right mirror.
-async fn discover_oids(client: &Client) -> Result<(u32, u32, u32), String> {
-    let posts_oid: u32 = client
-        .query_one("SELECT 'public.posts'::regclass::oid", &[])
+/// Resolve `issues.regclass::oid`. This value feeds directly into the
+/// `TableId` Palimpsest tags every row with — the dataflow doesn't
+/// dereference it, but it has to be consistent end-to-end so the
+/// consumer's `DecodedEvent::Row { table, .. }` lands in the mirror.
+async fn discover_oid(client: &Client) -> Result<u32, String> {
+    let oid: u32 = client
+        .query_one("SELECT 'public.issues'::regclass::oid", &[])
         .await
         .map_err(|err| err.to_string())?
         .get::<_, tokio_postgres::types::Oid>(0);
-    let orders_oid: u32 = client
-        .query_one("SELECT 'public.orders'::regclass::oid", &[])
-        .await
-        .map_err(|err| err.to_string())?
-        .get::<_, tokio_postgres::types::Oid>(0);
-    let accounts_oid: u32 = client
-        .query_one("SELECT 'public.accounts'::regclass::oid", &[])
-        .await
-        .map_err(|err| err.to_string())?
-        .get::<_, tokio_postgres::types::Oid>(0);
-    Ok((posts_oid, orders_oid, accounts_oid))
+    Ok(oid)
 }
 
-/// Snapshot `posts` into memory.
-pub async fn snapshot_posts(client: &Client) -> Result<Vec<Post>, String> {
+/// Snapshot `issues` into memory.
+pub async fn snapshot_issues(client: &Client) -> Result<Vec<Issue>, String> {
     let rows = client
-        .query("SELECT id, title, published FROM posts ORDER BY id", &[])
+        .query(
+            "SELECT id, title, status, priority, assignee, project, estimate,
+                    created_day, completed_day, cycle_days
+             FROM issues ORDER BY id",
+            &[],
+        )
         .await
         .map_err(|err| err.to_string())?;
     Ok(rows
         .into_iter()
-        .map(|row| Post {
+        .map(|row| Issue {
             id: row.get::<_, i64>(0),
             title: row.get::<_, String>(1),
-            published: row.get::<_, bool>(2),
-        })
-        .collect())
-}
-
-/// Snapshot `orders` into memory. 600k rows ≈ 30MB on the wire over
-/// the local socket; comfortably within psql's defaults.
-pub async fn snapshot_orders(client: &Client) -> Result<Vec<Order>, String> {
-    let rows = client
-        .query(
-            "SELECT id, category_id, amount_cents FROM orders ORDER BY id",
-            &[],
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(rows
-        .into_iter()
-        .map(|row| Order {
-            id: row.get::<_, i64>(0),
-            category_id: row.get::<_, i64>(1),
-            amount_cents: row.get::<_, i64>(2),
-        })
-        .collect())
-}
-
-pub async fn snapshot_accounts(client: &Client) -> Result<Vec<Account>, String> {
-    let rows = client
-        .query(
-            "SELECT id, owner_user_id, display_name, balance_cents
-             FROM accounts
-             ORDER BY id",
-            &[],
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(rows
-        .into_iter()
-        .map(|row| Account {
-            id: row.get::<_, i64>(0),
-            owner_user_id: row.get::<_, String>(1),
-            display_name: row.get::<_, String>(2),
-            balance_cents: row.get::<_, i64>(3),
+            status: row.get::<_, String>(2),
+            priority: row.get::<_, i64>(3),
+            assignee: row.get::<_, String>(4),
+            project: row.get::<_, String>(5),
+            estimate: row.get::<_, i64>(6),
+            created_day: row.get::<_, i64>(7),
+            completed_day: row.get::<_, i64>(8),
+            cycle_days: row.get::<_, i64>(9),
         })
         .collect())
 }
@@ -641,31 +564,14 @@ pub async fn snapshot_accounts(client: &Client) -> Result<Vec<Account>, String> 
 /// so the write client isn't blocked on the long-running polling
 /// query. Each tick calls `pg_logical_slot_get_binary_changes`,
 /// decodes each frame via `palimpsest_wal::decode_pgoutput_message`,
-/// and applies the result to the in-memory mirrors.
-///
-/// The task runs until `cancel` fires or the connection dies, then
-/// exits — the parent supervises and would restart it in production.
+/// and applies the result to the in-memory mirror.
 pub fn spawn_consumer(
     settings: PgSettings,
-    posts_oid: u32,
-    orders_oid: u32,
-    accounts_oid: u32,
-    store: Arc<Store>,
-    order_store: Arc<OrderStore>,
-    account_store: Arc<AccountStore>,
+    issues_oid: u32,
+    store: Arc<IssueStore>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        match run_consumer(
-            settings,
-            posts_oid,
-            orders_oid,
-            accounts_oid,
-            store,
-            order_store,
-            account_store,
-        )
-        .await
-        {
+        match run_consumer(settings, issues_oid, store).await {
             Ok(()) => info!("postgres consumer exited cleanly"),
             Err(err) => warn!(?err, "postgres consumer crashed"),
         }
@@ -674,12 +580,8 @@ pub fn spawn_consumer(
 
 async fn run_consumer(
     settings: PgSettings,
-    posts_oid: u32,
-    orders_oid: u32,
-    accounts_oid: u32,
-    store: Arc<Store>,
-    order_store: Arc<OrderStore>,
-    account_store: Arc<AccountStore>,
+    issues_oid: u32,
+    store: Arc<IssueStore>,
 ) -> Result<(), String> {
     let client = connect_with_retry(&settings).await?;
     info!(
@@ -694,17 +596,11 @@ async fn run_consumer(
 
     // Each call to `pg_logical_slot_get_binary_changes` spins up a
     // fresh logical-decoding session inside Postgres, which prints
-    // a LOG line ("starting logical decoding for slot ..."). At 100ms
-    // poll cadence that's 10 LOG lines/sec into the demo's logs.
-    // Peeking the slot's confirmed_flush_lsn against current WAL is
-    // a cheap regular query that doesn't trigger decoding — so we
-    // only call get_changes when there's actually new WAL.
-    //
-    // Streaming-replication (`START_REPLICATION SLOT ... LOGICAL`)
-    // would be the right long-term answer (one decoding session per
-    // connection, not per poll), but tokio-postgres 0.7 doesn't
-    // expose the COPY_BOTH protocol needed for that. For the demo,
-    // the peek-first dance is sufficient.
+    // a LOG line. At 100ms poll cadence that's 10 LOG lines/sec into
+    // the demo's logs. Peeking the slot's confirmed_flush_lsn against
+    // current WAL is a cheap regular query that doesn't trigger
+    // decoding — so we only call get_changes when there's actually
+    // new WAL.
     let has_new_wal_sql = "SELECT pg_current_wal_lsn() > confirmed_flush_lsn
                            FROM pg_replication_slots
                            WHERE slot_name = $1";
@@ -715,11 +611,10 @@ async fn run_consumer(
          )";
 
     // Per-transaction buffer. Postgres sends every change wrapped in
-    // a Begin / Commit pair; we accumulate row changes per table and
-    // flush them at Commit so the mirror's LSN bumps once per
-    // transaction (a 1000-row bulk INSERT becomes one cursor-pump
-    // wakeup, not 1000).
-    let mut txn = TxnBuffer::default();
+    // a Begin / Commit pair; we accumulate row changes and flush them
+    // at Commit so the mirror's LSN bumps once per transaction (a
+    // simulator batch becomes one cursor-pump wakeup, not many).
+    let mut txn: Vec<IssueChange> = Vec::new();
 
     loop {
         tick.tick().await;
@@ -755,16 +650,7 @@ async fn run_consumer(
             let bytes: Vec<u8> = row.get::<_, Vec<u8>>(1);
             let frame = Bytes::from(bytes);
             match decode_pgoutput_message(&mut catalog, frame) {
-                Ok(event) => handle_event(
-                    event,
-                    posts_oid,
-                    orders_oid,
-                    accounts_oid,
-                    &store,
-                    &order_store,
-                    &account_store,
-                    &mut txn,
-                ),
+                Ok(event) => handle_event(event, issues_oid, &store, &mut txn),
                 Err(err) => {
                     warn!(?err, "decode_pgoutput_message failed");
                 }
@@ -773,53 +659,20 @@ async fn run_consumer(
     }
 }
 
-#[derive(Default)]
-struct TxnBuffer {
-    posts: Vec<PostChange>,
-    orders: Vec<OrderChange>,
-    accounts: Vec<AccountChange>,
-}
-
-impl TxnBuffer {
-    fn clear(&mut self) {
-        self.posts.clear();
-        self.orders.clear();
-        self.accounts.clear();
-    }
-
-    fn flush(&mut self, store: &Store, order_store: &OrderStore, account_store: &AccountStore) {
-        if !self.posts.is_empty() {
-            store.apply_txn(&self.posts);
-        }
-        if !self.orders.is_empty() {
-            order_store.apply_txn(&self.orders);
-        }
-        if !self.accounts.is_empty() {
-            account_store.apply_txn(&self.accounts);
-        }
-        self.clear();
-    }
-}
-
-/// Route a single `DecodedEvent` into the per-table buffer; flush
+/// Route a single `DecodedEvent` into the transaction buffer; flush
 /// on `Commit`. `Begin` resets in case a previous transaction was
 /// truncated by an error mid-stream.
 fn handle_event(
     event: DecodedEvent,
-    posts_oid: u32,
-    orders_oid: u32,
-    accounts_oid: u32,
-    store: &Store,
-    order_store: &OrderStore,
-    account_store: &AccountStore,
-    txn: &mut TxnBuffer,
+    issues_oid: u32,
+    store: &IssueStore,
+    txn: &mut Vec<IssueChange>,
 ) {
     match event {
-        DecodedEvent::Begin { .. } => {
-            txn.clear();
-        }
+        DecodedEvent::Begin { .. } => txn.clear(),
         DecodedEvent::Commit { .. } => {
-            txn.flush(store, order_store, account_store);
+            store.apply_txn(txn);
+            txn.clear();
         }
         DecodedEvent::Row {
             table,
@@ -827,17 +680,9 @@ fn handle_event(
             old,
             new,
         } => {
-            if table == TableId::new(posts_oid) {
-                if let Some(change) = post_change(op, old, new) {
-                    txn.posts.push(change);
-                }
-            } else if table == TableId::new(orders_oid) {
-                if let Some(change) = order_change(op, old, new) {
-                    txn.orders.push(change);
-                }
-            } else if table == TableId::new(accounts_oid) {
-                if let Some(change) = account_change(op, old, new) {
-                    txn.accounts.push(change);
+            if table == TableId::new(issues_oid) {
+                if let Some(change) = issue_change(op, old, new) {
+                    txn.push(change);
                 }
             }
         }
@@ -856,178 +701,78 @@ fn handle_event(
     }
 }
 
-fn post_change(
+fn issue_change(
     op: RowOp,
     old: Option<palimpsest_wal::Tuple>,
     new: Option<palimpsest_wal::Tuple>,
-) -> Option<PostChange> {
+) -> Option<IssueChange> {
     match op {
         RowOp::Insert => new
-            .and_then(|t| post_from_tuple(&t))
-            .map(PostChange::Insert),
+            .and_then(|t| issue_from_tuple(&t))
+            .map(IssueChange::Insert),
         RowOp::Update => {
-            let prev = old.and_then(|t| post_from_tuple(&t))?;
-            let curr = new.and_then(|t| post_from_tuple(&t))?;
-            Some(PostChange::Update { prev, curr })
+            let prev = old.and_then(|t| issue_from_tuple(&t))?;
+            let curr = new.and_then(|t| issue_from_tuple(&t))?;
+            Some(IssueChange::Update { prev, curr })
         }
         RowOp::Delete => old
-            .and_then(|t| post_from_tuple(&t))
-            .map(PostChange::Delete),
+            .and_then(|t| issue_from_tuple(&t))
+            .map(IssueChange::Delete),
     }
 }
 
-fn order_change(
-    op: RowOp,
-    old: Option<palimpsest_wal::Tuple>,
-    new: Option<palimpsest_wal::Tuple>,
-) -> Option<OrderChange> {
-    match op {
-        RowOp::Insert => new
-            .and_then(|t| order_from_tuple(&t))
-            .map(OrderChange::Insert),
-        RowOp::Update => {
-            let prev = old.and_then(|t| order_from_tuple(&t))?;
-            let curr = new.and_then(|t| order_from_tuple(&t))?;
-            Some(OrderChange::Update { prev, curr })
+/// Pull the full issue row out of a pgoutput tuple. Layout matches the
+/// table's column declaration order in `init_schema`.
+fn issue_from_tuple(tuple: &palimpsest_wal::Tuple) -> Option<Issue> {
+    use palimpsest_wal::Datum;
+    let int = |idx: usize| -> Option<i64> {
+        match tuple.get(idx)? {
+            Datum::I64(v) => Some(*v),
+            Datum::I32(v) => Some(i64::from(*v)),
+            _ => None,
         }
-        RowOp::Delete => old
-            .and_then(|t| order_from_tuple(&t))
-            .map(OrderChange::Delete),
-    }
-}
-
-fn account_change(
-    op: RowOp,
-    old: Option<palimpsest_wal::Tuple>,
-    new: Option<palimpsest_wal::Tuple>,
-) -> Option<AccountChange> {
-    match op {
-        RowOp::Insert => new
-            .and_then(|t| account_from_tuple(&t))
-            .map(AccountChange::Insert),
-        RowOp::Update => {
-            let prev = old.and_then(|t| account_from_tuple(&t))?;
-            let curr = new.and_then(|t| account_from_tuple(&t))?;
-            Some(AccountChange::Update { prev, curr })
+    };
+    let text = |idx: usize| -> Option<String> {
+        match tuple.get(idx)? {
+            Datum::Text(b) => Some(std::str::from_utf8(b).ok()?.to_owned()),
+            _ => None,
         }
-        RowOp::Delete => old
-            .and_then(|t| account_from_tuple(&t))
-            .map(AccountChange::Delete),
-    }
-}
-
-/// Pull `(id, title, published)` out of a pgoutput tuple. Layout
-/// matches the table's column declaration order.
-fn post_from_tuple(tuple: &palimpsest_wal::Tuple) -> Option<Post> {
-    use palimpsest_wal::Datum;
-    let id = match tuple.first()? {
-        Datum::I64(v) => *v,
-        Datum::I32(v) => i64::from(*v),
-        _ => return None,
     };
-    let title = match tuple.get(1)? {
-        Datum::Text(b) => std::str::from_utf8(b).ok()?.to_owned(),
-        _ => return None,
-    };
-    let published = match tuple.get(2)? {
-        Datum::Bool(v) => *v,
-        _ => return None,
-    };
-    Some(Post {
-        id,
-        title,
-        published,
+    Some(Issue {
+        id: int(0)?,
+        title: text(1)?,
+        status: text(2)?,
+        priority: int(3)?,
+        assignee: text(4)?,
+        project: text(5)?,
+        estimate: int(6)?,
+        created_day: int(7)?,
+        completed_day: int(8)?,
+        cycle_days: int(9)?,
     })
 }
 
-fn order_from_tuple(tuple: &palimpsest_wal::Tuple) -> Option<Order> {
-    use palimpsest_wal::Datum;
-    let id = match tuple.first()? {
-        Datum::I64(v) => *v,
-        Datum::I32(v) => i64::from(*v),
-        _ => return None,
-    };
-    let category_id = match tuple.get(1)? {
-        Datum::I64(v) => *v,
-        Datum::I32(v) => i64::from(*v),
-        _ => return None,
-    };
-    let amount_cents = match tuple.get(2)? {
-        Datum::I64(v) => *v,
-        Datum::I32(v) => i64::from(*v),
-        _ => return None,
-    };
-    Some(Order {
-        id,
-        category_id,
-        amount_cents,
-    })
-}
-
-fn account_from_tuple(tuple: &palimpsest_wal::Tuple) -> Option<Account> {
-    use palimpsest_wal::Datum;
-    let id = match tuple.first()? {
-        Datum::I64(v) => *v,
-        Datum::I32(v) => i64::from(*v),
-        _ => return None,
-    };
-    let owner_user_id = match tuple.get(1)? {
-        Datum::Text(b) => std::str::from_utf8(b).ok()?.to_owned(),
-        _ => return None,
-    };
-    let display_name = match tuple.get(2)? {
-        Datum::Text(b) => std::str::from_utf8(b).ok()?.to_owned(),
-        _ => return None,
-    };
-    let balance_cents = match tuple.get(3)? {
-        Datum::I64(v) => *v,
-        Datum::I32(v) => i64::from(*v),
-        _ => return None,
-    };
-    Some(Account {
-        id,
-        owner_user_id,
-        display_name,
-        balance_cents,
-    })
-}
-
-// -----------------------------------------------------------------------------
-// `Row` helpers re-used by the apply layer — keep here so state.rs
-// stays focused on the in-memory snapshot + journal it exposes to
-// the WAL runtime.
-// -----------------------------------------------------------------------------
-
-/// Convert a `Post` into the `Row` shape the dataflow's BaseTable
-/// for `posts` expects. Column order matches `init_schema`.
-pub fn post_to_row(post: &Post) -> Row {
+/// Convert an `Issue` into the `Row` shape the dataflow's BaseTable
+/// for `issues` expects. Column order matches `init_schema`.
+pub fn issue_to_row(issue: &Issue) -> Row {
     let mut row: SmallVec<[palimpsest_wal::Datum; 8]> = SmallVec::new();
-    row.push(palimpsest_wal::Datum::I64(post.id));
+    row.push(palimpsest_wal::Datum::I64(issue.id));
     row.push(palimpsest_wal::Datum::Text(
-        post.title.clone().into_bytes().into(),
-    ));
-    row.push(palimpsest_wal::Datum::Bool(post.published));
-    row
-}
-
-/// Same shape as `post_to_row` for orders.
-pub fn order_to_row(order: &Order) -> Row {
-    let mut row: SmallVec<[palimpsest_wal::Datum; 8]> = SmallVec::new();
-    row.push(palimpsest_wal::Datum::I64(order.id));
-    row.push(palimpsest_wal::Datum::I64(order.category_id));
-    row.push(palimpsest_wal::Datum::I64(order.amount_cents));
-    row
-}
-
-pub fn account_to_row(account: &Account) -> Row {
-    let mut row: SmallVec<[palimpsest_wal::Datum; 8]> = SmallVec::new();
-    row.push(palimpsest_wal::Datum::I64(account.id));
-    row.push(palimpsest_wal::Datum::Text(
-        account.owner_user_id.clone().into_bytes().into(),
+        issue.title.clone().into_bytes().into(),
     ));
     row.push(palimpsest_wal::Datum::Text(
-        account.display_name.clone().into_bytes().into(),
+        issue.status.clone().into_bytes().into(),
     ));
-    row.push(palimpsest_wal::Datum::I64(account.balance_cents));
+    row.push(palimpsest_wal::Datum::I64(issue.priority));
+    row.push(palimpsest_wal::Datum::Text(
+        issue.assignee.clone().into_bytes().into(),
+    ));
+    row.push(palimpsest_wal::Datum::Text(
+        issue.project.clone().into_bytes().into(),
+    ));
+    row.push(palimpsest_wal::Datum::I64(issue.estimate));
+    row.push(palimpsest_wal::Datum::I64(issue.created_day));
+    row.push(palimpsest_wal::Datum::I64(issue.completed_day));
+    row.push(palimpsest_wal::Datum::I64(issue.cycle_days));
     row
 }

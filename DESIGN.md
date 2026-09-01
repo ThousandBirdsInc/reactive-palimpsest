@@ -1683,6 +1683,24 @@ All six picks are recorded in §16.1.
 - [ ] crates.io publishing checklist (READMEs, license tags,
   repository links) verified.
 
+### 18.19 Local-first replica (client-side pgrust WASM mirror)
+
+Implemented in `palimpsest-client::local` (see `docs/LOCAL-FIRST.md`):
+
+- [x] `LocalDatabase` abstraction with a `SqlExecutor` bridge
+  (`SqlLocalDatabase`) for pgrust/pglite-style Postgres WASM engines
+  and an in-memory store for native/tests.
+- [x] Per-mirror sync pump: table DDL from the wire schema, atomic
+  snapshot install, one local transaction per remote commit, LSN acks
+  for incremental resume, resync/permission-change handling.
+- [x] Optimistic mutation ledger with `O(pending)` shadow state:
+  settle-on-confirmation, rebase under concurrent writers,
+  server-wins conflicts after writer ack, rollback on write failure.
+- [x] `RemoteWriter` hook (writes stay on the application's own path,
+  per the §2 non-goal).
+- [x] wasm-bindgen surface (`Client.localReplica`) + TypeScript wrapper
+  (`localReplica`, `postgresWasmDriver`, `useLocalQuery` React hook).
+
 ## 19. Glossary
 
 - **Arrangement** — differential-dataflow's indexed, time-versioned

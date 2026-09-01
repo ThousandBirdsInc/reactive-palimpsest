@@ -111,6 +111,12 @@ export interface WasmClientCtor {
 export interface WasmClient {
   subscribe(sql: string, vars: Record<string, string>): Promise<WasmSubscription>;
   /**
+   * Start a local-first replica: mirror the server's permissioned
+   * subset into a local Postgres-compatible WASM engine. See
+   * `local_replica` in `crates/palimpsest-client-js/src/local.rs`.
+   */
+  localReplica(options: RawLocalReplicaOptions): Promise<WasmLocalReplica>;
+  /**
    * Subscribe to a server-registered named prepared query. The browser
    * never holds or sends SQL on this path; `params` is keyed by the
    * registered parameter names (or `$N` positions).
@@ -155,4 +161,68 @@ export interface WasmSubscription {
   update(vars: Record<string, string>): Promise<void>;
   ack(lsn: bigint | number): Promise<void>;
   unsubscribe(): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Local-first replica raw contract — mirrors
+// `crates/palimpsest-client-js/src/local.rs`.
+
+/** Options accepted by `WasmClient.localReplica`. */
+export interface RawLocalReplicaOptions {
+  /** Driver object with `exec(sql, params) => Promise<{rows}>`. */
+  database: { exec(sql: string, params: unknown[]): Promise<{ rows: unknown[][] }> };
+  /** Mirror specs: table name, `{table}`, `{sql, as}`, or `{name, params?}`. */
+  mirrors: Array<
+    | string
+    | { table: string }
+    | { sql: string; as: string }
+    | { name: string; params?: Record<string, NamedQueryParam> }
+  >;
+  /** Optional optimistic-write forwarder; reject to roll back. */
+  writer?: (request: RawWriteRequest) => Promise<void> | void;
+}
+
+/** Optimistic write handed to the writer callback. */
+export type RawWriteRequest =
+  | { token: number; table: string; kind: "insert"; values: Record<string, unknown> }
+  | {
+      token: number;
+      table: string;
+      kind: "update";
+      key: Record<string, unknown>;
+      set: Record<string, unknown>;
+    }
+  | { token: number; table: string; kind: "delete"; key: Record<string, unknown> };
+
+/** Mutation payload accepted by `WasmLocalReplica.mutate`. */
+export type RawLocalMutation =
+  | { table: string; insert: Record<string, unknown> }
+  | { table: string; key: Record<string, unknown>; set: Record<string, unknown> }
+  | { table: string; key: Record<string, unknown>; delete: true };
+
+/** Per-table sync status from `tableStates()` / `tableState` events. */
+export type RawTableSyncStatus =
+  | { kind: "connecting" }
+  | { kind: "snapshotting" }
+  | { kind: "live"; lsn: bigint }
+  | { kind: "resyncing" }
+  | { kind: "errored"; message: string };
+
+/** Replica notification events delivered to `onEvent`. */
+export type RawReplicaEvent =
+  | { kind: "tableState"; table: string; state: RawTableSyncStatus }
+  | { kind: "applied"; table: string; lsn: bigint }
+  | { kind: "mutationSettled"; token: number; table: string }
+  | { kind: "mutationConflicted"; token: number; table: string }
+  | { kind: "mutationFailed"; token: number; table: string; error: string }
+  | { kind: "mirrorError"; table: string; code: string; message: string };
+
+/** Wasm handle to a running local-first replica. */
+export interface WasmLocalReplica {
+  query(sql: string, params: unknown[]): Promise<unknown>;
+  mutate(mutation: RawLocalMutation): Promise<number>;
+  onEvent(callback: (event: RawReplicaEvent) => void): void;
+  tableStates(): Record<string, RawTableSyncStatus>;
+  pendingMutations(table: string): Promise<number>;
+  stop(): Promise<void>;
 }

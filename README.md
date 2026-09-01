@@ -260,9 +260,17 @@ Browser clients use:
 - `packages/palimpsest-client-typescript` for typed subscriptions and
   React hooks.
 
+Both client surfaces can also run a **local-first replica**: a
+client-side Postgres-compatible database (e.g. a pgrust-style Postgres
+WASM build) kept in sync with the permissioned subset of the remote
+database, serving the same SQL locally with optimistic writes that
+Palimpsest reconciles against the WAL. See
+[docs/LOCAL-FIRST.md](docs/LOCAL-FIRST.md).
+
 Useful docs:
 
 - [docs/WASM-CLIENT.md](docs/WASM-CLIENT.md)
+- [docs/LOCAL-FIRST.md](docs/LOCAL-FIRST.md)
 - [packages/palimpsest-client-typescript/README.md](packages/palimpsest-client-typescript/README.md)
 
 ## SQL And Permissions

@@ -204,6 +204,40 @@ usePalimpsestSubscription<Post>(client, sql, {
 callback identity is always used — you can pass an inline closure
 without causing re-subscribes.
 
+## Local-first replica
+
+Mirror the server's **permissioned subset** into a local
+Postgres-compatible WASM engine (pgrust/pglite-style) and run the same
+SQL against it — instant reads, offline support, optimistic writes
+reconciled against the WAL. See
+[docs/LOCAL-FIRST.md](../../docs/LOCAL-FIRST.md) for the architecture.
+
+```ts
+import { postgresWasmDriver } from "@1kbirds/palimpsest-client";
+
+const replica = await client.localReplica({
+  database: postgresWasmDriver(pg), // your Postgres-in-WASM instance
+  mirrors: ["posts", { name: "workspace_members" }],
+  writer: (req) => api.applyMutation(req), // your write path; reject to roll back
+});
+
+const { rows } = await replica.query(
+  "SELECT * FROM posts WHERE author_id = $1",
+  [me],
+);
+await replica.mutate({ table: "posts", key: { id: 1 }, set: { title: "draft" } });
+```
+
+React apps can keep a local query live with the `useLocalQuery` hook:
+
+```ts
+import { useLocalQuery } from "@1kbirds/palimpsest-client/react";
+
+const { rows, status } = useLocalQuery(replica, "SELECT * FROM posts", {
+  tables: ["posts"], // optional: only re-run when these mirrors change
+});
+```
+
 ## Subpaths
 
 - `@1kbirds/palimpsest-client` — core (`PalimpsestClient`, `TypedSubscription`,
