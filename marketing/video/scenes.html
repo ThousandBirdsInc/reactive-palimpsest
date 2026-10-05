@@ -1,0 +1,887 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Palimpsest Explainer</title>
+<link href="fonts/fonts.css" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #070603;
+    --panel: #12100a;
+    --panel2: #1a170d;
+    --line: #2d2812;
+    --gold: #ffd11a;
+    --gold-dim: #8a7a3a;
+    --ink: #f4eedb;
+    --ink2: #b9b19a;
+    --ink3: #6f6853;
+    --green: #5fd38d;
+    --red: #ff6b5b;
+    --blue: #7cc4ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--bg); }
+  body { font-family: Inter, system-ui, sans-serif; color: var(--ink); }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  #bg { position: absolute; inset: 0; }
+  .vignette { position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 45%, rgba(0,0,0,0) 45%, rgba(0,0,0,.75) 100%); }
+  .scene { position: absolute; inset: 0; opacity: 0; display: none; }
+  .label { position: absolute; left: 120px; top: 92px; font: 500 22px 'JetBrains Mono', monospace;
+    color: var(--gold); letter-spacing: 3px; text-transform: uppercase; }
+  .label b { color: var(--ink3); font-weight: 500; margin-right: 18px; }
+  h2 { position: absolute; left: 120px; top: 136px; font-size: 64px; font-weight: 800; letter-spacing: -1.5px; line-height: 1.08; max-width: 1680px; }
+  h2 em { font-style: normal; color: var(--gold); }
+  .sub { position: absolute; left: 120px; font-size: 30px; color: var(--ink2); line-height: 1.45; max-width: 1500px; }
+  .card { position: absolute; background: var(--panel); border: 1.5px solid var(--line); border-radius: 18px; }
+  .code { font: 400 28px/1.6 'JetBrains Mono', monospace; color: var(--ink); white-space: pre; }
+  .kw { color: var(--gold); } .str { color: var(--green); } .cm { color: var(--ink3); } .fn { color: var(--blue); } .num { color: #ffa65c; }
+  .abs { position: absolute; }
+  #progress { position: absolute; left: 0; bottom: 0; height: 5px; background: var(--gold); opacity: .85; }
+  #brand { position: absolute; right: 70px; bottom: 34px; font: 600 20px 'JetBrains Mono', monospace; color: var(--gold-dim); letter-spacing: 2px; }
+
+  /* S1 */
+  #title { position: absolute; left: 0; right: 0; top: 330px; text-align: center; font-size: 176px; font-weight: 800; letter-spacing: -5px; }
+  #title span { display: inline-block; }
+  #tagline { position: absolute; left: 0; right: 0; top: 590px; text-align: center; font-size: 44px; color: var(--ink2); font-weight: 500; }
+  #tagline b { color: var(--gold); font-weight: 700; }
+  #pills { position: absolute; left: 0; right: 0; top: 700px; display: flex; justify-content: center; gap: 22px; }
+  .pill { font: 500 24px 'JetBrains Mono', monospace; color: var(--gold); border: 1.5px solid var(--gold-dim); border-radius: 999px; padding: 10px 26px; background: rgba(255,209,26,.05); }
+  #s1rule { position: absolute; left: 50%; top: 560px; height: 3px; background: var(--gold); transform: translateX(-50%); }
+
+  /* S2 */
+  .pain { position: absolute; width: 400px; height: 280px; padding: 34px; }
+  .pain .ic { font: 700 44px 'JetBrains Mono', monospace; color: var(--gold); }
+  .pain .t { font-size: 32px; font-weight: 700; margin-top: 18px; }
+  .pain .d { font-size: 22px; color: var(--ink2); margin-top: 10px; line-height: 1.4; }
+  .strike { position: absolute; left: 24px; top: 130px; height: 4px; background: var(--red); border-radius: 2px; }
+  #s2q { position: absolute; left: 0; right: 0; top: 800px; text-align: center; font-size: 58px; font-weight: 800; letter-spacing: -1px; }
+  #s2q em { font-style: normal; color: var(--gold); }
+
+  /* S3 */
+  .tbl-row { position: absolute; left: 0; right: 0; height: 76px; display: flex; align-items: center; overflow: hidden; font-size: 26px; border-bottom: 1px solid var(--line); }
+  .tbl-row > div { padding: 0 26px; }
+  .tbl-head { color: var(--ink3); font: 500 20px 'JetBrains Mono', monospace; letter-spacing: 2px; text-transform: uppercase; }
+  .c-id { width: 130px; font-family: 'JetBrains Mono', monospace; color: var(--ink2); }
+  .c-title { flex: 1; }
+  .c-st { width: 200px; }
+  .badge { font: 600 19px 'JetBrains Mono', monospace; padding: 6px 14px; border-radius: 8px; }
+  .b-todo { color: var(--blue); background: rgba(124,196,255,.12); }
+  .b-doing { color: var(--gold); background: rgba(255,209,26,.12); }
+  .b-done { color: var(--green); background: rgba(95,211,141,.12); }
+  .op { width: 64px; font: 700 28px 'JetBrains Mono', monospace; text-align: center; }
+  .log-line { font: 400 22px/1.9 'JetBrains Mono', monospace; color: var(--ink2); white-space: pre; }
+
+  /* S4 */
+  .node { position: absolute; width: 222px; height: 170px; border-radius: 18px; background: var(--panel); border: 2px solid var(--line); padding: 20px 18px; text-align: center; }
+  .node .n1 { font-size: 25px; font-weight: 700; line-height: 1.2; }
+  .node .n2 { font: 400 17px 'JetBrains Mono', monospace; color: var(--ink3); margin-top: 10px; }
+  .node .num { position: absolute; top: -16px; left: 50%; transform: translateX(-50%); font: 700 16px 'JetBrains Mono', monospace; background: var(--bg); color: var(--gold-dim); padding: 2px 10px; border-radius: 6px; border: 1.5px solid var(--line); }
+  .detail { position: absolute; left: 120px; right: 120px; top: 700px; height: 270px; padding: 40px 50px; }
+  .detail .dt { font-size: 40px; font-weight: 800; }
+  .detail .dc { font: 500 22px 'JetBrains Mono', monospace; color: var(--gold); margin-top: 6px; }
+  .detail ul { margin-top: 22px; list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 60px; }
+  .detail li { font-size: 25px; color: var(--ink2); line-height: 1.35; padding-left: 28px; position: relative; }
+  .detail li:before { content: ""; position: absolute; left: 0; top: 12px; width: 10px; height: 10px; background: var(--gold); border-radius: 2px; }
+
+  /* S5 */
+  .lane-label { font-size: 30px; font-weight: 700; }
+  .lane-sub { font: 400 20px 'JetBrains Mono', monospace; color: var(--ink3); margin-top: 6px; }
+  .bar-track { position: absolute; height: 64px; border-radius: 12px; background: var(--panel); border: 1.5px solid var(--line); overflow: hidden; }
+  .bar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 10px; }
+  .big-stat { font-size: 120px; font-weight: 800; letter-spacing: -3px; }
+
+  /* S6 */
+  .dot { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: var(--blue); }
+
+  /* S7 */
+  .user-panel { position: absolute; width: 470px; padding: 28px 30px; }
+  .user-panel .uh { display: flex; align-items: center; gap: 16px; font-size: 30px; font-weight: 700; }
+  .avatar { width: 50px; height: 50px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 800; color: #111; }
+  .urow { height: 58px; display: flex; align-items: center; justify-content: space-between; font-size: 23px; border-bottom: 1px solid var(--line); overflow: hidden; }
+  .urow .own { font: 400 18px 'JetBrains Mono', monospace; color: var(--ink3); }
+  .plan { position: absolute; width: 470px; height: 92px; border-radius: 14px; border: 2px solid var(--line); background: var(--panel); display: flex; align-items: center; justify-content: center; font: 500 23px 'JetBrains Mono', monospace; }
+
+  /* S8 */
+  .blk { position: absolute; width: 104px; height: 70px; margin-left: -52px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font: 500 16px 'JetBrains Mono', monospace; }
+  .bul { font-size: 27px; color: var(--ink2); line-height: 1.4; padding-left: 34px; position: relative; }
+  .bul b { color: var(--ink); }
+  .bul:before { content: ""; position: absolute; left: 0; top: 13px; width: 12px; height: 12px; background: var(--gold); border-radius: 3px; }
+
+  /* S9 */
+  .flow-node { position: absolute; width: 250px; height: 100px; border-radius: 16px; background: var(--panel); border: 2px solid var(--line); display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .flow-node .f1 { font-size: 26px; font-weight: 700; }
+  .flow-node .f2 { font: 400 17px 'JetBrains Mono', monospace; color: var(--ink3); margin-top: 6px; }
+
+  /* S10 */
+  .chip { position: absolute; width: 470px; height: 108px; padding: 18px 26px; border-radius: 16px; background: var(--panel); border: 2px solid var(--line); }
+  .chip .k { font: 700 24px 'JetBrains Mono', monospace; color: var(--gold); }
+  .chip .v { font-size: 22px; color: var(--ink2); margin-top: 8px; }
+
+  /* S11 */
+  .tile { position: absolute; width: 400px; height: 300px; padding: 34px 32px; }
+  .tile .ti { font: 700 40px 'JetBrains Mono', monospace; color: var(--gold); }
+  .tile .tt { font-size: 29px; font-weight: 800; margin-top: 22px; line-height: 1.2; }
+  .tile .td { font-size: 21px; color: var(--ink2); margin-top: 12px; line-height: 1.45; }
+
+  /* S12 */
+  #outro-title { position: absolute; left: 0; right: 0; top: 300px; text-align: center; font-size: 150px; font-weight: 800; letter-spacing: -4px; }
+  #outro-tag { position: absolute; left: 0; right: 0; top: 490px; text-align: center; font-size: 50px; font-weight: 600; color: var(--gold); }
+  #outro-cmd { position: absolute; left: 50%; top: 620px; transform: translateX(-50%); padding: 22px 40px; font: 500 34px 'JetBrains Mono', monospace; }
+  #outro-url { position: absolute; left: 0; right: 0; top: 760px; text-align: center; font: 500 30px 'JetBrains Mono', monospace; color: var(--ink2); }
+  #outro-note { position: absolute; left: 0; right: 0; top: 830px; text-align: center; font-size: 22px; color: var(--ink3); }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="bg" width="1920" height="1080"></canvas>
+
+  <!-- S1: Intro -->
+  <section class="scene" id="s1">
+    <div id="title"></div>
+    <div id="s1rule"></div>
+    <div id="tagline">Live SQL queries, streamed from your <b>Postgres WAL</b>.</div>
+    <div id="pills">
+      <div class="pill">open source</div><div class="pill">built in Rust</div><div class="pill">Postgres-native</div><div class="pill">row-level diffs</div>
+    </div>
+  </section>
+
+  <!-- S2: Problem -->
+  <section class="scene" id="s2">
+    <div class="label"><b>01</b>The problem</div>
+    <h2>Realtime apps are still <em>mostly plumbing.</em></h2>
+    <div id="pains"></div>
+    <div id="s2q">What if your queries just <em>stayed live?</em></div>
+  </section>
+
+  <!-- S3: Idea -->
+  <section class="scene" id="s3">
+    <div class="label"><b>02</b>The idea</div>
+    <h2>Subscribe to SQL. Get a snapshot,<br/>then <em>row-level diffs</em> — forever.</h2>
+    <div class="card" id="s3sql" style="left:120px; top:380px; width:700px; height:330px; padding:36px 40px;">
+      <div class="code"><span class="cm">-- name: BoardTickets :many</span>
+<span class="cm">-- palimpsest: live</span>
+<span class="kw">SELECT</span> id, title, status
+<span class="kw">FROM</span>   tickets
+<span class="kw">WHERE</span>  board_id = <span class="num">$1</span>
+<span class="kw">ORDER BY</span> position;</div>
+    </div>
+    <div class="card" id="s3log" style="left:120px; top:740px; width:700px; height:220px; padding:22px 36px; overflow:hidden;"></div>
+    <div class="card" id="s3tbl" style="left:880px; top:380px; width:920px; height:580px; overflow:hidden;">
+      <div class="tbl-row tbl-head" style="top:0; height:70px;"><div class="op"></div><div class="c-id">id</div><div class="c-title">title</div><div class="c-st">status</div></div>
+      <div id="s3rows" class="abs" style="left:0; right:0; top:70px; bottom:0;"></div>
+    </div>
+  </section>
+
+  <!-- S4: Architecture -->
+  <section class="scene" id="s4">
+    <div class="label"><b>03</b>Architecture</div>
+    <h2>From write-ahead log to <em>your UI</em>, incrementally.</h2>
+    <div id="s4nodes"></div>
+    <svg id="s4svg" class="abs" style="left:0; top:0; pointer-events:none;" width="1920" height="1080"></svg>
+    <div class="card detail" id="s4detail"></div>
+  </section>
+
+  <!-- S5: Incremental -->
+  <section class="scene" id="s5">
+    <div class="label"><b>04</b>Differential dataflow</div>
+    <h2>Work proportional to the <em>commit</em>,<br/>not the query.</h2>
+    <div class="abs" style="left:120px; top:430px;"><div class="lane-label">Re-run the query</div><div class="lane-sub">polling / invalidate-and-refetch</div></div>
+    <div class="bar-track" style="left:620px; top:430px; width:1180px;"><div class="bar-fill" id="s5a" style="background:linear-gradient(90deg,#ff6b5b,#ff9b6b);"></div></div>
+    <div class="abs" style="left:120px; top:580px;"><div class="lane-label" style="color:var(--gold)">Palimpsest</div><div class="lane-sub">incremental view maintenance</div></div>
+    <div class="bar-track" style="left:620px; top:580px; width:1180px;"><div class="bar-fill" id="s5b" style="background:var(--gold);"></div></div>
+    <div class="abs mono" id="s5ticks" style="left:620px; top:510px; font-size:20px; color:var(--ink3);"></div>
+    <div class="sub" id="s5txt" style="top:740px;">A query that joins ten tables and aggregates millions of rows does
+      <b style="color:var(--ink)">O(commit-size)</b> work per upstream commit. Every operator is incremental;
+      partial materialization keeps memory bounded by what clients actually watch.</div>
+    <div class="abs mono" style="left:120px; top:930px; font-size:18px; color:var(--ink3);">illustrative — relative work per commit</div>
+  </section>
+
+  <!-- S6: Sharing -->
+  <section class="scene" id="s6">
+    <div class="label"><b>05</b>Subscription sharing</div>
+    <h2>One query shape.<br/><em>Thousands</em> of subscribers.</h2>
+    <svg id="s6svg" class="abs" style="left:0; top:0;" width="1920" height="1080"></svg>
+    <div id="s6dots"></div>
+    <div class="abs" id="s6core" style="left:1290px; top:600px; width:300px; height:300px; margin:-150px 0 0 -150px; border-radius:50%; background:radial-gradient(circle, rgba(255,209,26,.25), rgba(255,209,26,.04) 70%); border:2.5px solid var(--gold); display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
+      <div style="font-size:28px; font-weight:800;">1 arrangement</div>
+      <div class="mono" style="font-size:18px; color:var(--gold); margin-top:8px;">key 9f3a·c71e</div>
+    </div>
+    <div class="sub" style="top:420px; max-width:640px;">SQL is normalized and lowered to MIR, then hashed into a <b style="color:var(--ink)">canonical key</b>. Subscribers with the same shape and bindings share runtime state.</div>
+    <div class="abs" style="left:120px; top:690px;">
+      <div class="big-stat mono" id="s6count" style="color:var(--blue);">0</div>
+      <div class="lane-sub" style="font-size:24px;">subscribers · <span style="color:var(--gold)">1 copy of state</span></div>
+    </div>
+  </section>
+
+  <!-- S7: Permissions -->
+  <section class="scene" id="s7">
+    <div class="label"><b>06</b>Row-level permissions</div>
+    <h2>Rules compile <em>into the plan.</em></h2>
+    <div class="card" id="s7rule" style="left:120px; top:330px; width:600px; height:300px; padding:30px 36px;">
+      <div class="code" style="font-size:24px;"><span class="cm"># permissions.toml</span>
+[[<span class="kw">rule</span>]]
+name      = <span class="str">"own_tickets"</span>
+table     = <span class="str">"tickets"</span>
+predicate = <span class="str">"owner_id = $user.id"</span></div>
+    </div>
+    <div class="plan" id="s7p1" style="left:770px; top:330px;">Project(id, title)</div>
+    <div class="plan" id="s7p2" style="left:770px; top:460px; color:var(--gold); border-color:var(--gold);">Filter owner_id = $user.id</div>
+    <div class="plan" id="s7p3" style="left:770px; top:590px;">Scan tickets</div>
+    <svg id="s7svg" class="abs" style="left:0; top:0;" width="1920" height="1080"></svg>
+    <div class="card user-panel" id="s7a" style="left:1330px; top:330px;"></div>
+    <div class="card user-panel" id="s7b" style="left:1330px; top:640px;"></div>
+    <div class="sub" id="s7txt" style="top:690px; max-width:1100px; font-size:27px;">
+      Rules are validated against the catalog at load time and spliced into each subscription as MIR filters.
+      Rows are filtered <b style="color:var(--ink)">before they leave the server</b> — and revoked access arrives as a retraction.
+    </div>
+  </section>
+
+  <!-- S8: Reliability -->
+  <section class="scene" id="s8">
+    <div class="label"><b>07</b>Delivery guarantees</div>
+    <h2>Every diff carries an <em>LSN.</em><br/>Disconnects resume, crashes replay.</h2>
+    <div class="card" style="left:120px; top:390px; width:1680px; height:230px; overflow:hidden;" id="s8lane">
+      <div class="abs mono" style="left:30px; top:20px; font-size:19px; color:var(--ink3);">CLIENT ◀ SERVER · DIFFS IN WAL ORDER</div>
+      <div id="s8blks" class="abs" style="left:0; top:0; right:0; bottom:0;"></div>
+      <div id="s8status" class="abs mono" style="right:30px; top:20px; font-size:19px;"></div>
+    </div>
+    <div class="abs" style="left:120px; top:700px; width:800px; display:flex; flex-direction:column; gap:22px;" id="s8b1"></div>
+    <div class="abs" style="left:980px; top:700px; width:820px; display:flex; flex-direction:column; gap:22px;" id="s8b2"></div>
+  </section>
+
+  <!-- S9: Local-first -->
+  <section class="scene" id="s9">
+    <div class="label"><b>08</b>Local-first replica</div>
+    <h2>A Postgres-in-WASM mirror of <em>exactly<br/>what you may see.</em></h2>
+    <div class="card" id="s9browser" style="left:120px; top:380px; width:760px; height:470px; overflow:hidden;">
+      <div style="height:54px; background:var(--panel2); border-bottom:1.5px solid var(--line); display:flex; align-items:center; gap:10px; padding:0 22px;">
+        <div style="width:14px;height:14px;border-radius:50%;background:#3a3420"></div><div style="width:14px;height:14px;border-radius:50%;background:#3a3420"></div><div style="width:14px;height:14px;border-radius:50%;background:#3a3420"></div>
+        <div class="mono" style="margin-left:18px; font-size:18px; color:var(--ink3);">LocalReplica · pgrust (WASM)</div>
+      </div>
+      <div style="padding:22px 30px;">
+        <div class="mono" style="font-size:20px; color:var(--gold);">SELECT * FROM tickets  <span style="color:var(--green)">— 0 ms, offline-ready</span></div>
+        <div id="s9rows" style="margin-top:14px;"></div>
+      </div>
+    </div>
+    <svg id="s9svg" class="abs" style="left:0; top:0;" width="1920" height="1080"></svg>
+    <div class="flow-node" style="left:1080px; top:420px;"><div class="f1">Your write API</div><div class="f2">RemoteWriter</div></div>
+    <div class="flow-node" style="left:1500px; top:420px;"><div class="f1">Postgres</div><div class="f2">COMMIT</div></div>
+    <div class="flow-node" style="left:1500px; top:640px;"><div class="f1">WAL</div><div class="f2">pgoutput</div></div>
+    <div class="flow-node" style="left:1080px; top:640px; border-color:var(--gold);"><div class="f1" style="color:var(--gold)">Palimpsest</div><div class="f2">permissioned diff</div></div>
+    <div class="abs" id="s9cap" style="left:1080px; top:800px; width:720px; display:flex; flex-direction:column; gap:14px;"></div>
+  </section>
+
+  <!-- S10: DX -->
+  <section class="scene" id="s10">
+    <div class="label"><b>09</b>Developer experience</div>
+    <h2>Four inputs. <em>Everything else is derived.</em></h2>
+    <div class="chip" id="c0" style="left:120px; top:340px;"><div class="k">[database] dsn</div><div class="v">slot, publication, replica identity</div></div>
+    <div class="chip" id="c1" style="left:120px; top:470px;"><div class="k">[queries] live.sql</div><div class="v">sqlc format · validated vs catalog</div></div>
+    <div class="chip" id="c2" style="left:120px; top:600px;"><div class="k">[auth] jwt</div><div class="v">HS* / RS* / ES* / JWKS</div></div>
+    <div class="chip" id="c3" style="left:120px; top:730px;"><div class="k">[permissions] rules</div><div class="v">row-level predicates</div></div>
+    <svg id="s10svg" class="abs" style="left:0; top:0;" width="1920" height="1080"></svg>
+    <div class="abs" id="s10eng" style="left:690px; top:520px; width:200px; height:160px; border-radius:20px; border:2.5px solid var(--gold); background:rgba(255,209,26,.07); display:flex; flex-direction:column; align-items:center; justify-content:center;">
+      <div class="mono" style="font-size:22px; color:var(--gold); font-weight:700;">palimpsest</div><div class="mono" style="font-size:20px; color:var(--ink2); margin-top:6px;">serve</div>
+    </div>
+    <div class="card" id="s10term" style="left:960px; top:340px; width:840px; height:170px; padding:26px 32px;">
+      <div class="code" style="font-size:23px;"><span class="str">$</span> palimpsest typegen --out src/queries.ts
+<span class="cm">✓ BoardTickets → Row + Params types</span>
+<span class="cm">  timestamptz→Date · bigint→bigint · arrays</span></div>
+    </div>
+    <div class="card" id="s10code" style="left:960px; top:540px; width:840px; height:290px; padding:28px 32px;">
+      <div class="code" style="font-size:23px;"><span class="kw">const</span> { rows, status } =
+  <span class="fn">usePalimpsestNamedSubscription</span>&lt;<span class="fn">BoardTicket</span>&gt;(
+    client, <span class="str">"BoardTickets"</span>, { board_id });
+
+<span class="cm">// rows stay current. No SQL in the bundle,</span>
+<span class="cm">// no cache invalidation, no socket code.</span></div>
+    </div>
+  </section>
+
+  <!-- S11: Advantages -->
+  <section class="scene" id="s11">
+    <div class="label"><b>10</b>Why Palimpsest</div>
+    <h2>The Convex-style model, <em>on the Postgres you already run.</em></h2>
+    <div id="tiles"></div>
+  </section>
+
+  <!-- S12: Outro -->
+  <section class="scene" id="s12">
+    <div id="outro-title">Palimpsest</div>
+    <div id="outro-tag">Keep every query live.</div>
+    <div class="card" id="outro-cmd"><span style="color:var(--green)">$</span> cargo install palimpsest-cli</div>
+    <div id="outro-url">github.com/thousandbirdsinc/reactive-palimpsest</div>
+    <div id="outro-note">MIT / Apache-2.0 · under active development</div>
+  </section>
+
+  <div class="vignette"></div>
+  <div id="brand">PALIMPSEST</div>
+  <div id="progress"></div>
+</div>
+
+<script>
+// ---------- helpers ----------
+const $ = (id) => document.getElementById(id);
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const eo = (x) => 1 - Math.pow(1 - x, 3);
+const eio = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const lerp = (a, b, x) => a + (b - a) * x;
+function rise(el, p, dy = 28) {
+  p = eo(clamp(p));
+  el.style.opacity = p;
+  el.style.transform = `translateY(${(1 - p) * dy}px)`;
+}
+function el(tag, cls, html, parent) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html != null) e.innerHTML = html;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const SVGNS = 'http://www.w3.org/2000/svg';
+function sv(tag, attrs, parent) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function rand(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+
+// ---------- timeline ----------
+const SCENES = [
+  ['s1', 0, 7],
+  ['s2', 7, 16.5],
+  ['s3', 16.5, 28],
+  ['s4', 28, 47],
+  ['s5', 47, 56.5],
+  ['s6', 56.5, 65.5],
+  ['s7', 65.5, 75.5],
+  ['s8', 75.5, 85],
+  ['s9', 85, 95],
+  ['s10', 95, 104.5],
+  ['s11', 104.5, 114],
+  ['s12', 114, 122],
+];
+const TOTAL = 122;
+window.TOTAL = TOTAL;
+
+// ---------- background: layered, overwritten text (a palimpsest) ----------
+const bg = $('bg'), g = bg.getContext('2d');
+const TXT = [
+  'BEGIN 0/1A3F2C8  INSERT INTO tickets (id, title, status) VALUES (108, ...)  COMMIT',
+  'SELECT id, title, status FROM tickets WHERE board_id = $1 ORDER BY position;',
+  'pgoutput  Relation  Insert  Update  Delete  Commit  lsn 0/1A3F3B0  xid 48213',
+  'Filter(owner_id = $user.id)  Project(id, title)  Scan(tickets)  Join  Reduce',
+  'Diff +1 (108, "Add SSO login", todo)  Diff -1 (102, ...)  Ack 0/1A3F4E0',
+  'arrangement 9f3a·c71e  frontier 0/1A3F5A8  subscribers 10,000  resync 0',
+];
+const R = rand(7);
+const LINES = Array.from({ length: 34 }, (_, i) => ({
+  y: 18 + i * 32, txt: TXT[i % TXT.length] + '   ' + TXT[(i * 7 + 3) % TXT.length] + '   ' + TXT[(i * 5 + 1) % TXT.length],
+  speed: (R() < 0.5 ? -1 : 1) * (6 + R() * 14), off: R() * 2000, a: 0.016 + R() * 0.018, size: R() < 0.2 ? 24 : 17,
+}));
+function drawBg(t) {
+  g.fillStyle = '#070603';
+  g.fillRect(0, 0, 1920, 1080);
+  for (const L of LINES) {
+    g.font = `500 ${L.size}px "JetBrains Mono", monospace`;
+    const w = g.measureText(L.txt + '   ').width;
+    let x = -((L.off + t * L.speed) % w);
+    if (x > 0) x -= w;
+    // slow "erase and rewrite" shimmer, like scraped vellum
+    const a = L.a * (0.65 + 0.35 * Math.sin(t * 0.35 + L.off));
+    g.fillStyle = `rgba(255,209,26,${a})`;
+    for (; x < 1920; x += w) g.fillText(L.txt, x, L.y);
+  }
+  const rg = g.createRadialGradient(960, 560, 120, 960, 560, 1000);
+  rg.addColorStop(0, 'rgba(7,6,3,0.55)');
+  rg.addColorStop(1, 'rgba(7,6,3,0)');
+  g.fillStyle = rg;
+  g.fillRect(0, 0, 1920, 1080);
+}
+
+// ---------- S1 ----------
+const titleEl = $('title');
+'Palimpsest'.split('').forEach((ch) => el('span', null, ch, titleEl));
+function s1(t) {
+  [...titleEl.children].forEach((sp, i) => {
+    const p = eo(prog(t, 0.4 + i * 0.08, 1.2 + i * 0.08));
+    sp.style.opacity = p;
+    sp.style.transform = `translateY(${(1 - p) * 60}px)`;
+    sp.style.filter = `blur(${(1 - p) * 10}px)`;
+    sp.style.color = p < 1 ? `rgb(255,${Math.round(lerp(209, 238, p))},${Math.round(lerp(26, 219, p))})` : 'var(--ink)';
+  });
+  $('s1rule').style.width = eio(prog(t, 1.6, 2.6)) * 520 + 'px';
+  rise($('tagline'), prog(t, 2.2, 3.0));
+  [...$('pills').children].forEach((p, i) => rise(p, prog(t, 3.2 + i * 0.18, 3.8 + i * 0.18), 18));
+}
+
+// ---------- S2 ----------
+const PAINS = [
+  ['↻', 'Polling loops', 'Re-running queries on a timer and hoping it was fast enough.'],
+  ['✗', 'Cache invalidation', 'Guessing which keys a write made stale — and missing some.'],
+  ['⇄', 'Hand-rolled sockets', 'Bespoke WebSocket servers, reconnects, and replay logic.'],
+  ['⚑', 'Per-user filtering', 'Re-implementing authorization on every push path.'],
+];
+const painEls = PAINS.map((p, i) => {
+  const c = el('div', 'card pain', `<div class="ic">${p[0]}</div><div class="t">${p[1]}</div><div class="d">${p[2]}</div><div class="strike"></div>`, $('pains'));
+  c.style.left = 120 + i * 430 + 'px';
+  c.style.top = '380px';
+  return c;
+});
+function s2(t) {
+  painEls.forEach((c, i) => {
+    rise(c, prog(t, 0.8 + i * 0.35, 1.5 + i * 0.35), 40);
+    const sp = eio(prog(t, 4.3 + i * 0.25, 4.8 + i * 0.25));
+    c.querySelector('.strike').style.width = sp * 352 + 'px';
+    if (sp > 0) c.style.opacity = lerp(1, 0.38, sp);
+  });
+  rise($('s2q'), prog(t, 5.8, 6.6), 30);
+}
+
+// ---------- S3: live table ----------
+const BASE = [
+  { id: 101, title: 'Design onboarding flow', st: 'doing', pos: 1 },
+  { id: 102, title: 'Fix flaky upload test', st: 'todo', pos: 2 },
+  { id: 104, title: 'Ship billing webhooks', st: 'todo', pos: 3 },
+  { id: 105, title: 'Audit row permissions', st: 'doing', pos: 4 },
+  { id: 107, title: 'Write migration guide', st: 'todo', pos: 6 },
+];
+const S3EV = [
+  { t: 4.6, op: '+', row: { id: 108, title: 'Add SSO login', st: 'todo', pos: 5 }, lsn: '0/1A3F2C8' },
+  { t: 5.9, op: '~', id: 104, st: 'done', lsn: '0/1A3F3B0' },
+  { t: 7.2, op: '−', id: 102, lsn: '0/1A3F4E0' },
+  { t: 8.4, op: '~', id: 101, st: 'done', lsn: '0/1A3F5A8' },
+  { t: 9.3, op: '+', row: { id: 109, title: 'Dark mode for dashboards', st: 'doing', pos: 0.5 }, lsn: '0/1A3F6F0' },
+];
+const rowEls = {};
+function rowEl(r) {
+  if (!rowEls[r.id]) {
+    const e = el('div', 'tbl-row', `<div class="op"></div><div class="c-id">#${r.id}</div><div class="c-title">${r.title}</div><div class="c-st"><span class="badge"></span></div>`, $('s3rows'));
+    rowEls[r.id] = e;
+  }
+  return rowEls[r.id];
+}
+[...BASE, ...S3EV.filter((e) => e.row).map((e) => e.row)].forEach(rowEl);
+const logEl = $('s3log');
+const logLines = [];
+logLines.push(el('div', 'log-line', '<span style="color:var(--gold)">◆ Accepted</span>  BoardTickets(board_id=7)', logEl));
+logLines.push(el('div', 'log-line', '<span style="color:var(--blue)">◆ Initial</span>   5 rows      lsn 0/1A3F1A0', logEl));
+S3EV.forEach((e) => {
+  const col = e.op === '+' ? 'var(--green)' : e.op === '−' ? 'var(--red)' : 'var(--gold)';
+  const what = e.op === '+' ? `+ #${e.row.id}` : e.op === '−' ? `− #${e.id}` : `~ #${e.id} → ${e.st}`;
+  logLines.push(el('div', 'log-line', `<span style="color:${col}">◆ Diff</span>      ${what.padEnd(16)}lsn ${e.lsn}`, logEl));
+});
+const LOG_T = [1.2, 1.9, ...S3EV.map((e) => e.t)];
+function s3(t) {
+  rise($('s3sql'), prog(t, 0.5, 1.2));
+  rise($('s3tbl'), prog(t, 0.8, 1.5));
+  rise($('s3log'), prog(t, 1.0, 1.6));
+  // state at time t
+  const rows = BASE.map((r) => ({ ...r, h: eo(prog(t, 1.9 + BASE.indexOf(r) * 0.12, 2.3 + BASE.indexOf(r) * 0.12)), flash: 0, fc: '', op: '' }));
+  for (const e of S3EV) {
+    if (t < e.t) continue;
+    const age = t - e.t;
+    const fl = Math.max(0, 1 - age / 1.6);
+    if (e.op === '+') rows.push({ ...e.row, h: eo(prog(t, e.t, e.t + 0.45)), flash: fl, fc: '95,211,141', op: '+' });
+    else {
+      const r = rows.find((x) => x.id === e.id);
+      if (!r) continue;
+      if (e.op === '~') { r.st = e.st; r.flash = fl; r.fc = '255,209,26'; r.op = fl > 0 ? '~' : ''; }
+      else { r.flash = Math.max(0, 1 - age / 0.9); r.fc = '255,107,91'; r.op = '−'; r.h = 1 - eio(prog(t, e.t + 0.45, e.t + 0.95)); r.dead = true; }
+    }
+  }
+  rows.sort((a, b) => a.pos - b.pos);
+  let y = 0;
+  const seen = new Set();
+  for (const r of rows) {
+    const e = rowEl(r);
+    seen.add(r.id);
+    e.style.display = r.h <= 0.001 ? 'none' : 'flex';
+    e.style.top = y + 'px';
+    e.style.height = 76 * r.h + 'px';
+    e.style.opacity = r.dead ? Math.min(1, r.h * 1.5) : r.h;
+    e.style.background = r.flash > 0 ? `rgba(${r.fc},${0.22 * r.flash})` : 'transparent';
+    const op = e.querySelector('.op');
+    op.textContent = r.flash > 0.02 ? r.op : '';
+    op.style.color = `rgb(${r.fc || '255,255,255'})`;
+    const b = e.querySelector('.badge');
+    b.textContent = r.st;
+    b.className = 'badge b-' + r.st;
+    y += 76 * r.h;
+  }
+  for (const id in rowEls) if (!seen.has(+id)) rowEls[id].style.display = 'none';
+  // log
+  let shown = 0;
+  logLines.forEach((l, i) => {
+    const p = prog(t, LOG_T[i], LOG_T[i] + 0.3);
+    l.style.display = p > 0 ? 'block' : 'none';
+    l.style.opacity = eo(p);
+    if (p > 0) shown++;
+  });
+  // keep last 4 visible by scrolling
+  logEl.scrollTop = 0;
+  const firstVisible = Math.max(0, shown - 4);
+  logLines.forEach((l, i) => { if (i < firstVisible) l.style.display = 'none'; });
+}
+
+// ---------- S4: architecture ----------
+const NODES = [
+  ['Postgres', 'logical replication', 'Postgres', 'your database · pgoutput',
+    ['Stays the single source of truth — no new datastore', 'Real walsender session (START_REPLICATION, COPY_BOTH)', 'TLS on both management and replication connections', 'Nothing inserted into your write path']],
+  ['WAL ingest', 'palimpsest-wal', 'WAL ingest', 'palimpsest-wal · palimpsest-postgres',
+    ['Decodes pgoutput into typed row changes', 'Owns the slot, publication & REPLICA IDENTITY', 'Confirms an LSN only after it is applied', 'Reconnect-with-reconciliation on failover']],
+  ['SQL → MIR', 'palimpsest-sql', 'SQL frontend', 'palimpsest-sql',
+    ['Postgres-dialect SELECTs: joins, aggregates, CTEs', 'EXISTS, LATERAL, DISTINCT ON, WITH RECURSIVE, UNION', 'Normalized and lowered to a relational IR (MIR)', 'Validated against the live catalog at registration']],
+  ['Dataflow', 'palimpsest-dataflow', 'Differential dataflow', 'palimpsest-dataflow',
+    ['Every operator is incremental', 'Shared arrangements across subscriptions', 'Partial materialization bounds memory', 'Trace history compacted below acked LSNs']],
+  ['Router', 'palimpsest-server', 'Subscription router', 'palimpsest-server',
+    ['Canonical-key routing: same shape → same state', 'Permission rules spliced into each plan', 'Bounded per-subscription buffers + resync', 'Ack tracking drives the compaction frontier']],
+  ['SyncEngine', 'gRPC · Web · WS', 'SyncEngine protocol', 'palimpsest-proto',
+    ['One listener: gRPC, gRPC-Web and /ws/subscribe', 'JWT auth: HS*, RS*, ES* or JWKS — config, not code', 'Per-IP and per-connection rate limits', 'Versioned protobuf schema']],
+  ['Clients', 'Rust · WASM · React', 'Clients', 'palimpsest-client · client-js · TypeScript',
+    ['Native Rust and browser WASM clients', 'TypeScript wrapper with React hooks', 'Resume from last LSN; dedupe by LSN', 'Optional local-first Postgres-in-WASM replica']],
+];
+const NX0 = 120, NW = 222, NG = (1680 - NW * 7) / 6, NY = 410;
+const nodeEls = NODES.map((n, i) => {
+  const d = el('div', 'node', `<div class="num">0${i + 1}</div><div class="n1">${n[0]}</div><div class="n2">${n[1]}</div>`, $('s4nodes'));
+  d.style.left = NX0 + i * (NW + NG) + 'px';
+  d.style.top = NY + 'px';
+  return d;
+});
+const s4svg = $('s4svg');
+const links = [];
+const TRACK_Y = NY + 138;
+sv('line', { x1: NX0 + 24, y1: TRACK_Y, x2: NX0 + 6 * (NW + NG) + NW - 24, y2: TRACK_Y, stroke: '#2d2812', 'stroke-width': 2, 'stroke-dasharray': '2 8' }, s4svg);
+for (let i = 0; i < 6; i++) {
+  const x1 = NX0 + i * (NW + NG) + NW, x2 = NX0 + (i + 1) * (NW + NG), y = NY + 85;
+  links.push({ x1, x2, y, line: sv('line', { x1, y1: y, x2: x1, y2: y, stroke: '#5c5020', 'stroke-width': 3 }, s4svg),
+    head: sv('path', { d: `M${x2 - 10},${y - 7} L${x2},${y} L${x2 - 10},${y + 7}`, fill: 'none', stroke: '#8a7a3a', 'stroke-width': 3, opacity: 0 }, s4svg) });
+}
+const PKT = 18;
+const pkts = Array.from({ length: PKT }, () => sv('circle', { r: 5, fill: '#ffd11a' }, s4svg));
+const pathLen = (NW + NG) * 6;
+const detailEl = $('s4detail');
+function detailHTML(i) {
+  const n = NODES[i];
+  return `<div class="dt">${n[2]}</div><div class="dc">${n[3]}</div><ul>${n[4].map((b) => `<li>${b}</li>`).join('')}</ul>`;
+}
+let lastDetail = -1;
+const DSTEP = 2.35;
+function s4(t) {
+  NODES.forEach((_, i) => {
+    rise(nodeEls[i], prog(t, 0.5 + i * 0.22, 1.1 + i * 0.22), 30);
+  });
+  links.forEach((l, i) => {
+    const p = eio(prog(t, 0.9 + i * 0.22, 1.4 + i * 0.22));
+    l.line.setAttribute('x2', lerp(l.x1, l.x2 - 4, p));
+    l.head.setAttribute('opacity', p);
+  });
+  const active = Math.floor(clamp((t - 2.6) / DSTEP, 0, 6.999));
+  const local = t - 2.6 - active * DSTEP;
+  nodeEls.forEach((n, i) => {
+    const on = t > 2.4 && i === active;
+    n.style.borderColor = on ? 'var(--gold)' : 'var(--line)';
+    n.style.background = on ? 'rgba(255,209,26,.09)' : 'var(--panel)';
+    n.style.boxShadow = on ? '0 0 40px rgba(255,209,26,.25)' : 'none';
+  });
+  if (active !== lastDetail) { detailEl.innerHTML = detailHTML(active); lastDetail = active; }
+  const dp = t < 2.6 ? prog(t, 2.0, 2.6) : (active === 0 ? 1 : prog(local, 0, 0.35));
+  detailEl.style.opacity = eo(dp);
+  detailEl.style.transform = `translateY(${(1 - eo(dp)) * 16}px)`;
+  // packets flowing left → right through the pipeline
+  const flowOn = prog(t, 2.0, 2.8);
+  pkts.forEach((c, k) => {
+    const d = ((t * 210 + (k * pathLen) / PKT) % pathLen);
+    const seg = Math.floor(d / (NW + NG));
+    const within = d - seg * (NW + NG);
+    const x = NX0 + 24 + d * ((6 * (NW + NG) + NW - 48) / pathLen), y = TRACK_Y;
+    const edge = Math.min(1, d / 60, (pathLen - d) / 60);
+    const vis = Math.max(0, edge);
+    c.setAttribute('cx', x);
+    c.setAttribute('cy', y);
+    c.setAttribute('opacity', vis * flowOn);
+  });
+}
+
+// ---------- S5 ----------
+const COMMITS = [1.3, 3.0, 4.7, 6.4];
+const tickEls = COMMITS.map((_, i) => el('span', null, '', $('s5ticks')));
+function s5(t) {
+  let a = 0, b = 0;
+  COMMITS.forEach((c, i) => {
+    if (t >= c) {
+      a = eio(prog(t, c, c + 1.25));
+      b = eo(prog(t, c, c + 0.12)) * 0.022;
+    }
+    tickEls[i].innerHTML = t >= c ? `<span style="color:var(--gold); margin-right:34px;">● commit ${i + 1}</span>` : '';
+  });
+  // bars reset between commits
+  const last = COMMITS.filter((c) => t >= c).pop();
+  let fade = 1;
+  if (last != null) fade = 1 - prog(t, last + 1.35, last + 1.6);
+  $('s5a').style.width = a * 100 + '%';
+  $('s5a').style.opacity = last == null ? 0 : fade;
+  $('s5b').style.width = Math.max(b * 100, last == null ? 0 : 0.6) + '%';
+  $('s5b').style.opacity = last == null ? 0 : 1;
+  $('s5b').style.boxShadow = last != null && t - last < 0.5 ? '0 0 30px rgba(255,209,26,.9)' : 'none';
+  rise($('s5txt'), prog(t, 2.0, 2.7));
+}
+
+// ---------- S6: sharing ----------
+const s6svg = $('s6svg');
+const CX = 1290, CY = 600, NDOT = 150;
+const rr = rand(42);
+const dots = Array.from({ length: NDOT }, (_, i) => {
+  const ang = (i / NDOT) * Math.PI * 2 + rr() * 0.05;
+  const rad = 230 + rr() * 210;
+  const x = CX + Math.cos(ang) * rad, y = CY + Math.sin(ang) * rad * 0.92;
+  const line = sv('line', { x1: CX, y1: CY, x2: x, y2: y, stroke: '#ffd11a', 'stroke-width': 1, opacity: 0 }, s6svg);
+  const d = el('div', 'dot', null, $('s6dots'));
+  d.style.left = x + 'px'; d.style.top = y + 'px';
+  return { d, line, rad, appear: 0.6 + (i / NDOT) * 3.2 + rr() * 0.3 };
+});
+const rings = Array.from({ length: 4 }, () => sv('circle', { cx: CX, cy: CY, r: 0, fill: 'none', stroke: '#ffd11a', 'stroke-width': 2, opacity: 0 }, s6svg));
+function s6(t) {
+  rise($('s6core'), prog(t, 0.3, 0.9), 0);
+  $('s6core').style.transform = `scale(${0.8 + 0.2 * eo(prog(t, 0.3, 0.9))})`;
+  let n = 0;
+  const PER = 1.5;
+  dots.forEach((o) => {
+    const p = prog(t, o.appear, o.appear + 0.3);
+    if (p > 0) n++;
+    let glow = 0;
+    if (t > 4.3) {
+      const phase = ((t - 4.3) % PER) / PER;
+      const front = 150 + phase * 380;
+      glow = Math.max(0, 1 - Math.abs(front - o.rad) / 60);
+    }
+    o.d.style.opacity = eo(p) * (0.65 + 0.35 * glow);
+    o.d.style.transform = `scale(${0.4 + 0.6 * eo(p) + glow * 0.5})`;
+    o.d.style.background = glow > 0.3 ? '#ffd11a' : '#7cc4ff';
+    o.line.setAttribute('opacity', eo(p) * (0.08 + glow * 0.35));
+  });
+  rings.forEach((r, k) => {
+    if (t < 4.3) { r.setAttribute('opacity', 0); return; }
+    const phase = (((t - 4.3) / PER) + k * 0.25) % 1;
+    if (k > 0) { r.setAttribute('opacity', 0); return; }
+    r.setAttribute('r', 150 + phase * 380);
+    r.setAttribute('opacity', (1 - phase) * 0.6);
+  });
+  const shown = Math.round(lerp(0, 10000, eio(prog(t, 0.6, 4.2))));
+  $('s6count').textContent = shown.toLocaleString('en-US');
+}
+
+// ---------- S7: permissions ----------
+const TICKETS = [
+  ['Ship billing webhooks', 'alice'], ['Fix flaky upload test', 'bob'], ['Audit row permissions', 'alice'],
+  ['Add SSO login', 'bob'], ['Write migration guide', 'alice'], ['Dark mode dashboards', 'bob'],
+];
+function userPanel(host, name, color) {
+  host.innerHTML = `<div class="uh"><div class="avatar" style="background:${color}">${name[0].toUpperCase()}</div>${name[0].toUpperCase() + name.slice(1)}<span class="mono" style="font-size:18px;color:var(--ink3);margin-left:auto;">$user.id = ${name}</span></div><div class="rows" style="margin-top:12px;"></div>`;
+  const rows = host.querySelector('.rows');
+  return TICKETS.filter((x) => x[1] === name).map((x) => el('div', 'urow', `<span>${x[0]}</span><span class="own">owner=${x[1]}</span>`, rows));
+}
+const aRows = userPanel($('s7a'), 'alice', '#ffd11a');
+const bRows = userPanel($('s7b'), 'bob', '#7cc4ff');
+const s7svg = $('s7svg');
+const s7l1 = sv('path', { d: 'M1005,422 L1005,460', stroke: '#5c5020', 'stroke-width': 3 }, s7svg);
+const s7l2 = sv('path', { d: 'M1005,552 L1005,590', stroke: '#5c5020', 'stroke-width': 3 }, s7svg);
+const s7l3 = sv('path', { d: 'M1240,376 C1290,376 1280,420 1330,420', stroke: '#8a7a3a', 'stroke-width': 3, fill: 'none' }, s7svg);
+const s7l4 = sv('path', { d: 'M1240,376 C1290,376 1280,720 1330,720', stroke: '#8a7a3a', 'stroke-width': 3, fill: 'none' }, s7svg);
+const s7arrow = sv('path', { d: 'M720,480 C745,480 745,506 770,506', stroke: '#ffd11a', 'stroke-width': 3, fill: 'none', 'stroke-dasharray': '6 6' }, s7svg);
+function s7(t) {
+  rise($('s7rule'), prog(t, 0.4, 1.0));
+  rise($('s7p3'), prog(t, 0.9, 1.4));
+  rise($('s7p1'), prog(t, 1.1, 1.6));
+  const sp = prog(t, 2.0, 2.6);
+  $('s7p2').style.opacity = eo(sp);
+  $('s7p2').style.transform = `translateX(${(1 - eo(sp)) * -120}px) scale(${1 + 0.08 * Math.max(0, 1 - Math.abs(t - 2.8) / 0.4)})`;
+  $('s7p2').style.boxShadow = sp > 0 ? `0 0 ${30 * eo(sp)}px rgba(255,209,26,.35)` : 'none';
+  s7arrow.setAttribute('opacity', eo(sp));
+  [s7l1, s7l2].forEach((l) => l.setAttribute('opacity', prog(t, 1.2, 1.6)));
+  [s7l3, s7l4].forEach((l) => l.setAttribute('opacity', prog(t, 3.0, 3.5)));
+  rise($('s7a'), prog(t, 3.1, 3.7));
+  rise($('s7b'), prog(t, 3.3, 3.9));
+  aRows.forEach((r, i) => { r.style.opacity = eo(prog(t, 3.8 + i * 0.15, 4.2 + i * 0.15)); });
+  // Bob loses access to one ticket at t=6.8 → retraction
+  bRows.forEach((r, i) => {
+    r.style.opacity = eo(prog(t, 4.0 + i * 0.15, 4.4 + i * 0.15));
+    if (i === 1) {
+      const rv = prog(t, 6.6, 7.0), gone = eio(prog(t, 7.3, 7.8));
+      r.style.background = rv > 0 && gone < 1 ? `rgba(255,107,91,${0.25 * rv})` : 'transparent';
+      r.style.height = 58 * (1 - gone) + 'px';
+      r.style.opacity = rv > 0 ? 1 - gone : r.style.opacity;
+      r.querySelector('.own').textContent = rv > 0 ? '− retracted' : 'owner=bob';
+      r.querySelector('.own').style.color = rv > 0 ? 'var(--red)' : '';
+    }
+  });
+  rise($('s7txt'), prog(t, 4.6, 5.3));
+}
+
+// ---------- S8: reliability ----------
+const NB = 14;
+const blkEls = Array.from({ length: NB }, (_, i) => {
+  const b = el('div', 'blk', `0/1A${(0x40 + i * 3).toString(16).toUpperCase()}`, $('s8blks'));
+  b.style.top = '96px';
+  return b;
+});
+const B1 = [
+  ['In-order, at-least-once', ' delivery per subscription; clients dedupe by LSN.'],
+  ['Acks drive compaction', ' — the server discards trace history below the frontier.'],
+];
+const B2 = [
+  ['Crash-safe:', ' the slot advances only for applied changes, so a crash replays rather than loses.'],
+  ['Bounded buffers:', ' a slow client gets a Resync, never stalls everyone else.'],
+];
+const b1Els = B1.map((b) => el('div', 'bul', `<b>${b[0]}</b>${b[1]}`, $('s8b1')));
+const b2Els = B2.map((b) => el('div', 'bul', `<b>${b[0]}</b>${b[1]}`, $('s8b2')));
+function s8(t) {
+  // blocks stream in from the right; delivery pauses during disconnect, then replays
+  const DIS0 = 3.0, DIS1 = 4.6;
+  const status = $('s8status');
+  blkEls.forEach((b, i) => {
+    const emit = 0.6 + i * 0.42;          // server emits block i
+    const delivered = (emit > DIS0 && emit < DIS1) ? DIS1 + 0.25 + (emit - DIS0) * 0.18 : emit;
+    const x = 1600 - (t - emit) * 330;
+    const vis = t >= emit ? 1 : 0;
+    b.style.left = clamp(x, -200, 1700) + 'px';
+    b.style.opacity = vis * clamp((x + 60) / 200);
+    const isDelivered = t >= delivered;
+    const buffered = t >= emit && !isDelivered;
+    b.style.background = isDelivered ? 'rgba(255,209,26,.16)' : buffered ? 'rgba(124,196,255,.10)' : 'transparent';
+    b.style.border = isDelivered ? '2px solid #ffd11a' : '2px dashed #7cc4ff';
+    b.style.color = isDelivered ? 'var(--gold)' : 'var(--blue)';
+  });
+  if (t < DIS0) { status.textContent = '● connected · acking'; status.style.color = 'var(--green)'; }
+  else if (t < DIS1) { status.textContent = '✕ disconnected · last acked lsn 0/1A55'; status.style.color = 'var(--red)'; }
+  else if (t < DIS1 + 1.0) { status.textContent = '↻ resume from 0/1A55 · replaying'; status.style.color = 'var(--blue)'; }
+  else { status.textContent = '● caught up · no snapshot needed'; status.style.color = 'var(--green)'; }
+  $('s8lane').style.borderColor = t >= DIS0 && t < DIS1 ? 'rgba(255,107,91,.6)' : 'var(--line)';
+  b1Els.forEach((b, i) => rise(b, prog(t, 1.2 + i * 0.4, 1.8 + i * 0.4)));
+  b2Els.forEach((b, i) => rise(b, prog(t, 5.4 + i * 0.4, 6.0 + i * 0.4)));
+}
+
+// ---------- S9: local-first ----------
+const s9rows = $('s9rows');
+const LROWS = ['Design onboarding flow', 'Ship billing webhooks', 'Audit row permissions', 'Write migration guide'];
+LROWS.forEach((r) => el('div', 'urow', `<span>${r}</span><span class="own">synced</span>`, s9rows));
+const newRow = el('div', 'urow', `<span>Prototype offline mode</span><span class="own"></span>`, s9rows);
+newRow.style.borderRadius = '10px'; newRow.style.padding = '0 14px'; newRow.style.margin = '8px -14px 0';
+const s9svg = $('s9svg');
+const P = [[880, 670], [1080, 470], [1330, 470], [1500, 470], [1625, 520], [1625, 640], [1500, 690], [1330, 690], [1080, 690], [880, 760]];
+const segs = [
+  { a: [880, 680], b: [1080, 470] }, { a: [1330, 470], b: [1500, 470] }, { a: [1625, 520], b: [1625, 640] },
+  { a: [1500, 690], b: [1330, 690] }, { a: [1080, 690], b: [880, 760] },
+];
+segs.forEach((s) => sv('path', { d: `M${s.a[0]},${s.a[1]} L${s.b[0]},${s.b[1]}`, stroke: '#3d3618', 'stroke-width': 3, 'stroke-dasharray': '8 8' }, s9svg));
+const pk = sv('circle', { r: 9, fill: '#ffd11a', opacity: 0 }, s9svg);
+const CAPS = [
+  ['Optimistic:', ' writes apply locally at once, then go through your own API.'],
+  ['Reconciled:', ' the WAL confirms them; on conflict, the server wins.'],
+  ['Efficient:', ' one local transaction per remote commit; rebase cost ∝ pending writes.'],
+];
+const capEls = CAPS.map((c) => el('div', 'bul', `<b>${c[0]}</b>${c[1]}`, $('s9cap')));
+capEls.forEach((c) => (c.style.fontSize = '23px'));
+function s9(t) {
+  rise($('s9browser'), prog(t, 0.4, 1.0));
+  const T0 = 1.8;
+  const ap = prog(t, T0, T0 + 0.25);
+  newRow.style.opacity = ap;
+  newRow.style.height = 58 * eo(ap) + 'px';
+  const settled = t > 6.6;
+  newRow.style.border = settled ? '2px solid rgba(95,211,141,.6)' : '2px dashed rgba(255,209,26,.8)';
+  newRow.style.background = settled ? `rgba(95,211,141,${0.15 * (1 - prog(t, 7.0, 8.0))})` : 'rgba(255,209,26,.06)';
+  const own = newRow.querySelector('.own');
+  own.textContent = settled ? '✓ settled' : 'pending…';
+  own.style.color = settled ? 'var(--green)' : 'var(--gold)';
+  // packet route
+  const route = [[880, 680], [1080, 470], [1330, 470], [1500, 470], [1625, 520], [1625, 640], [1500, 690], [1330, 690], [1080, 690], [880, 760]];
+  const pp = prog(t, T0 + 0.3, 6.6);
+  if (pp > 0 && pp < 1) {
+    const f = pp * (route.length - 1), i = Math.floor(f), w = f - i;
+    pk.setAttribute('cx', lerp(route[i][0], route[i + 1][0], w));
+    pk.setAttribute('cy', lerp(route[i][1], route[i + 1][1], w));
+    pk.setAttribute('opacity', 1);
+    pk.setAttribute('fill', i >= 5 ? '#5fd38d' : '#ffd11a');
+  } else pk.setAttribute('opacity', 0);
+  capEls.forEach((c, i) => rise(c, prog(t, 2.6 + i * 1.3, 3.2 + i * 1.3)));
+}
+
+// ---------- S10: DX ----------
+const s10svg = $('s10svg');
+const s10lines = [0, 1, 2, 3].map((i) => sv('path', { d: `M590,${394 + i * 130} C650,${394 + i * 130} 640,600 690,600`, stroke: '#8a7a3a', 'stroke-width': 3, fill: 'none' }, s10svg));
+const s10out = [sv('path', { d: 'M890,600 C930,600 920,425 960,425', stroke: '#ffd11a', 'stroke-width': 3, fill: 'none' }, s10svg),
+                sv('path', { d: 'M890,600 C930,600 920,710 960,710', stroke: '#ffd11a', 'stroke-width': 3, fill: 'none' }, s10svg)];
+function s10(t) {
+  [0, 1, 2, 3].forEach((i) => {
+    rise($('c' + i), prog(t, 0.5 + i * 0.25, 1.1 + i * 0.25), 20);
+    const p = prog(t, 1.3 + i * 0.25, 1.9 + i * 0.25);
+    s10lines[i].setAttribute('opacity', eo(p));
+  });
+  rise($('s10eng'), prog(t, 2.2, 2.8), 0);
+  s10out.forEach((l, i) => l.setAttribute('opacity', eo(prog(t, 2.8 + i * 0.5, 3.3 + i * 0.5))));
+  rise($('s10term'), prog(t, 2.9, 3.5));
+  rise($('s10code'), prog(t, 3.5, 4.1));
+}
+
+// ---------- S11: advantages ----------
+const TILES = [
+  ['PG', 'Postgres stays the source of truth', 'No new database to adopt. Live updates are derived from the WAL you already have.'],
+  ['Δ', 'Incremental by design', 'Differential dataflow: cost tracks the commit, not the query.'],
+  ['×N', 'Shared state at scale', 'Identical query shapes share one arrangement across subscribers.'],
+  ['🔒', 'Row-level security built in', 'Permission rules compile into each plan before rows leave the server.'],
+  ['↺', 'Crash-safe, resumable', 'LSN-tagged diffs, acks, and resume — replay rather than loss.'],
+  ['⊘', 'Never in your write path', 'Write through your own API. Palimpsest only observes.'],
+  ['TS', 'Typed end to end', 'sqlc-format queries, generated TypeScript types, React hooks.'],
+  ['OSS', 'Open source, in Rust', 'MIT / Apache-2.0. Embed as a library or run the CLI.'],
+];
+const tileEls = TILES.map((x, i) => {
+  const c = el('div', 'card tile', `<div class="ti">${x[0]}</div><div class="tt">${x[1]}</div><div class="td">${x[2]}</div>`, $('tiles'));
+  c.style.left = 120 + (i % 4) * 430 + 'px';
+  c.style.top = 330 + Math.floor(i / 4) * 330 + 'px';
+  return c;
+});
+function s11(t) {
+  tileEls.forEach((c, i) => {
+    rise(c, prog(t, 0.6 + i * 0.32, 1.2 + i * 0.32), 36);
+    const hl = Math.max(0, 1 - Math.abs(t - (1.4 + i * 0.32)) / 0.5);
+    c.style.borderColor = hl > 0.05 ? `rgba(255,209,26,${0.3 + 0.7 * hl})` : 'var(--line)';
+  });
+}
+
+// ---------- S12 ----------
+function s12(t) {
+  rise($('outro-title'), prog(t, 0.4, 1.2), 40);
+  rise($('outro-tag'), prog(t, 1.2, 1.9));
+  const c = $('outro-cmd'); const p = eo(prog(t, 2.0, 2.6));
+  c.style.opacity = p; c.style.transform = `translateX(-50%) translateY(${(1 - p) * 20}px)`;
+  rise($('outro-url'), prog(t, 2.6, 3.2));
+  rise($('outro-note'), prog(t, 3.2, 3.8));
+}
+
+const FN = { s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12 };
+
+// ---------- master render ----------
+window.render = function (t) {
+  drawBg(t);
+  for (const [id, a, b] of SCENES) {
+    const e = $(id);
+    const isLast = id === 's12';
+    const alpha = prog(t, a, a + 0.6) * (isLast ? 1 - prog(t, b - 1.0, b) : 1 - prog(t, b - 0.6, b));
+    if (alpha <= 0) { e.style.display = 'none'; continue; }
+    e.style.display = 'block';
+    e.style.opacity = alpha;
+    FN[id](t - a);
+  }
+  $('progress').style.width = (t / TOTAL) * 100 + '%';
+  $('brand').style.opacity = t < 7 || t > 114 ? 0 : 1;
+};
+window.ready = Promise.all(['400 20px Inter', '800 50px Inter', '400 20px "JetBrains Mono"', '700 20px "JetBrains Mono"'].map((f) => document.fonts.load(f)))
+  .then(() => document.fonts.ready).then(() => { window.render(0); return true; });
+</script>
+</body>
+</html>
