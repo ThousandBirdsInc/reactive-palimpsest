@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures::Stream;
+use futures_core::Stream;
 use tokio::sync::{mpsc, Mutex};
 
 use palimpsest_proto::palimpsest::sync::v1::{DiffOp, ResyncReason, Schema};

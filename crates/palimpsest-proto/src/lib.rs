@@ -14,7 +14,10 @@ pub mod palimpsest {
         pub mod v1 {
             #![allow(clippy::all, clippy::nursery, clippy::pedantic, missing_docs)]
 
-            tonic::include_proto!("palimpsest.sync.v1");
+            // What `tonic::include_proto!` expands to, spelled out so
+            // the wasm build (prost-only, no `tonic` dependency) can
+            // include the same generated file.
+            include!(concat!(env!("OUT_DIR"), "/palimpsest.sync.v1.rs"));
         }
     }
 }

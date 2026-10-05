@@ -24,7 +24,12 @@ wasm-bindgen "$WASM" --target web --out-dir "$OUT" --out-name palimpsest_client_
 
 # Optional: shrink with wasm-opt if available.
 if command -v wasm-opt >/dev/null 2>&1; then
+  # Feature flags match what rustc emits for wasm32-unknown-unknown so
+  # older binaryen releases don't reject the module.
   wasm-opt -Oz \
+    --enable-bulk-memory --enable-sign-ext \
+    --enable-mutable-globals --enable-nontrapping-float-to-int \
+    --enable-reference-types \
     "$OUT/palimpsest_client_js_bg.wasm" \
     -o "$OUT/palimpsest_client_js_bg.wasm.tmp"
   mv "$OUT/palimpsest_client_js_bg.wasm.tmp" "$OUT/palimpsest_client_js_bg.wasm"

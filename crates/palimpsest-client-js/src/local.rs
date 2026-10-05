@@ -171,9 +171,22 @@ fn js_to_datum(value: &JsValue, datum_type: Option<DatumType>) -> Result<WireDat
             .as_f64()
             .map(|f| WireDatum::F64(f.to_bits()))
             .ok_or_else(|| type_err("number")),
+        // Numbers are stringified by the JS engine rather than Rust's
+        // `f64: Display`: this is the only place the bundle would need
+        // float formatting, and `core::num::flt2dec` is ~17 KB of wasm.
         Some(DatumType::Numeric) => value
             .as_string()
-            .or_else(|| value.as_f64().map(|f| f.to_string()))
+            .or_else(|| {
+                value
+                    .as_f64()
+                    .and_then(|_| {
+                        value
+                            .unchecked_ref::<js_sys::Number>()
+                            .to_string_with_radix(10)
+                            .ok()
+                    })
+                    .map(String::from)
+            })
             .map(WireDatum::Numeric)
             .ok_or_else(|| type_err("string or number")),
         Some(DatumType::Text) => value

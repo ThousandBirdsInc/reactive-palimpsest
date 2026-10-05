@@ -6,9 +6,9 @@
 //!
 //! On native (`cfg(not(target_arch = "wasm32"))`) we delegate to the
 //! ambient Tokio runtime. On `wasm32-unknown-unknown` we use
-//! `wasm_bindgen_futures::spawn_local` and `gloo_timers` — which means
-//! the manager future is not required to be `Send`. The bound on
-//! [`spawn`] differs accordingly.
+//! `wasm_bindgen_futures::spawn_local` and a `setTimeout`-backed
+//! promise — which means the manager future is not required to be
+//! `Send`. The bound on [`spawn`] differs accordingly.
 
 #![allow(
     clippy::redundant_pub_crate,
@@ -69,8 +69,28 @@ pub(crate) async fn sleep(duration: Duration) {
     tokio::time::sleep(duration).await;
 }
 
+/// `setTimeout` is resolved against the global object, so this works
+/// in both window and worker contexts. Bound here directly rather than
+/// through a timer crate: one function is all the client needs.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = "setTimeout", catch)]
+    fn set_timeout(
+        handler: &js_sys::Function,
+        timeout_ms: i32,
+    ) -> Result<f64, wasm_bindgen::JsValue>;
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn sleep(duration: Duration) {
-    let ms = u32::try_from(duration.as_millis()).unwrap_or(u32::MAX);
-    gloo_timers::future::TimeoutFuture::new(ms).await;
+    let ms = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        // Can only fail if the global has no `setTimeout`; resolving
+        // immediately then keeps the reconnect loop moving.
+        if set_timeout(&resolve, ms).is_err() {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }

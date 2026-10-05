@@ -151,15 +151,30 @@ fn try_regen_pg_fixtures() -> io::Result<()> {
 }
 
 /// Build `palimpsest-client-js` for `wasm32-unknown-unknown` under
-/// `--profile release-wasm`, then assert the gzipped `.wasm` is under
-/// the budget. The budget is read from `PALIMPSEST_WASM_SIZE_BUDGET`
-/// (in bytes) or defaults to 500 KB per §18.11.
+/// `--profile release-wasm`, run `wasm-bindgen` post-processing on it
+/// (the same `--target web` step the demo build scripts run), then
+/// assert the gzipped `_bg.wasm` — the bytes a browser downloads — is
+/// under the budget.
+///
+/// The raw cargo artifact is not what ships: it carries the
+/// `__wasm_bindgen_unstable` descriptor section plus the shim
+/// functions `wasm-bindgen` consumes to generate the JS glue, which
+/// together are roughly two thirds of its size. Measuring after
+/// post-processing is what makes the budget meaningful.
+///
+/// If `wasm-opt` is on `PATH` it is run too, so the number matches a
+/// full production build; otherwise the (slightly larger) pre-`wasm-opt`
+/// size is reported and checked.
+///
+/// The budget is read from `PALIMPSEST_WASM_SIZE_BUDGET` (in bytes) and
+/// defaults to 256 KB — well inside the < 500 KB gz target of §18.11,
+/// and tight enough to catch a dependency creeping back in.
 #[allow(clippy::cast_precision_loss)]
 fn check_wasm_size() -> ExitCode {
     let budget_bytes = env::var("PALIMPSEST_WASM_SIZE_BUDGET")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(500 * 1024);
+        .unwrap_or(256 * 1024);
 
     let mut args = vec![
         "build",
@@ -194,28 +209,56 @@ fn check_wasm_size() -> ExitCode {
 
     let wasm_path =
         PathBuf::from("target/wasm32-unknown-unknown/release-wasm/palimpsest_client_js.wasm");
-    let bytes = match fs::read(&wasm_path) {
-        Ok(b) => b,
+    let out_dir = PathBuf::from("target/wasm-size-check");
+    let shipped = match bindgen_for_web(&wasm_path, &out_dir) {
+        Ok(path) => path,
         Err(err) => {
-            eprintln!("could not read {}: {err}", wasm_path.display());
+            eprintln!("wasm-bindgen post-processing failed: {err}");
             return ExitCode::FAILURE;
         }
     };
-    let raw_size = bytes.len();
-    let gz_size = match gzip_size(&bytes) {
-        Ok(n) => n,
+    let optimized = match run_wasm_opt_if_available(&shipped) {
+        Ok(ran) => ran,
         Err(err) => {
-            eprintln!("gzip failed: {err}");
+            eprintln!("wasm-opt failed: {err}");
             return ExitCode::FAILURE;
         }
     };
 
-    let pct = (gz_size as f64 / budget_bytes as f64) * 100.0;
-    println!(
-        "palimpsest_client_js.wasm: raw {raw_size} B ({:.1} KB), gz {gz_size} B ({:.1} KB) — {pct:.1}% of {budget_bytes} B budget",
-        raw_size as f64 / 1024.0,
-        gz_size as f64 / 1024.0,
+    let report = |label: &str, path: &Path| -> io::Result<(usize, usize)> {
+        let bytes = fs::read(path)?;
+        let gz = gzip_size(&bytes)?;
+        println!(
+            "{label}: raw {} B ({:.1} KB), gz {gz} B ({:.1} KB)",
+            bytes.len(),
+            bytes.len() as f64 / 1024.0,
+            gz as f64 / 1024.0,
+        );
+        Ok((bytes.len(), gz))
+    };
+
+    let gz_size = match report(
+        if optimized {
+            "palimpsest_client_js_bg.wasm (wasm-bindgen + wasm-opt -Oz)"
+        } else {
+            "palimpsest_client_js_bg.wasm (wasm-bindgen; wasm-opt not on PATH)"
+        },
+        &shipped,
+    ) {
+        Ok((_, gz)) => gz,
+        Err(err) => {
+            eprintln!("could not measure {}: {err}", shipped.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    // Informational: the JS glue ships alongside the wasm.
+    let _ = report(
+        "palimpsest_client_js.js (glue)",
+        &out_dir.join("palimpsest_client_js.js"),
     );
+
+    let pct = (gz_size as f64 / budget_bytes as f64) * 100.0;
+    println!("gzipped wasm is {pct:.1}% of the {budget_bytes} B budget");
     if (gz_size as u64) > budget_bytes {
         eprintln!(
             "FAIL: gzipped wasm is over budget ({gz_size} B > {budget_bytes} B). \
@@ -224,6 +267,52 @@ fn check_wasm_size() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Run the `wasm-bindgen --target web` post-processing step in-process
+/// and return the path of the resulting `_bg.wasm`.
+fn bindgen_for_web(wasm: &Path, out_dir: &Path) -> Result<PathBuf, String> {
+    let _ = fs::remove_dir_all(out_dir);
+    fs::create_dir_all(out_dir).map_err(|err| err.to_string())?;
+    let mut bindgen = wasm_bindgen_cli_support::Bindgen::new();
+    bindgen
+        .input_path(wasm)
+        .web(true)
+        .map_err(|err| err.to_string())?
+        .out_name("palimpsest_client_js")
+        .remove_name_section(true)
+        .remove_producers_section(true);
+    bindgen.generate(out_dir).map_err(|err| err.to_string())?;
+    Ok(out_dir.join("palimpsest_client_js_bg.wasm"))
+}
+
+/// Shrink `wasm` in place with `wasm-opt -Oz` when binaryen is
+/// installed. Returns whether it ran.
+fn run_wasm_opt_if_available(wasm: &Path) -> io::Result<bool> {
+    let tmp = wasm.with_extension("wasm.tmp");
+    let status = match Command::new("wasm-opt")
+        .args([
+            "-Oz",
+            "--enable-bulk-memory",
+            "--enable-sign-ext",
+            "--enable-mutable-globals",
+            "--enable-nontrapping-float-to-int",
+            "--enable-reference-types",
+        ])
+        .arg(wasm)
+        .arg("-o")
+        .arg(&tmp)
+        .status()
+    {
+        Ok(status) => status,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    if !status.success() {
+        return Err(io::Error::other(format!("wasm-opt exited with {status:?}")));
+    }
+    fs::rename(&tmp, wasm)?;
+    Ok(true)
 }
 
 fn gzip_size(bytes: &[u8]) -> io::Result<usize> {

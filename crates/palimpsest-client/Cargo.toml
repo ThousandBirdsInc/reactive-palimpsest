@@ -12,10 +12,18 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-futures.workspace = true
-palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.1" }
+# Only the `Stream` trait (for `Subscription`); the full `futures`
+# facade is not needed on either target.
+futures-core = "0.3"
+# `default-features = false` leaves out the serde derives on
+# `WireDatum` (the row codec is hand-written); enable
+# `palimpsest-proto/serde` directly if you need them.
+palimpsest-proto = { path = "../palimpsest-proto", version = "0.1.1", default-features = false }
 thiserror.workspace = true
-tracing.workspace = true
+# Optional so the browser bundle can leave it out: nothing in a browser
+# installs a subscriber, and the callsite registry + `Debug` formatting
+# tracing links were pure dead weight there. See `src/log.rs`.
+tracing = { workspace = true, optional = true }
 
 # `tokio::sync` and `tokio::select!` are runtime-agnostic, so they
 # stay in the cross-target dep list. Anything that needs an actual
@@ -30,13 +38,18 @@ tokio-stream = { version = "0.1", default-features = false }
 tokio = { version = "1.40", default-features = false, features = ["macros", "rt", "sync", "time"] }
 tonic = { workspace = true }
 
+# No `tonic` here: the browser transport is a WebSocket carrying
+# prost-encoded frames, and the one thing the manager needed from tonic
+# (`Status`) is a two-field struct in `src/status.rs` on this target.
+# The socket is driven through `web-sys` directly (see `transport.rs`)
+# so no WebSocket framework crate — and nothing it would pull in — is
+# linked into the browser bundle.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-gloo-net = { version = "0.6", default-features = false, features = ["websocket"] }
-gloo-timers = { version = "0.3", default-features = false, features = ["futures"] }
 js-sys = "0.3"
 prost = "0.13"
-tonic = { version = "0.12", default-features = false, features = ["prost", "codegen"] }
+wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "MessageEvent", "WebSocket"] }
 
 # Native-only — these pull tokio with `rt-multi-thread`, axum, hyper,
 # etc., none of which compile for `wasm32-unknown-unknown`.
@@ -48,6 +61,13 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+[features]
+default = ["tracing"]
+# Emit `tracing` events from the connection manager and local replica.
+# Disable (`default-features = false`) to drop `tracing-core` from a
+# wasm bundle that never installs a subscriber.
+tracing = ["dep:tracing"]
 
 [lints]
 workspace = true

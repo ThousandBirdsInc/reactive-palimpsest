@@ -40,7 +40,6 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::sync::{mpsc, watch, Mutex};
-use tracing::{debug, warn};
 
 use palimpsest_proto::palimpsest::sync::v1::{DiffOp, VarValue};
 use palimpsest_proto::wire::{WireDatum, WireRow, WireRowChange};

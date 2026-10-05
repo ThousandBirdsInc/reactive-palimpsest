@@ -9,7 +9,10 @@
 //! `ClientMessage`/`ServerMessage` frames. gRPC-Web cannot drive a bidi
 //! stream in browsers (it requires fetch upload streaming, which only
 //! Chromium ships), so the server-side stack pairs this client with a
-//! WS-to-gRPC bridge that re-presents the same protocol.
+//! WS-to-gRPC bridge that re-presents the same protocol. The socket is
+//! driven straight through `web_sys` — four event callbacks and a
+//! channel — rather than a WebSocket framework crate, keeping the
+//! browser bundle's dependency closure small.
 //!
 //! Both targets expose a single transport entry point —
 //! [`open_subscribe`] — that returns an [`mpsc::Receiver`] of decoded
@@ -30,6 +33,7 @@ use tokio::sync::mpsc;
 
 use crate::auth::Auth;
 use crate::error::ClientError;
+use crate::status::Status;
 
 /// Bounded depth for the inbound `ServerMessage` channel handed back to
 /// the connection manager. Should comfortably hold one connection's
@@ -56,7 +60,7 @@ pub(crate) enum OpenError {
     // Boxed: `tonic::Status` is ~176 bytes; keeping it inline would trip
     // clippy's `result_large_err` on every `Result<_, OpenError>`.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    Auth(Box<tonic::Status>),
+    Auth(Box<Status>),
     /// Anything else — dial failure, transient gRPC error, WS handshake
     /// rejection, etc. The manager reconnects.
     Transient,
@@ -89,7 +93,7 @@ pub(crate) async fn open_subscribe(
     endpoint: &Endpoint,
     auth: &Auth,
     outbound_rx: mpsc::Receiver<ClientMessage>,
-) -> Result<mpsc::Receiver<Result<ServerMessage, tonic::Status>>, OpenError> {
+) -> Result<mpsc::Receiver<Result<ServerMessage, Status>>, OpenError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         native::open_subscribe(endpoint, auth, outbound_rx, INBOUND_CAPACITY).await
@@ -106,13 +110,12 @@ pub(crate) async fn open_subscribe(
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use futures::StreamExt;
     use palimpsest_proto::palimpsest::sync::v1::sync_engine_client::SyncEngineClient;
     use palimpsest_proto::palimpsest::sync::v1::{ClientMessage, ServerMessage};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::ReceiverStream;
+    use tokio_stream::StreamExt;
     use tonic::{Code, Request};
-    use tracing::warn;
 
     use super::{Endpoint, OpenError};
     use crate::auth::Auth;
@@ -169,21 +172,43 @@ mod native {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    use futures::{SinkExt, StreamExt};
-    use gloo_net::websocket::futures::WebSocket;
-    use gloo_net::websocket::{Message as WsMessage, WebSocketError};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use palimpsest_proto::palimpsest::sync::v1::{ClientMessage, ServerMessage};
     use prost::Message as _;
-    use tokio::sync::mpsc;
-    use tracing::warn;
+    use tokio::sync::{mpsc, watch};
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::spawn_local;
+    use web_sys::{BinaryType, CloseEvent, MessageEvent, WebSocket};
 
     use super::{Endpoint, OpenError};
     use crate::auth::Auth;
+    use crate::status::Status;
 
     /// WS close code the demo's bridge uses to signal auth rejection.
     /// Mirrors RFC 6455 §7.4 "Policy Violation".
     const CLOSE_POLICY_VIOLATION: u16 = 1008;
+
+    /// `WebSocket.readyState` values.
+    const CONNECTING: u16 = 0;
+    const OPEN: u16 = 1;
+
+    /// Socket lifecycle as observed by the outbound pump.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        Connecting,
+        Open,
+        Closed,
+    }
+
+    /// Frames the browser hands us, in event order. Errors terminate
+    /// the stream: the forwarder stops after relaying one.
+    enum Frame {
+        Message(Result<ServerMessage, Status>),
+        Error(Status),
+    }
 
     // `async` is kept for parity with the native `open_subscribe` (which does
     // await); both are selected by `#[cfg]` and awaited at the same call site.
@@ -194,52 +219,65 @@ mod wasm {
         auth: &Auth,
         mut outbound_rx: mpsc::Receiver<ClientMessage>,
         inbound_capacity: usize,
-    ) -> Result<mpsc::Receiver<Result<ServerMessage, tonic::Status>>, OpenError> {
+    ) -> Result<mpsc::Receiver<Result<ServerMessage, Status>>, OpenError> {
         let url = normalize_ws_url(endpoint, auth);
-        let ws = WebSocket::open(&url).map_err(|err| {
+        let socket = Socket::open(&url).map_err(|err| {
             warn!(?err, %url, "ws open failed");
             OpenError::Transient
         })?;
-        let (mut ws_sink, mut ws_stream) = ws.split();
+        let Socket {
+            ws,
+            mut phase_rx,
+            mut frames_rx,
+            listeners,
+        } = socket;
+        // Both pumps keep the listeners alive; the last one to finish
+        // drops them and closes the socket (see `Listeners::drop`).
+        let listeners = Rc::new(listeners);
 
         let (inbound_tx, inbound_rx) =
-            mpsc::channel::<Result<ServerMessage, tonic::Status>>(inbound_capacity);
+            mpsc::channel::<Result<ServerMessage, Status>>(inbound_capacity);
 
-        // browser → server: drain outbound_rx, encode ClientMessage,
-        // ship as a binary WS frame.
+        // browser → server: wait for the socket to open, then drain
+        // outbound_rx, encode ClientMessage, ship as a binary frame.
+        // Outbound channel closed → close the WS gracefully.
+        let send_ws = ws;
+        let send_listeners = Rc::clone(&listeners);
         spawn_local(async move {
+            let _keep_alive = send_listeners;
+            while *phase_rx.borrow() == Phase::Connecting {
+                if phase_rx.changed().await.is_err() {
+                    return;
+                }
+            }
+            if *phase_rx.borrow() == Phase::Closed {
+                return;
+            }
             while let Some(msg) = outbound_rx.recv().await {
                 let mut buf = Vec::with_capacity(msg.encoded_len());
                 if msg.encode(&mut buf).is_err() {
                     break;
                 }
-                if ws_sink.send(WsMessage::Bytes(buf)).await.is_err() {
+                if send_ws.send_with_u8_array(&buf).is_err() {
                     break;
                 }
             }
-            // Outbound channel closed → close the WS gracefully.
-            let _ = ws_sink.close().await;
+            let _ = send_ws.close();
         });
 
-        // server → browser: read binary frames, decode ServerMessage,
-        // forward into the inbound channel as `Ok(_)`. Decode failures
-        // are surfaced as `tonic::Status::data_loss` so the connection
-        // manager treats them like a normal stream error. Auth-related
-        // close frames (code 1008) are surfaced as `Unauthenticated`
-        // so `OpenError::Auth` propagates up and the manager stops
-        // reconnecting instead of hot-looping against the bridge.
+        // server → browser: forward decoded frames into the bounded
+        // inbound channel as `Ok(_)`. Decode failures are surfaced as
+        // `Status::data_loss` so the connection manager treats them
+        // like a normal stream error. Auth-related close frames (code
+        // 1008) are surfaced as `Unauthenticated` so `OpenError::Auth`
+        // propagates up and the manager stops reconnecting instead of
+        // hot-looping against the bridge.
         spawn_local(async move {
-            while let Some(item) = ws_stream.next().await {
-                let res = match item {
-                    Ok(WsMessage::Bytes(bytes)) => {
-                        ServerMessage::decode(bytes.as_slice()).map_err(|err| {
-                            tonic::Status::data_loss(format!("decode ServerMessage: {err}"))
-                        })
-                    }
-                    Ok(WsMessage::Text(_)) => {
-                        Err(tonic::Status::data_loss("unexpected ws text frame"))
-                    }
-                    Err(err) => Err(map_ws_error_to_status(&err)),
+            let _keep_alive = listeners;
+            while let Some(frame) = frames_rx.recv().await {
+                let res = match frame {
+                    Frame::Message(res) => res,
+                    Frame::Error(status) => Err(status),
                 };
                 let stop = res.is_err();
                 if inbound_tx.send(res).await.is_err() {
@@ -254,17 +292,130 @@ mod wasm {
         Ok(inbound_rx)
     }
 
-    /// Map a `gloo_net::websocket::WebSocketError` onto a
-    /// `tonic::Status` whose code drives the connection manager's
-    /// retry vs. shutdown decision.
-    fn map_ws_error_to_status(err: &WebSocketError) -> tonic::Status {
-        match err {
-            WebSocketError::ConnectionClose(close_event)
-                if close_event.code == CLOSE_POLICY_VIOLATION =>
-            {
-                tonic::Status::unauthenticated(close_event.reason.clone())
+    /// A `web_sys::WebSocket` with its event listeners attached: open
+    /// and close/error transitions feed `phase_rx`, every frame feeds
+    /// `frames_rx`.
+    struct Socket {
+        ws: WebSocket,
+        phase_rx: watch::Receiver<Phase>,
+        frames_rx: mpsc::UnboundedReceiver<Frame>,
+        listeners: Listeners,
+    }
+
+    impl Socket {
+        fn open(url: &str) -> Result<Self, JsValue> {
+            let ws = WebSocket::new(url)?;
+            // ArrayBuffer (not Blob) so frames can be read synchronously
+            // inside the event callback and stay in delivery order.
+            ws.set_binary_type(BinaryType::Arraybuffer);
+
+            let (phase_tx, phase_rx) = watch::channel(Phase::Connecting);
+            let (frames_tx, frames_rx) = mpsc::unbounded_channel();
+            // Set once the close event has fired so a later error event
+            // (browsers fire `error` *before* `close` on failure) never
+            // surfaces after the close status.
+            let closed = Rc::new(Cell::new(false));
+
+            let on_open = {
+                let phase_tx = phase_tx.clone();
+                Closure::<dyn FnMut()>::new(move || {
+                    let _ = phase_tx.send(Phase::Open);
+                })
+            };
+            let on_message = {
+                let frames_tx = frames_tx.clone();
+                Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+                    let _ = frames_tx.send(Frame::Message(decode_frame(&event.data())));
+                })
+            };
+            let on_error = {
+                let frames_tx = frames_tx.clone();
+                let closed = Rc::clone(&closed);
+                Closure::<dyn FnMut(JsValue)>::new(move |_event: JsValue| {
+                    if closed.get() {
+                        return;
+                    }
+                    // The forwarder stops at the first error, so the
+                    // close event's status (which may carry the
+                    // server's reason) wins when both arrive.
+                    let _ = frames_tx.send(Frame::Error(Status::unavailable(
+                        "ws recv: WebSocket connection failed",
+                    )));
+                })
+            };
+            let on_close = {
+                Closure::<dyn FnMut(CloseEvent)>::new(move |event: CloseEvent| {
+                    closed.set(true);
+                    let _ = frames_tx.send(Frame::Error(close_status(&event)));
+                    let _ = phase_tx.send(Phase::Closed);
+                })
+            };
+
+            ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+            ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+            ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+            ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+
+            Ok(Self {
+                ws: ws.clone(),
+                phase_rx,
+                frames_rx,
+                listeners: Listeners {
+                    ws,
+                    _on_open: on_open,
+                    _on_message: on_message,
+                    _on_error: on_error,
+                    _on_close: on_close,
+                },
+            })
+        }
+    }
+
+    /// Owns the JS callbacks for the socket's lifetime. Dropping it
+    /// detaches them *before* they are freed (so the browser can never
+    /// call into a released closure) and closes the socket if it is
+    /// still open.
+    struct Listeners {
+        ws: WebSocket,
+        _on_open: Closure<dyn FnMut()>,
+        _on_message: Closure<dyn FnMut(MessageEvent)>,
+        _on_error: Closure<dyn FnMut(JsValue)>,
+        _on_close: Closure<dyn FnMut(CloseEvent)>,
+    }
+
+    impl Drop for Listeners {
+        fn drop(&mut self) {
+            self.ws.set_onopen(None);
+            self.ws.set_onmessage(None);
+            self.ws.set_onerror(None);
+            self.ws.set_onclose(None);
+            if matches!(self.ws.ready_state(), CONNECTING | OPEN) {
+                let _ = self.ws.close();
             }
-            other => tonic::Status::unavailable(format!("ws recv: {other:?}")),
+        }
+    }
+
+    /// Decode one binary frame into a `ServerMessage`.
+    fn decode_frame(data: &JsValue) -> Result<ServerMessage, Status> {
+        let Some(buffer) = data.dyn_ref::<js_sys::ArrayBuffer>() else {
+            return Err(Status::data_loss("unexpected ws text frame"));
+        };
+        let bytes = js_sys::Uint8Array::new(buffer).to_vec();
+        ServerMessage::decode(bytes.as_slice())
+            .map_err(|err| Status::data_loss(format!("decode ServerMessage: {err}")))
+    }
+
+    /// Map a close event onto a [`Status`] whose code drives the
+    /// connection manager's retry vs. shutdown decision.
+    fn close_status(event: &CloseEvent) -> Status {
+        let code = event.code();
+        let reason = event.reason();
+        if code == CLOSE_POLICY_VIOLATION {
+            Status::unauthenticated(reason)
+        } else {
+            Status::unavailable(format!(
+                "ws recv: WebSocket Closed: code: {code}, reason: {reason}"
+            ))
         }
     }
 

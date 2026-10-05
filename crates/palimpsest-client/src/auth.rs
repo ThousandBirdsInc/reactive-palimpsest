@@ -5,6 +5,7 @@
 
 #![allow(clippy::redundant_pub_crate)]
 
+#[cfg(not(target_arch = "wasm32"))]
 use tonic::metadata::{MetadataMap, MetadataValue};
 
 /// How the client authenticates the bidi `Subscribe` stream.
@@ -28,9 +29,10 @@ impl Auth {
     /// Inserts the appropriate `Authorization` header into `metadata`.
     /// Anonymous is a no-op.
     ///
-    /// Wasm builds use a WebSocket transport that doesn't have access
-    /// to per-request headers, so this method is dead-code there.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    /// Native-only: the wasm build uses a WebSocket transport that
+    /// cannot set per-request headers (the token travels in the URL
+    /// instead), and it does not link `tonic` at all.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn apply(&self, metadata: &mut MetadataMap) -> Result<(), AuthApplyError> {
         let header = match self {
             Self::Anonymous => return Ok(()),
@@ -44,7 +46,7 @@ impl Auth {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, thiserror::Error)]
 #[error("auth header rejected by tonic: {0}")]
 pub(crate) struct AuthApplyError(String);

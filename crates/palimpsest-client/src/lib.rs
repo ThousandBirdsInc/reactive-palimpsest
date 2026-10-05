@@ -21,11 +21,16 @@
 //! resubscribes with the user's last acked LSN as `resume_lsn`.
 //!
 //! The same crate also compiles for `wasm32-unknown-unknown` (§18.11).
-//! On wasm the transport switches to `tonic-web-wasm-client` and the
-//! manager runs on the `wasm-bindgen-futures` event loop instead of
-//! Tokio.
+//! On wasm the transport switches to a WebSocket carrying the same
+//! protobuf frames, the manager runs on the `wasm-bindgen-futures`
+//! event loop instead of Tokio, and `tonic` is not linked at all —
+//! [`Status`]/[`Code`] are a small local stand-in there.
 
 #![warn(missing_docs)]
+
+// First so its textually-scoped macros are visible to every module.
+#[macro_use]
+mod log;
 
 mod auth;
 mod cache;
@@ -34,6 +39,7 @@ mod error;
 pub mod local;
 mod reconnect;
 mod runtime;
+mod status;
 mod subscription;
 mod transport;
 
@@ -55,6 +61,7 @@ pub use palimpsest_proto::palimpsest::sync::v1::{
 };
 pub use palimpsest_proto::wire::{WireDatum, WireRow};
 pub use reconnect::BackoffConfig;
+pub use status::{Code, Status};
 pub use subscription::{DiffEvent, Subscription};
 
 /// Optional construction-time knobs.

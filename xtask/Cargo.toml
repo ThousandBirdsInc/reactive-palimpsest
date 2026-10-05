@@ -11,6 +11,12 @@ description = "Project maintenance commands for Palimpsest."
 
 [dependencies]
 flate2 = "1.0"
+# The library behind the `wasm-bindgen` CLI, so `check-wasm-size`
+# measures the `_bg.wasm` that actually ships (descriptor section and
+# glue-generation shims removed) rather than the raw cargo artifact,
+# which is ~3x larger. Must stay in lockstep with the `wasm-bindgen`
+# version in Cargo.lock — the two check each other's schema version.
+wasm-bindgen-cli-support = "=0.2.121"
 
 [lints]
 workspace = true

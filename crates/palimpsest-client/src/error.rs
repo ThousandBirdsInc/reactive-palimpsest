@@ -7,6 +7,8 @@ use thiserror::Error;
 
 use palimpsest_proto::wire;
 
+use crate::status::Status;
+
 /// All failures the client surface can produce.
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -21,10 +23,12 @@ pub enum ClientError {
     Transport(Box<tonic::transport::Error>),
     /// gRPC stream returned a non-OK status.
     ///
-    /// Boxed: `tonic::Status` is ~176 bytes, which would otherwise bloat
-    /// every `Result<_, ClientError>` and trip clippy's `result_large_err`.
+    /// [`Status`] is `tonic::Status` natively and a small local type on
+    /// wasm. Boxed: `tonic::Status` is ~176 bytes, which would otherwise
+    /// bloat every `Result<_, ClientError>` and trip clippy's
+    /// `result_large_err`.
     #[error("grpc status: {0}")]
-    Grpc(Box<tonic::Status>),
+    Grpc(Box<Status>),
     /// The connection is closing or has shut down.
     #[error("connection closed")]
     ConnectionClosed,
@@ -46,8 +50,8 @@ pub enum ClientError {
 // Manual `From` impls (instead of `#[from]`) so the `Box` is applied
 // transparently: `?` keeps working while these variants stay pointer-sized
 // rather than embedding ~176-byte tonic errors by value.
-impl From<tonic::Status> for ClientError {
-    fn from(status: tonic::Status) -> Self {
+impl From<Status> for ClientError {
+    fn from(status: Status) -> Self {
         Self::Grpc(Box::new(status))
     }
 }

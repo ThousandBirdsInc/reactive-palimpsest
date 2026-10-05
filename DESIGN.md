@@ -263,7 +263,7 @@ arc-share into N subscription channels without re-serializing.
 | `palimpsest-dataflow`   | Operator implementations on timely + differential; partial state mgmt.  |
 | `palimpsest-permissions`| Permission-query DSL, compilation, and rewriter that joins predicates.  |
 | `palimpsest-server`     | Embeddable library: ties WAL → dataflow → router → gRPC.                |
-| `palimpsest-client`     | Rust client with `wasm32-unknown-unknown` target; uses `tonic-web-wasm-client`. |
+| `palimpsest-client`     | Rust client with `wasm32-unknown-unknown` target; WebSocket transport in the browser. |
 | `palimpsest-cli`        | Optional binary for running the server with a config file.              |
 
 `palimpsest-server` is the integration crate users embed; `palimpsest-cli` is a
@@ -574,8 +574,8 @@ and elided — there is zero overhead in the unconfigured case.
 ## 12. Component: Client (`palimpsest-client`, WASM)
 
 Rust crate with two targets: native (`tokio` runtime) and
-`wasm32-unknown-unknown` (uses `tonic-web-wasm-client` and a
-`wasm-bindgen-futures` executor). Surface:
+`wasm32-unknown-unknown` (a `web-sys` WebSocket transport, no `tonic`
+linked, and a `wasm-bindgen-futures` executor). Surface:
 
 ```rust
 pub struct Client { /* ... */ }
@@ -613,8 +613,13 @@ Key behaviors:
 - **Mutations.** Out of scope for the engine. The client provides a
   thin `execute_sql(...)` helper that proxies to a separate
   application API; we do not insert ourselves into the write path.
-- **Size budget.** Strip `serde_json`, use `bincode` over the wire;
-  use `wee_alloc` and `--profile release-wasm` to hit ~500 KB gz.
+- **Size budget.** No `serde_json`; the row payload uses a
+  hand-written codec in the bincode byte layout, so neither `serde` nor
+  `bincode` is linked in the browser. No `tonic`/`http` on wasm either:
+  the WebSocket transport is driven through `web-sys` directly, and
+  `tracing` is a feature the JS wrapper leaves off. `--profile
+  release-wasm` + `wasm-opt -Oz` lands around 110 KB gz; CI budgets
+  256 KB gz (`xtask check-wasm-size`), well under the 500 KB target.
 
 ## 13. Wire protocol
 
@@ -645,12 +650,13 @@ message ServerMessage {
 ```
 
 A single bidirectional stream multiplexes all subscriptions for a
-client. `tonic-web` is the transport on the server; `tonic-web-wasm-client`
-on the client.
+client. `tonic-web` is the transport on the server; the browser client
+carries the same frames over a WebSocket (`/ws/subscribe`), the native
+client speaks gRPC directly.
 
-Diff payloads are bincode-encoded `Row` arrays (`Vec<Datum>`) referenced
-by the schema attached to `Accepted`. We avoid sending column names per
-row.
+Diff payloads are `Row` arrays (`Vec<Datum>`) in the bincode 1.x byte
+layout, referenced by the schema attached to `Accepted`. We avoid
+sending column names per row.
 
 ## 14. Consistency and failure modes
 
@@ -1549,14 +1555,15 @@ are intentionally small enough to land in single PRs.
 
 - [x] Add `wasm32-unknown-unknown` build job.
 - [x] Replace tokio runtime with `wasm-bindgen-futures` executor.
-- [x] Use `tonic-web-wasm-client` for transport.
-- [x] Strip `serde_json`; use `bincode` exclusively over the
-  wire.
+- [x] WebSocket transport through `web-sys` (no `tonic`/`http` on
+  wasm).
+- [x] Strip `serde_json`; row payloads use a hand-written codec in
+  the bincode byte layout (no `serde`/`bincode` on wasm).
 - [x] `wee_alloc` global allocator behind a feature flag.
 - [x] Dedicated release profile `release-wasm` with
   `opt-level = "z"`, `lto = true`, `codegen-units = 1`.
-- [x] Size budget guard: `xtask check-wasm-size` fails CI if
-  gz > 500 KB.
+- [x] Size budget guard: `xtask check-wasm-size` measures the
+  post-`wasm-bindgen` bundle and fails CI if gz > 256 KB.
 - [x] `wasm-bindgen-test` headless smoke test through the
   full WASM build path.
 - [x] JS-friendly wrapper crate (`palimpsest-client-js`) with
@@ -1677,7 +1684,7 @@ All six picks are recorded in §16.1.
   growth under bound.
 - [ ] Load: 10k writes/s × 1k subscribers, p99 commit→client
   latency < 100 ms.
-- [ ] WASM client gz ≤ 500 KB.
+- [x] WASM client gz ≤ 500 KB (~110 KB as of the web-sys transport).
 - [ ] Public-API rustdoc complete; user guide published.
 - [ ] CHANGELOG.md curated; semver discipline established.
 - [ ] crates.io publishing checklist (READMEs, license tags,

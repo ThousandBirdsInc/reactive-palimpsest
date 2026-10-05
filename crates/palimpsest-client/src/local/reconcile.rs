@@ -308,10 +308,7 @@ fn fold_change(
     ledger.base.insert(key.clone(), post_image.cloned());
     // Settle confirmations / drop acknowledged-but-contradicted
     // mutations, oldest first, until one survives.
-    loop {
-        let Some(idx) = ledger.pending.iter().position(|op| &op.key == key) else {
-            break;
-        };
+    while let Some(idx) = ledger.pending.iter().position(|op| &op.key == key) {
         let op = &ledger.pending[idx];
         if confirms(&op.kind, post_image) {
             out.settled.push(op.token);

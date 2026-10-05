@@ -167,12 +167,55 @@ server-side (`unknown_query` / `invalid_params` error events).
 
 ## Bundle size
 
-A release build of `palimpsest-client-js` is ~250 KiB gzipped. If
-you're shipping it on the critical path:
+The browser bundle is deliberately small: a release build of
+`palimpsest-client-js` (`--profile release-wasm`, post `wasm-bindgen`,
+`wasm-opt -Oz`) is about **265 KiB raw / 110 KiB gzipped**, plus ~8 KiB
+gzipped of JS glue. CI enforces a 256 KiB gzipped budget with
+`cargo run -p xtask -- check-wasm-size`, which measures the
+post-`wasm-bindgen` `_bg.wasm` (the raw cargo artifact is ~3x larger
+because it still carries the bindgen descriptor section).
 
-- Build with `--release` (the `wasm-pack build` invocation above
-  already does).
-- Enable the `wee_alloc` feature via
-  `wasm-pack build … --features palimpsest-client-js/wee_alloc` for
-  a smaller allocator.
+What keeps it small, and what to keep in mind when changing the client:
+
+- **No gRPC stack in the browser.** On `wasm32` the transport is a
+  `web-sys` WebSocket carrying the same protobuf frames; `tonic`,
+  `http`, `tower`, and friends are native-only. The manager's status
+  type is a two-field struct there (`palimpsest_client::Status`).
+- **Hand-written row codec.** Diff payloads are decoded by a small
+  codec in `palimpsest-proto` that matches the bincode byte layout, so
+  `serde`, `bincode`, and float formatting are not linked. The serde
+  derives on `WireDatum` stay available behind the crate's default-on
+  `serde` feature.
+- **No `tracing` in the bundle.** `palimpsest-client-js` builds
+  `palimpsest-client` with `default-features = false`, which turns the
+  log callsites into no-ops. Enable the `tracing` feature if you embed
+  the Rust client in your own wasm app and install a subscriber.
+- **Numbers are formatted by the JS engine.** The one place the bindings
+  turn a JS number into decimal text (a `numeric` column in a local
+  replica write) calls `Number.prototype.toString`, not `f64: Display`.
+
+If you're shipping it on the critical path:
+
+- Build with `--profile release-wasm` (the build scripts in
+  `examples/` already do) and run `wasm-opt -Oz` on the output.
+- Enable the `wee_alloc` feature
+  (`--features palimpsest-client-js/wee_alloc`) for a smaller
+  allocator if you accept its trade-offs (it is unmaintained and can
+  fragment under churn).
 - Lazy-load the module so it's not in the initial render path.
+
+## Testing the browser path
+
+`crates/palimpsest-client/tests/wasm.rs` carries headless-browser tests.
+The transport tests need a WebSocket bridge stand-in and are skipped
+unless `PALIMPSEST_WS_TEST_URL` is set at compile time to its origin
+(the server must answer the first frame with an `Accepted` + `Diff`,
+answer the ack with an `Error`, and close with code 1008 when the URL
+carries `?token=bad`):
+
+```sh
+PALIMPSEST_WS_TEST_URL=http://127.0.0.1:9797 \
+CHROMEDRIVER=/path/to/chromedriver \
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+  cargo test -p palimpsest-client --target wasm32-unknown-unknown --test wasm
+```

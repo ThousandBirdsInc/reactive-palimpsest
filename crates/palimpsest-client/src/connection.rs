@@ -26,7 +26,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch, Mutex};
-use tracing::{debug, info, warn};
 
 use palimpsest_proto::palimpsest::sync::v1::{self as proto, ClientMessage, ServerMessage};
 use palimpsest_proto::wire::SchemaRegistry;
@@ -36,6 +35,7 @@ use crate::cache::LocalCache;
 use crate::error::ClientError;
 use crate::reconnect::{Backoff, BackoffConfig};
 use crate::runtime::{self, TaskHandle};
+use crate::status::Code;
 use crate::subscription::DiffEvent;
 use crate::transport::{self, Endpoint, OpenError};
 
@@ -297,7 +297,7 @@ impl ConnectionTask {
                             // auth status so callers see the cause.
                             if matches!(
                                 status.code(),
-                                tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+                                Code::Unauthenticated | Code::PermissionDenied
                             ) {
                                 warn!(?status, "stream auth failure; shutting down");
                                 self.fail_all(&ClientError::Grpc(Box::new(status)));
