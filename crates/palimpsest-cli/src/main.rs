@@ -7,20 +7,27 @@
 //!
 //! - `serve [config]` — boot the embedded server (§18.8). Default if
 //!   no subcommand is provided.
-//! - `validate-config <config>` — parse the TOML config and compile the
-//!   permission rules; exit 0 on success, 1 with a diagnostic on
-//!   failure. Suitable for CI.
+//! - `validate-config <config> [--offline]` — parse the TOML config,
+//!   compile the permission rules, and register the query files
+//!   against the live catalog when `[database]` is configured
+//!   (`--offline` uses the built-in demo catalog instead); exit 0 on
+//!   success, 1 with a diagnostic on failure. Suitable for CI.
 //! - `permissions eval <config> --query <sql>` — compile permission
 //!   rules, rewrite one or more queries for a supplied user context,
 //!   and print the before/after canonical MIR.
 //! - `skills install` — install Codex and Claude skills that teach
 //!   agents how to operate the Palimpsest CLI.
-//! - `dump-catalog [config]` — emit the configured catalog (the demo
-//!   catalog for v1) as pretty JSON on stdout. Useful for shipping
-//!   schemas to clients during development.
-//! - `slot-info <config>` — connect to the configured upstream Postgres
-//!   and print one line per replication slot. Requires the optional
-//!   `slot-info` Cargo feature.
+//! - `dump-catalog [config]` — emit the configured catalog (introspected
+//!   from `[database]`, or the built-in demo catalog without one) as
+//!   pretty JSON on stdout. Useful for shipping schemas to clients
+//!   during development.
+//! - `slot-info <config>` — connect to the configured Postgres
+//!   (`[database]`, or the legacy `[upstream]`) and print one line per
+//!   replication slot.
+//!
+//! Every subcommand is driven by the TOML config alone, so the
+//! prebuilt binary (GitHub Releases, `install.sh`, or the container
+//! image) is a complete install: no Rust toolchain is needed.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -139,10 +146,10 @@ struct PermissionRuleConfig {
     mode: Mode,
 }
 
-/// Upstream Postgres connection used by `slot-info` and (in a future
-/// patch) by the real WAL runtime once it lands. Optional in v1.
+/// Legacy connection section, kept so older configs still drive
+/// `slot-info`. New configs should use `[database]`, which every
+/// subcommand (including `slot-info`) reads.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // fields are consumed only behind the `slot-info` feature for now
 struct UpstreamConfig {
     /// libpq-style connection URL (e.g.
     /// `postgres://user:pw@host:5432/db`).
@@ -185,13 +192,8 @@ enum CliError {
     EvalPermissions(String),
     #[error("skills: {0}")]
     Skills(String),
-    #[cfg(feature = "slot-info")]
-    #[error("slot-info: upstream config is missing — add an [upstream] section to {0}")]
-    MissingUpstream(PathBuf),
-    #[cfg(not(feature = "slot-info"))]
-    #[error("slot-info: feature not enabled (rebuild with `--features slot-info`)")]
-    SlotInfoDisabled,
-    #[cfg(feature = "slot-info")]
+    #[error("slot-info: no database configured — add a [database] section with `dsn` to {0}")]
+    MissingDatabase(PathBuf),
     #[error("slot-info: {0}")]
     SlotInfo(String),
     #[error("usage: {0}")]
@@ -231,10 +233,10 @@ async fn run() -> Result<(), CliError> {
 
     match first {
         Some("serve") => cmd_serve(rest.first().map(PathBuf::from)).await,
-        Some("validate-config") => cmd_validate_config(&require_one("validate-config", rest)?),
-        Some("permissions") => cmd_permissions(rest),
+        Some("validate-config") => cmd_validate_config(rest).await,
+        Some("permissions") => cmd_permissions(rest).await,
         Some("skills") => cmd_skills(rest),
-        Some("dump-catalog") => cmd_dump_catalog(rest.first().map(PathBuf::from).as_deref()),
+        Some("dump-catalog") => cmd_dump_catalog(rest).await,
         Some("typegen") => cmd_typegen(rest).await,
         Some("slot-info") => cmd_slot_info(require_one("slot-info", rest)?).await,
         Some("--help" | "-h" | "help") => {
@@ -263,19 +265,22 @@ Usage: palimpsest <command> [config]
 
 Commands:
   serve [config]              Run the embedded server (default).
-  validate-config <config>    Parse the TOML config and exit 0/1.
+  validate-config <config> [--offline]
+                              Parse the TOML config, compile permissions,
+                              register query files, and exit 0/1. Uses the
+                              live catalog when [database] is set.
   permissions eval <config> --query <sql> [--user field=value]
                               Rewrite query MIR with configured permissions.
   skills install [options]    Install Codex and Claude skills for this CLI.
   dump-catalog [config]       Print the configured catalog as JSON.
   typegen [config] [--out f]  Generate TypeScript row/param types for every
                               registered query from the live catalog.
-  slot-info <config>          Print upstream replication slot status
-                              (requires --features slot-info).
+  slot-info <config>          Print replication slot status for [database].
   help                        Show this message.
 
 If no command is given, behaves as `serve` (with `palimpsest.toml` if no
-path is supplied)."
+path is supplied). Everything is driven by the config file; see
+palimpsest.example.toml for the full reference."
     );
 }
 
@@ -373,7 +378,17 @@ const fn column_type_label(ty: ColumnType) -> &'static str {
 async fn load_catalog(
     config: &Config,
 ) -> Result<(Catalog, Vec<palimpsest_postgres::IntrospectedTable>), CliError> {
-    let Some(database) = &config.database else {
+    load_catalog_with(config, false).await
+}
+
+/// [`load_catalog`] with an explicit offline switch: `offline` skips
+/// the database even when `[database]` is configured, so CI can
+/// validate a config without network access.
+async fn load_catalog_with(
+    config: &Config,
+    offline: bool,
+) -> Result<(Catalog, Vec<palimpsest_postgres::IntrospectedTable>), CliError> {
+    let Some(database) = config.database.as_ref().filter(|_| !offline) else {
         return Ok((Catalog::demo(), Vec::new()));
     };
     let root_ca = read_root_ca(database)?;
@@ -489,9 +504,48 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
     Ok(())
 }
 
-fn cmd_validate_config(path: &Path) -> Result<(), CliError> {
-    let config = read_config(path)?;
-    let catalog = Catalog::demo();
+/// `validate-config <config> [--offline]`.
+///
+/// Validates against the live catalog when `[database]` is configured
+/// so that rules and query files referencing real tables pass exactly
+/// when `serve` would accept them. Without `[database]` the built-in
+/// demo catalog is used, matching what `serve` runs against.
+///
+/// `--offline` never touches the database: with `[database]`
+/// configured it still parses the config, types the user schema, and
+/// reads every query file, but skips the catalog-dependent checks
+/// (rule compilation, query registration) rather than running them
+/// against the wrong catalog.
+async fn cmd_validate_config(rest: &[String]) -> Result<(), CliError> {
+    let mut path: Option<PathBuf> = None;
+    let mut offline = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--offline" => offline = true,
+            "--help" | "-h" => {
+                println!("Usage: palimpsest validate-config <config> [--offline]");
+                return Ok(());
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "validate-config: unknown option '{other}'"
+                )));
+            }
+            other => path = Some(PathBuf::from(other)),
+        }
+    }
+    let path =
+        path.ok_or_else(|| CliError::Usage("validate-config: expected a config path".to_owned()))?;
+
+    let config = read_config(&path)?;
+    if config.database.is_some() && config.queries.files.is_empty() {
+        return Err(CliError::BuildServer(
+            "[database] requires [queries] files: the streamed table set is derived from the \
+             registered queries"
+                .to_owned(),
+        ));
+    }
+
     let user_schema =
         build_user_schema(&config.permissions.user_schema).map_err(CliError::CompilePermissions)?;
     let rules: Vec<_> = config
@@ -502,29 +556,65 @@ fn cmd_validate_config(path: &Path) -> Result<(), CliError> {
             PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode)
         })
         .collect();
-    let _compiled = compile_rules(&rules, &catalog, &user_schema)
-        .map_err(|err| CliError::CompilePermissions(err.to_string()))?;
 
-    let registry = build_query_registry(&config.queries, path, &catalog)?;
-    let query_count = registry
-        .as_ref()
-        .map_or(0, palimpsest_sql::QueryRegistry::len);
+    let skip_catalog_checks = config.database.is_some() && offline;
+    let summary = if skip_catalog_checks {
+        // No catalog to check against: make sure every query file is
+        // at least present and readable so a typo still fails here.
+        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        for file in &config.queries.files {
+            let file = if file.is_absolute() {
+                file.clone()
+            } else {
+                base.join(file)
+            };
+            fs::read_to_string(&file).map_err(|err| CliError::ReadQueryFile(file.clone(), err))?;
+        }
+        format!(
+            "{} query file(s) readable; catalog checks skipped (--offline)",
+            config.queries.files.len()
+        )
+    } else {
+        let (catalog, _tables) = load_catalog_with(&config, offline).await?;
+        let _compiled = compile_rules(&rules, &catalog, &user_schema)
+            .map_err(|err| CliError::CompilePermissions(err.to_string()))?;
+        let registry = build_query_registry(&config.queries, &path, &catalog)?;
+        let query_count = registry
+            .as_ref()
+            .map_or(0, palimpsest_sql::QueryRegistry::len);
+        format!(
+            "{} named quer{}; catalog: {}",
+            query_count,
+            if query_count == 1 { "y" } else { "ies" },
+            if config.database.is_some() {
+                "introspected from [database]"
+            } else {
+                "built-in demo"
+            }
+        )
+    };
 
     println!(
-        "{}: ok ({} permission rule(s), {} user-context field(s), {} named quer{})",
+        "{}: ok ({} permission rule(s), {} user-context field(s), {summary})",
         path.display(),
         rules.len(),
         config.permissions.user_schema.len(),
-        query_count,
-        if query_count == 1 { "y" } else { "ies" }
     );
-    if config.upstream.is_none() {
-        println!("note: no [upstream] section — `slot-info` will be unavailable.");
+    if config.database.is_none() {
+        println!(
+            "note: no [database] section — `serve` will run against the in-memory stub runtime \
+             and the built-in demo catalog; add `[database] dsn = ...` to stream a real Postgres."
+        );
+    } else if skip_catalog_checks {
+        println!(
+            "note: --offline skipped rule compilation and query registration; run without \
+             --offline (with the database reachable) to check them against the live catalog."
+        );
     }
     Ok(())
 }
 
-fn cmd_permissions(rest: &[String]) -> Result<(), CliError> {
+async fn cmd_permissions(rest: &[String]) -> Result<(), CliError> {
     let Some(action) = rest.first().map(String::as_str) else {
         print_permissions_help();
         return Ok(());
@@ -539,7 +629,7 @@ fn cmd_permissions(rest: &[String]) -> Result<(), CliError> {
             print_permissions_help();
             Ok(())
         }
-        "eval" => cmd_permissions_eval(&rest[1..]),
+        "eval" => cmd_permissions_eval(&rest[1..]).await,
         "help" | "--help" | "-h" => {
             print_permissions_help();
             Ok(())
@@ -564,8 +654,11 @@ Options:
   --user-json <json>          Bind user-context values from a JSON object.
   --format text|json          Output format (default: text).
   --json                      Alias for --format json.
+  --offline                   Use the built-in demo catalog even when
+                              [database] is configured.
 
-Values are parsed using [permissions.user_schema] from the config."
+Values are parsed using [permissions.user_schema] from the config.
+Rules compile against the live catalog when [database] is configured."
     );
 }
 
@@ -575,6 +668,7 @@ struct PermissionEvalOptions {
     queries: Vec<String>,
     user_values: BTreeMap<String, UserValue>,
     output: PermissionEvalOutput,
+    offline: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -584,10 +678,10 @@ enum PermissionEvalOutput {
     Json,
 }
 
-fn cmd_permissions_eval(rest: &[String]) -> Result<(), CliError> {
+async fn cmd_permissions_eval(rest: &[String]) -> Result<(), CliError> {
     let options = parse_permission_eval_options(rest)?;
     let config = read_config(&options.config_path)?;
-    let catalog = Catalog::demo();
+    let (catalog, _tables) = load_catalog_with(&config, options.offline).await?;
     let user_schema =
         build_user_schema(&config.permissions.user_schema).map_err(CliError::EvalPermissions)?;
     let rules: Vec<_> = config
@@ -731,10 +825,12 @@ fn parse_permission_eval_options(rest: &[String]) -> Result<PermissionEvalOption
     let mut user_values = BTreeMap::new();
     let mut queries = Vec::new();
     let mut output = PermissionEvalOutput::Text;
+    let mut offline = false;
     let mut iter = rest[1..].iter();
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--offline" => offline = true,
             "--query" => queries.push(next_arg(arg, iter.next())?),
             "--query-file" => {
                 let path = PathBuf::from(next_arg(arg, iter.next())?);
@@ -787,6 +883,7 @@ fn parse_permission_eval_options(rest: &[String]) -> Result<PermissionEvalOption
         queries,
         user_values,
         output,
+        offline,
     })
 }
 
@@ -1095,10 +1192,11 @@ Use the `palimpsest` binary for local operation and diagnostics. Start with `pal
 
 ## Core Commands
 
-- `palimpsest validate-config <config>`: parse TOML, compile permission rules, and register any `[queries]` sqlc files (named prepared queries) — registration failures name the query and the exact rejected construct.
+- `palimpsest validate-config <config> [--offline]`: parse TOML, compile permission rules, and register any `[queries]` sqlc files (named prepared queries) against the live catalog when `[database]` is configured — registration failures name the query and the exact rejected construct. `--offline` uses the built-in demo catalog.
 - `palimpsest permissions eval <config> --query <sql> --user field=value`: compile configured permissions and show canonical query MIR before and after rewriting.
-- `palimpsest dump-catalog [config]`: print the configured demo catalog as JSON.
-- `palimpsest slot-info <config>`: inspect upstream replication slot status when the binary was built with `--features slot-info`.
+- `palimpsest dump-catalog [config]`: print the catalog `serve` compiles against (introspected from `[database]`, else the demo catalog) as JSON.
+- `palimpsest typegen <config> --out <file.ts>`: generate TypeScript row/parameter types for every registered query.
+- `palimpsest slot-info <config>`: inspect replication slot status for the `[database]` connection.
 
 ## Output And Exit Codes (for agents)
 
@@ -1108,7 +1206,7 @@ Exit codes encode the failure class: `0` success, `2` usage error, `1` everythin
 
 1. Run `palimpsest validate-config <config>` before serving or debugging permission behavior.
 2. Use `palimpsest permissions eval` for permission model questions instead of inferring rewrites by inspection.
-3. Use `cargo install palimpsest-cli` for the published CLI, or `cargo install --path crates/palimpsest-cli` from a checkout.
+3. Install a prebuilt binary (no Rust toolchain needed) with the repository's `install.sh`, download a tarball from GitHub Releases, or run the `ghcr.io/thousandbirdsinc/reactive-palimpsest` container image. `cargo install palimpsest-cli` builds from source.
 ";
 
 fn cmd_skills_install(rest: &[String]) -> Result<(), CliError> {
@@ -1341,11 +1439,30 @@ async fn cmd_typegen(rest: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn cmd_dump_catalog(path: Option<&Path>) -> Result<(), CliError> {
-    if let Some(path) = path {
-        let _ = read_config(path)?;
+/// `dump-catalog [config] [--offline]` — the catalog `serve` would
+/// compile against: introspected from `[database]` when configured,
+/// otherwise the built-in demo catalog.
+async fn cmd_dump_catalog(rest: &[String]) -> Result<(), CliError> {
+    let mut path: Option<PathBuf> = None;
+    let mut offline = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--offline" => offline = true,
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "dump-catalog: unknown option '{other}'"
+                )));
+            }
+            other => path = Some(PathBuf::from(other)),
+        }
     }
-    let catalog = Catalog::demo();
+    let catalog = match path {
+        Some(path) => {
+            let config = read_config(&path)?;
+            load_catalog_with(&config, offline).await?.0
+        }
+        None => Catalog::demo(),
+    };
     let dump = CatalogDump {
         tables: catalog
             .tables()
@@ -1367,23 +1484,41 @@ fn cmd_dump_catalog(path: Option<&Path>) -> Result<(), CliError> {
     Ok(())
 }
 
-#[cfg(feature = "slot-info")]
-async fn cmd_slot_info(path: PathBuf) -> Result<(), CliError> {
-    use tokio_postgres::{Config, NoTls};
+/// Where `slot-info` connects: `[database]` (the section `serve`
+/// uses), falling back to the legacy `[upstream]` section.
+struct SlotTarget {
+    dsn: String,
+    slot: String,
+    publication: String,
+    tls_root_ca_pem: Option<String>,
+}
 
+fn slot_target(config: &Config, path: &Path) -> Result<SlotTarget, CliError> {
+    if let Some(database) = &config.database {
+        return Ok(SlotTarget {
+            dsn: database.dsn.clone(),
+            slot: database.slot.clone(),
+            publication: database.publication.clone(),
+            tls_root_ca_pem: read_root_ca(database)?,
+        });
+    }
+    if let Some(upstream) = &config.upstream {
+        return Ok(SlotTarget {
+            dsn: upstream.url.clone(),
+            slot: upstream.slot_name.clone(),
+            publication: upstream.publication.clone(),
+            tls_root_ca_pem: None,
+        });
+    }
+    Err(CliError::MissingDatabase(path.to_path_buf()))
+}
+
+async fn cmd_slot_info(path: PathBuf) -> Result<(), CliError> {
     let config = read_config(&path)?;
-    let upstream = config.upstream.ok_or(CliError::MissingUpstream(path))?;
-    let pg_config: Config = upstream
-        .url
-        .parse()
-        .map_err(|err: tokio_postgres::Error| CliError::SlotInfo(err.to_string()))?;
-    let (client, conn) = pg_config
-        .connect(NoTls)
+    let target = slot_target(&config, &path)?;
+    let client = palimpsest_postgres::connect_management(&target.dsn, target.tls_root_ca_pem)
         .await
         .map_err(|err| CliError::SlotInfo(err.to_string()))?;
-    let _join = tokio::spawn(async move {
-        let _ = conn.await;
-    });
 
     let rows = client
         .query(
@@ -1391,14 +1526,14 @@ async fn cmd_slot_info(path: PathBuf) -> Result<(), CliError> {
                     confirmed_flush_lsn::text, restart_lsn::text \
                FROM pg_replication_slots \
               WHERE slot_name = $1 OR $1 = ''",
-            &[&upstream.slot_name],
+            &[&target.slot],
         )
         .await
         .map_err(|err| CliError::SlotInfo(err.to_string()))?;
 
     if rows.is_empty() {
-        println!("no replication slot named '{}' found", upstream.slot_name);
-        println!("  (publication: '{}')", upstream.publication);
+        println!("no replication slot named '{}' found", target.slot);
+        println!("  (publication: '{}')", target.publication);
         return Ok(());
     }
     println!("slot_name\tplugin\tslot_type\tactive\tconfirmed_flush_lsn\trestart_lsn");
@@ -1417,12 +1552,6 @@ async fn cmd_slot_info(path: PathBuf) -> Result<(), CliError> {
         );
     }
     Ok(())
-}
-
-#[cfg(not(feature = "slot-info"))]
-#[allow(clippy::unused_async)]
-async fn cmd_slot_info(_path: PathBuf) -> Result<(), CliError> {
-    Err(CliError::SlotInfoDisabled)
 }
 
 #[cfg(test)]
@@ -1593,8 +1722,8 @@ mod tests {
         let _ = std::fs::remove_file(options.config_path);
     }
 
-    #[test]
-    fn permissions_eval_runs_rewriter_against_query() {
+    #[tokio::test]
+    async fn permissions_eval_runs_rewriter_against_query() {
         let config_path = write_temp_permissions_config(
             "rewrite",
             r#"
@@ -1612,10 +1741,116 @@ predicate = "author_id = $user.id"
             "SELECT id FROM posts".to_owned(),
             "--user".to_owned(),
             "id=42".to_owned(),
-        ]);
+        ])
+        .await;
 
         assert!(result.is_ok());
         let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn validate_config_accepts_example_config_offline() {
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("palimpsest.example.toml");
+        let result =
+            cmd_validate_config(&[example.display().to_string(), "--offline".to_owned()]).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn validate_config_offline_with_database_checks_query_files_only() {
+        let dir = temp_test_dir("validate-offline");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let config_path = dir.join("palimpsest.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[database]
+dsn = "postgres://nobody@127.0.0.1:1/nowhere"
+
+[queries]
+files = ["live.sql"]
+
+[[permissions.rules]]
+name = "own"
+table = "tickets"
+predicate = "owner_id = $user.id"
+
+[permissions.user_schema]
+id = "int"
+"#,
+        )
+        .expect("config");
+
+        // The query file is missing: --offline must still catch that.
+        let missing =
+            cmd_validate_config(&[config_path.display().to_string(), "--offline".to_owned()]).await;
+        assert!(
+            matches!(missing, Err(CliError::ReadQueryFile(..))),
+            "{missing:?}"
+        );
+
+        // Present: rules naming real tables are not compiled against the
+        // demo catalog, so this passes without a database.
+        std::fs::write(
+            dir.join("live.sql"),
+            "-- name: Open :many\nSELECT id FROM tickets;\n",
+        )
+        .expect("query file");
+        let ok =
+            cmd_validate_config(&[config_path.display().to_string(), "--offline".to_owned()]).await;
+        assert!(ok.is_ok(), "{ok:?}");
+
+        // Without [queries], [database] is rejected before any network.
+        std::fs::write(
+            &config_path,
+            "[database]\ndsn = \"postgres://nobody@127.0.0.1:1/nowhere\"\n",
+        )
+        .expect("config");
+        let no_queries =
+            cmd_validate_config(&[config_path.display().to_string(), "--offline".to_owned()]).await;
+        assert!(
+            matches!(no_queries, Err(CliError::BuildServer(ref msg)) if msg.contains("[queries]")),
+            "{no_queries:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slot_info_prefers_database_over_legacy_upstream() {
+        let config: Config = toml::from_str(
+            r#"
+[database]
+dsn = "postgres://app@db/app"
+slot = "primary"
+
+[upstream]
+url = "postgres://legacy@db/app"
+"#,
+        )
+        .expect("config should parse");
+        let target = slot_target(&config, Path::new("x.toml")).expect("target");
+        assert_eq!(target.dsn, "postgres://app@db/app");
+        assert_eq!(target.slot, "primary");
+        assert_eq!(target.publication, "palimpsest_pub");
+
+        let legacy: Config = toml::from_str(
+            r#"
+[upstream]
+url = "postgres://legacy@db/app"
+slot_name = "old"
+"#,
+        )
+        .expect("config should parse");
+        let target = slot_target(&legacy, Path::new("x.toml")).expect("target");
+        assert_eq!(target.dsn, "postgres://legacy@db/app");
+        assert_eq!(target.slot, "old");
+
+        let none: Config = toml::from_str("").expect("config should parse");
+        assert!(matches!(
+            slot_target(&none, Path::new("x.toml")),
+            Err(CliError::MissingDatabase(_))
+        ));
     }
 
     fn write_temp_permissions_config(name: &str, rules: &str) -> PathBuf {

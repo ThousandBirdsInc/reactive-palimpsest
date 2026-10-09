@@ -113,6 +113,23 @@ pub async fn introspect_database(
     crate::introspect::introspect_all_tables(&client).await
 }
 
+/// Opens a plain (non-replication) connection for ad-hoc diagnostics.
+///
+/// Used by `palimpsest slot-info`; the TLS posture matches the
+/// runtime's, with `tls_root_ca_pem` following
+/// [`PostgresRuntimeConfig::tls_root_ca_pem`] semantics. The
+/// connection driver is spawned onto the current runtime.
+///
+/// # Errors
+/// DSN parse and connection failures, with the DSN redacted.
+pub async fn connect_management(
+    dsn: &str,
+    tls_root_ca_pem: Option<String>,
+) -> Result<Client, PostgresRuntimeError> {
+    let tls = TlsSettings::new(tls_root_ca_pem);
+    open_client(dsn, &tls).await
+}
+
 /// Opens a management client and spawns its connection driver. TLS is
 /// negotiated when the DSN asks for it (`sslmode` other than
 /// `disable`).

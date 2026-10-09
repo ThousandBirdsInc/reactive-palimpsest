@@ -64,7 +64,7 @@ pub use error::PostgresRuntimeError;
 pub use introspect::{
     introspect_all_tables, introspect_tables, sql_catalog, IntrospectedColumn, IntrospectedTable,
 };
-pub use replication::introspect_database;
 pub use replication::ReplicationHandle;
+pub use replication::{connect_management, introspect_database};
 pub use runtime::{PostgresRuntimeConfig, PostgresWalRuntime};
 pub use typegen::typescript_module;

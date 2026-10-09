@@ -15,6 +15,10 @@
 # no package manager) to keep the attack surface minimal — the §18.14
 # target is ≤ 30 MB final image.
 #
+# This is the from-source build. Released images on
+# ghcr.io/thousandbirdsinc/reactive-palimpsest are produced by
+# `Dockerfile.release` from the prebuilt static binaries instead.
+#
 # Build:
 #   docker build -t palimpsest:dev .
 # Run (with a mounted config + ports):

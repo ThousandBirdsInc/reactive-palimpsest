@@ -1624,6 +1624,9 @@ are intentionally small enough to land in single PRs.
 - [x] Health endpoints: `/healthz` (process up),
   `/readyz` (caught up to a freshness threshold).
 - [x] Dockerfile (multi-stage; final image ≤ 30 MB).
+- [x] Prebuilt release binaries (Linux musl, macOS) + multi-arch GHCR
+  image per `v*` tag, with `install.sh`; every subcommand runs from
+  the TOML config alone, no toolchain required.
 - [x] Helm chart skeleton (optional, post-v1).
 - [x] Runbook: slot-stuck, slow-consumer, schema-drift recovery.
 

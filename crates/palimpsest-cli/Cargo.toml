@@ -17,7 +17,9 @@ path = "src/main.rs"
 
 [features]
 default = []
-slot-info = ["dep:tokio-postgres"]
+# `slot-info` is always built in now; the feature is kept as a no-op so
+# existing `--features slot-info` invocations keep working.
+slot-info = []
 
 [dependencies]
 palimpsest-permissions = { path = "../palimpsest-permissions", version = "0.1.1" }
@@ -28,7 +30,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
-tokio-postgres = { version = "0.7", optional = true, default-features = false, features = ["runtime"] }
+tokio-postgres.workspace = true
 toml.workspace = true
 tracing.workspace = true
 

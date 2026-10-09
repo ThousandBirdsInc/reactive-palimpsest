@@ -28,6 +28,42 @@ paths are still being completed. See [DESIGN.md](DESIGN.md) for the
 implementation plan and [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
 for known operational failure modes.
 
+## Install
+
+Palimpsest ships as a single `palimpsest` binary driven by one TOML
+file. You do not need a Rust toolchain:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ThousandBirdsInc/reactive-palimpsest/main/install.sh | sh
+```
+
+That downloads the prebuilt binary for your platform from the latest
+[GitHub Release](https://github.com/ThousandBirdsInc/reactive-palimpsest/releases)
+(Linux x86_64/aarch64 as fully static builds, macOS x86_64/aarch64),
+verifies it against `SHA256SUMS`, and installs it to `/usr/local/bin`
+or `~/.local/bin`. Pin a version with `PALIMPSEST_VERSION=v0.1.1`.
+
+Or run the container image (linux/amd64 + linux/arm64):
+
+```sh
+docker run --rm -p 50051:50051 -p 9090:9090 \
+  -v "$PWD/palimpsest.toml:/etc/palimpsest/palimpsest.toml" \
+  ghcr.io/thousandbirdsinc/reactive-palimpsest:latest
+```
+
+Then:
+
+```sh
+cp palimpsest.example.toml palimpsest.toml   # shipped in every tarball
+palimpsest validate-config palimpsest.toml
+palimpsest serve palimpsest.toml
+```
+
+[`crates/palimpsest-cli/palimpsest.example.toml`](crates/palimpsest-cli/palimpsest.example.toml)
+is the annotated, complete config reference, and
+[`crates/palimpsest-cli/README.md`](crates/palimpsest-cli/README.md)
+walks through a real-Postgres setup.
+
 ## Positioning
 
 If you know [Convex](https://www.convex.dev/), Palimpsest is aimed at a
@@ -135,6 +171,9 @@ parameter type per registered query from that same catalog, so clients
 generate their row types instead of transcribing them (`timestamptz`
 arrives as a `Date`, `bigint` as a JS `bigint`, arrays as arrays).
 
+Nothing above requires compiling anything: the prebuilt binary plus
+the config file is the whole deployment.
+
 ## Quick Start: Demo App
 
 The fastest way to see Palimpsest working end-to-end is the demo app:
@@ -156,6 +195,9 @@ See [examples/demo-app/README.md](examples/demo-app/README.md) for the
 full walkthrough.
 
 ## Building The Workspace
+
+You only need this section to hack on Palimpsest itself; see
+[Install](#install) to run it.
 
 Requirements:
 
@@ -193,24 +235,37 @@ Install the latest published CLI from crates.io:
 cargo install palimpsest-cli
 ```
 
-Release the CLI crate set to crates.io:
-
-```sh
-./publish.sh
-```
-
-Build the Docker image:
+Build the Docker image from source:
 
 ```sh
 docker build -t palimpsest:dev .
 ```
 
-## CLI
+### Cutting a release
 
-The main binary is `palimpsest`.
+Bump `version` in the workspace `Cargo.toml`, then tag it:
 
 ```sh
-cargo run -p palimpsest-cli -- help
+git tag v0.1.1 && git push origin v0.1.1
+```
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds
+the static Linux and macOS binaries, attaches them with `SHA256SUMS` and
+`install.sh` to a GitHub Release, and pushes the multi-arch image to
+`ghcr.io/thousandbirdsinc/reactive-palimpsest` (tags `X.Y.Z`, `X.Y`,
+and `latest`). The crate set goes to crates.io separately:
+
+```sh
+./publish.sh
+```
+
+## CLI
+
+The main binary is `palimpsest` (see [Install](#install); from a
+checkout, `cargo run -p palimpsest-cli -- help`).
+
+```sh
+palimpsest help
 ```
 
 Supported commands:
@@ -218,11 +273,12 @@ Supported commands:
 | Command | Purpose |
 | --- | --- |
 | `serve [config]` | Run the embedded server. This is the default command. |
-| `validate-config <config>` | Parse TOML config and compile permission rules. |
+| `validate-config <config> [--offline]` | Parse TOML config, compile permission rules, and register query files against the live catalog (`--offline`: demo catalog). |
 | `permissions eval <config> --query <sql>` | Compile configured permissions and show the before/after query rewrite. |
+| `typegen <config> --out <file>` | Generate TypeScript row/parameter types for every registered query. |
 | `skills install` | Install Codex and Claude skills for operating the CLI. |
-| `dump-catalog [config]` | Print the configured catalog as JSON. |
-| `slot-info <config>` | Print replication slot status when built with `--features slot-info`. |
+| `dump-catalog [config]` | Print the catalog `serve` compiles against as JSON. |
+| `slot-info <config>` | Print replication slot status for the `[database]` connection. |
 
 Example config:
 
@@ -247,7 +303,7 @@ palimpsest skills install
 Validate it with:
 
 ```sh
-cargo run -p palimpsest-cli -- validate-config crates/palimpsest-cli/palimpsest.example.toml
+palimpsest validate-config crates/palimpsest-cli/palimpsest.example.toml
 ```
 
 ## Clients

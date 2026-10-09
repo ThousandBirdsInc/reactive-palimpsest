@@ -68,39 +68,85 @@ CREATE ROLE palimpsest WITH LOGIN REPLICATION PASSWORD '...';
 GRANT SELECT ON posts, authors, comments TO palimpsest;
 ```
 
+## Installing
+
+Palimpsest is distributed as a prebuilt binary and as a container
+image; neither needs a Rust toolchain. Every `v*` tag publishes:
+
+- Tarballs on the
+  [GitHub Release](https://github.com/ThousandBirdsInc/reactive-palimpsest/releases)
+  for Linux x86_64/aarch64 (fully static, run on any distribution) and
+  macOS x86_64/aarch64, with a `SHA256SUMS` file. The one-liner picks
+  the right one and verifies it:
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/ThousandBirdsInc/reactive-palimpsest/main/install.sh | sh
+  ```
+
+  Pin with `PALIMPSEST_VERSION=v0.1.1`; choose the directory with
+  `PALIMPSEST_INSTALL=/opt/palimpsest/bin`.
+
+- `ghcr.io/thousandbirdsinc/reactive-palimpsest:<version>` (also
+  `<major>.<minor>` and `latest`), a distroless image for linux/amd64
+  and linux/arm64 that runs as non-root and expects the config at
+  `/etc/palimpsest/palimpsest.toml`. The Helm chart under
+  [`deploy/helm/palimpsest`](../deploy/helm/palimpsest) wraps it.
+
+Windows is not built; use the container image or WSL.
+
 ## Configuration
 
-`palimpsest serve` reads its configuration from CLI flags and a TOML
-file. Minimal example:
+`palimpsest serve <config>` reads everything from one TOML file; there
+are no other flags. Minimal production example:
 
 ```toml
-[postgres]
-url = "postgres://palimpsest:secret@db:5432/app"
+[grpc]
+addr = "0.0.0.0:50051"
+
+[metrics]
+addr = "0.0.0.0:9090"
+
+[database]
+dsn = "postgres://palimpsest:secret@db:5432/app?sslmode=require"
+slot = "palimpsest_main"
 publication = "palimpsest_pub"
-slot_name = "palimpsest_main"
+tls_root_ca_file = "/etc/palimpsest/ca.pem"   # verify-full
 
-[server]
-grpc_addr = "0.0.0.0:50051"
-metrics_addr = "0.0.0.0:9090"
+[queries]
+files = ["queries/live.sql"]
 
-[security.subscribe_rate]
-burst = 32
-refill_per_sec = 8.0
-
-[security.reconnect_rate]
-max_attempts = 60
-window = "60s"
-
-[security]
-max_subscriptions_per_connection = 256
-
-[auth.jwt]
-secret = "${JWT_SHARED_SECRET}"
+[auth]
+kind = "jwt"
+jwks_url = "https://issuer.example/.well-known/jwks.json"
 audience = "palimpsest"
+[auth.claim_to_field]
+sub = "id"
+
+[permissions.user_schema]
+id = "int"
+
+[[permissions.rules]]
+name = "own_rows"
+table = "tickets"
+predicate = "owner_id = $user.id"
 ```
 
-Permissions live in their own TOML file passed via `--permissions`; see
-[`PERMISSIONS.md`](PERMISSIONS.md).
+`[database]` plus `[queries]` is the entire database-side surface: the
+engine introspects the catalog, derives the streamed tables from the
+registered queries, and creates or resumes the slot and publication.
+Without `[database]` the server boots against an in-memory stub and
+the built-in demo catalog, which is useful for client development.
+
+The annotated, complete reference is
+[`crates/palimpsest-cli/palimpsest.example.toml`](../crates/palimpsest-cli/palimpsest.example.toml);
+the permission DSL is in [`PERMISSIONS.md`](PERMISSIONS.md) and query
+files in [`NAMED-QUERIES.md`](NAMED-QUERIES.md).
+
+Run `palimpsest validate-config palimpsest.toml` in CI and before
+every deploy: with `[database]` configured it introspects the live
+catalog and rejects exactly what `serve` would reject (unknown
+tables, bad predicates, unsupported query constructs). Add
+`--offline` where the database is unreachable.
 
 ## TLS
 

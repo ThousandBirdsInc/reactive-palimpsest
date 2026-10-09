@@ -1,26 +1,135 @@
-# Example palimpsest-cli configuration. Copy to `palimpsest.toml`
-# (or pass as the first CLI argument) and adapt as needed.
+# Example `palimpsest` configuration — the complete reference.
+#
+# Copy to `palimpsest.toml`, edit, then:
+#
+#   palimpsest validate-config palimpsest.toml   # parse + compile, exit 0/1
+#   palimpsest serve palimpsest.toml             # run the server
+#
+# Every section is optional and every subcommand is driven by this one
+# file, so a prebuilt binary (install.sh, a GitHub Release tarball, or
+# the container image) is a complete install: no Rust toolchain needed.
+#
+# As shipped, this file runs a no-auth dev server against an in-memory
+# stub runtime and the built-in demo catalog (tables `posts`,
+# `archived_posts`, `authors`, `comments`). Uncomment `[database]` and
+# `[queries]` to stream a real Postgres.
+
+# ---------------------------------------------------------------------
+# Listeners
+# ---------------------------------------------------------------------
 
 [grpc]
+# One listener serves gRPC, gRPC-Web, and the browser's /ws/subscribe.
+# Default: 127.0.0.1:50051
 addr = "0.0.0.0:50051"
 
 [metrics]
+# Prometheus /metrics plus /healthz (liveness) and /readyz (readiness).
+# Omit the section (or the key) to disable the sidecar.
 addr = "127.0.0.1:9090"
 
+# ---------------------------------------------------------------------
+# Postgres (the whole database-side adoption surface is `dsn`)
+# ---------------------------------------------------------------------
+#
+# With `[database]` set, the engine introspects the catalog, derives the
+# streamed tables from the registered `[queries]`, and owns the
+# replication slot, the publication, and REPLICA IDENTITY. `[database]`
+# requires `[queries]` (the streamed table set comes from the queries).
+#
+# Postgres prerequisites: `wal_level = logical`, and a role with
+# REPLICATION plus SELECT on the queried tables (and ALTER on them
+# unless `manage_replica_identity = false`; see below).
+#
+# TLS follows libpq: `sslmode=disable` never negotiates TLS;
+# `prefer`/`require` encrypt without verifying the server;
+# `tls_root_ca_file` upgrades to full chain + hostname verification
+# (`verify-full`).
+
+# [database]
+# dsn = "postgres://palimpsest:secret@db.internal:5432/app?sslmode=require"
+# slot = "palimpsest"                 # replication slot (default: palimpsest)
+# publication = "palimpsest_pub"      # publication (default: palimpsest_pub)
+# tls_root_ca_file = "/etc/palimpsest/ca.pem"
+# manage_replica_identity = true      # false: refuse to start instead of
+#                                     # issuing ALTER TABLE ... REPLICA IDENTITY FULL
+
+# ---------------------------------------------------------------------
+# Named prepared queries (docs/NAMED-QUERIES.md)
+# ---------------------------------------------------------------------
+#
+# sqlc-format query files registered at startup. Registration failures
+# abort startup naming the query and the exact rejected construct.
+# Configuring any file disables raw-SQL subscribes (clients subscribe by
+# name) unless `inline_sql = true`. Paths resolve relative to this file.
+#
+# Query files are plain SQL with sqlc headers, e.g.
+#
+#   -- name: OpenTickets :many
+#   SELECT id, title FROM tickets WHERE owner_id = $1 AND closed = false;
+
+# [queries]
+# files = ["queries/live.sql"]
+# inline_sql = false
+
+# ---------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------
+
 [auth]
+# "anonymous" accepts every connection with an empty user context — for
+# dev and trusted networks only. Switch to "jwt" for anything else.
 kind = "anonymous"
+
+# JWT: a bearer token in the gRPC `authorization` header (or the
+# `token` query parameter on /ws/subscribe) is validated and its claims are mapped onto
+# `$user.*` fields for permission rules. Supply exactly one key source:
+#
+#   secret          HMAC shared secret (HS256/HS384/HS512)
+#   public_key_pem  PEM public key (RS*/PS*/ES*/EdDSA)
+#   jwks            inline JWKS document ({"keys": [...]})
+#   jwks_url        JWKS URL, fetched at startup and refreshed on an
+#                   unknown `kid` (rate-limited)
+#
+# [auth]
 # kind = "jwt"
-# secret = "super-secret"
-# issuer = "palimpsest"
-# audience = "clients"
+# jwks_url = "https://issuer.example/.well-known/jwks.json"
+# # secret = "super-secret"
+# # public_key_pem = """-----BEGIN PUBLIC KEY-----
+# # ...
+# # -----END PUBLIC KEY-----"""
+# algorithm = "RS256"                 # default: HS256 with secret, RS256 with PEM;
+#                                     # JWKS keys carry their own alg
+# issuer = "https://issuer.example"   # optional: required `iss`
+# audience = "palimpsest"             # optional: required `aud`
+# leeway_secs = 60                    # clock-skew leeway for exp/nbf
+#
+# # claim name -> $user field. Field types come from
+# # [permissions.user_schema]; list-valued claims bind as lists for
+# # `= ANY($user.team_ids)` rules.
 # [auth.claim_to_field]
 # sub = "id"
 # org = "org_id"
+# team_ids = "team_ids"
 
-# Field types: bool, int, float, text, timestamp, uuid, jsonb, enum.
+# ---------------------------------------------------------------------
+# Permissions (docs/PERMISSIONS.md)
+# ---------------------------------------------------------------------
+#
+# `user_schema` declares the typed shape of `$user.*`. Field types:
+# bool, int, float, text, timestamp, timestamptz, date, time, interval,
+# numeric, bytea, uuid, jsonb (alias json), enum, array.
+#
+# `rules` are compiled at startup against the catalog (introspected
+# from [database] when set); a bad predicate fails `validate-config`
+# and `serve` with a precise diagnostic. `mode` is `row_visibility`,
+# `subscribe`, or `both` (default).
+
 [permissions.user_schema]
 # id = "int"
+# org_id = "int"
 # tenant_id = "uuid"
+# team_ids = "int"      # list-valued at runtime when the claim is an array
 
 # [[permissions.rules]]
 # name = "posts_owner"
@@ -28,18 +137,7 @@ kind = "anonymous"
 # mode = "both"
 # predicate = "author_id = $user.id"
 
-# Named prepared queries (docs/NAMED-QUERIES.md): sqlc-format query
-# files registered at startup. Registration failures abort startup with
-# the query name and the exact rejected construct. Configuring any file
-# disables raw-SQL subscribes (clients must subscribe by query name)
-# unless `inline_sql = true`. Paths resolve relative to this file.
-# [queries]
-# files = ["queries.sql"]
-# inline_sql = false
-
-# Optional upstream Postgres connection. Required for `slot-info` and
-# (later) for the real WAL runtime.
-# [upstream]
-# url = "postgres://palimpsest:secret@localhost:5432/app"
-# slot_name = "palimpsest"
-# publication = "palimpsest_pub"
+# [[permissions.rules]]
+# name = "team_tickets"
+# table = "tickets"
+# predicate = "team_id = ANY($user.team_ids)"
