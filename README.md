@@ -204,7 +204,8 @@ Requirements:
 - Rust toolchain compatible with the workspace MSRV in `Cargo.toml`.
 - `protobuf-compiler` available as `protoc`.
 - Docker, if you want to build the production-style image or run the demo.
-- Node.js 20 or newer for the TypeScript package and demo frontend.
+- Node.js 22 or newer for the TypeScript package and demo frontend
+  (Vite 8 requires at least 20.19; Node 20 itself is end-of-life).
 - `wasm32-unknown-unknown` plus `wasm-bindgen-cli` for browser WASM work.
 
 Common checks:

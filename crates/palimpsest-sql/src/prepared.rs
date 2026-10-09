@@ -2567,6 +2567,7 @@ INSERT INTO cards (id) VALUES ($1);
         let mut registry = QueryRegistry::with_limits(crate::QueryLimits {
             max_input_bytes: 256,
             max_mir_nodes: 64,
+            ..crate::QueryLimits::DEFAULT
         });
         registry
             .register(

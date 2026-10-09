@@ -11,7 +11,8 @@
 # transitive deps (`time@0.3.47`, …) require ≥1.88. The codebase's MSRV
 # is still 1.82 — we're just using a newer compiler at *build* time.
 ARG RUST_VERSION=1.88-bookworm
-ARG NODE_VERSION=20-bookworm-slim
+# Node 20 reached end-of-life in April 2026 and Vite 8 needs 20.19+/22.12+.
+ARG NODE_VERSION=22-bookworm-slim
 ARG WASM_BINDGEN_VERSION=0.2.121
 
 FROM rust:${RUST_VERSION} AS wasm-builder

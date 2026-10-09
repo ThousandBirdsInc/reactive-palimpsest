@@ -14,6 +14,11 @@ on:
     - cron: '0 5 * * *'
   workflow_dispatch:
 
+# Least privilege: the default GITHUB_TOKEN gets read-only access.
+# Jobs that need more (publishing, filing issues) widen it themselves.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   PALIMPSEST_BENCH_REGRESSION_PCT: '10'

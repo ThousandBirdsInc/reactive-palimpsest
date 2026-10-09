@@ -164,6 +164,7 @@ Palimpsest does not terminate TLS in-process. Place a proxy in front
 | `max_subscriptions_per_connection` | 256 | a single trusted gateway fans out many subscriptions | shared multi-tenant deployments |
 | `query_limits.max_input_bytes` | 65 536 | machine-generated SQL legitimately needs it | hand-authored SQL only |
 | `query_limits.max_mir_nodes` | 256 | wide CTE-heavy queries | strict bound desired |
+| `query_limits.max_nesting_depth` | 32 | legitimately deep parenthesised subqueries (rare) | never below ~16; the parser backtracks per nesting level, so this bounds worst-case parse CPU per request |
 | `router.channel_capacity` | 1 024 diffs | bursty commit volume; clients can keep up | bound memory tightly |
 | `router.compaction_window` | 30 s | long-tailed clients reconnecting after pauses | low-latency resync acceptable |
 

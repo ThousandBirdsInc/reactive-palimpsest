@@ -11,10 +11,13 @@ use sqlparser::{
         SetExpr, SetOperator, Statement, TableFactor, TableWithJoins, Value, Visit, Visitor,
     },
     dialect::PostgreSqlDialect,
-    parser::Parser,
+    parser::{Parser, ParserError},
 };
 
-use crate::{limits::enforce_input_size, QueryLimits, SqlError};
+use crate::{
+    limits::{enforce_input_size, enforce_nesting_depth},
+    QueryLimits, SqlError,
+};
 
 /// Sentinel prefix for `$user.<field>` references.
 ///
@@ -72,8 +75,24 @@ pub fn parse_select_with_limits(sql: &str, limits: QueryLimits) -> Result<Statem
 /// reject; validation runs after the placeholders are substituted.
 pub(crate) fn parse_single_query(sql: &str, limits: QueryLimits) -> Result<Statement, SqlError> {
     enforce_input_size(sql, limits)?;
+    enforce_nesting_depth(sql, limits)?;
     let dialect = PostgreSqlDialect {};
-    let mut statements = Parser::parse_sql(&dialect, sql)?;
+    // The depth budget doubles as the parser's recursion limit: the
+    // pre-scan bounds what the tokenizer sees, this bounds how far the
+    // recursive-descent parser may follow it (each level backtracks
+    // across alternatives, so depth is the cost driver — see
+    // `limits::enforce_nesting_depth`).
+    let mut statements = Parser::new(&dialect)
+        .with_recursion_limit(limits.max_nesting_depth)
+        .try_with_sql(sql)?
+        .parse_statements()
+        .map_err(|err| match err {
+            ParserError::RecursionLimitExceeded => SqlError::QueryTooDeep {
+                depth: limits.max_nesting_depth,
+                limit: limits.max_nesting_depth,
+            },
+            other => SqlError::Parse(other),
+        })?;
 
     if statements.len() != 1 {
         return Err(SqlError::StatementCount(statements.len()));
@@ -417,6 +436,65 @@ fn validate_recursive_cte(cte: &Cte) -> Result<(), SqlError> {
 
 #[cfg(test)]
 mod tests {
+    /// Nightly fuzz timeout seed (issue #71): nine `SELECT … FROM(((`
+    /// groups, 361 bytes, took >20 s under libFuzzer and ~0.75 s
+    /// natively because the parser backtracks across alternatives at
+    /// every unclosed `(`. With the depth budget it is refused before
+    /// the parser runs.
+    const FUZZ_TIMEOUT_SEED: &str = "SELECT id, nam FROM(((SELECT id, nam FROM(((((((((SELECT id, \
+        namSELECT nam FROM((((((((((SELECT id, nam FROM(((SELECT id, nam FROM(((((((((SELECT \
+        id, namSELECT nam FROM((((((((((SELECT u.id, p.title FROM users u JOIN posuses u JOIN \
+        posusers u JOIN p.tle id, (((LECT u.id, p.title FROM users u JOIN posuses u JOIN \
+        posusers u JOIN p.tle id, ((((SELECT idLnp.s u a";
+
+    #[test]
+    fn fuzz_timeout_seed_is_rejected_as_too_deep_quickly() {
+        let started = std::time::Instant::now();
+        let err = super::parse_select(FUZZ_TIMEOUT_SEED).expect_err("garbage must not parse");
+        assert!(
+            matches!(err, crate::SqlError::QueryTooDeep { .. }),
+            "expected QueryTooDeep, got {err:?}"
+        );
+        // Generous bound: the pre-scan is O(n) over 361 bytes. The
+        // pre-fix behaviour was hundreds of milliseconds in release
+        // and tens of seconds under sanitizers.
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "rejection took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn recursion_limit_maps_to_too_deep() {
+        // Deep enough to pass the paren pre-scan at a raised budget
+        // but exhaust the parser's recursion counter on its own.
+        let limits = crate::QueryLimits {
+            max_nesting_depth: 4,
+            ..crate::QueryLimits::DEFAULT
+        };
+        let sql = "SELECT 1 FROM t WHERE a = (1 + (2 + (3 + (4 + 5))))";
+        let err = super::parse_select_with_limits(sql, limits).expect_err("too deep");
+        assert!(
+            matches!(err, crate::SqlError::QueryTooDeep { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn realistic_nesting_fits_the_default_budget() {
+        let sql = "SELECT id FROM posts WHERE author_id IN (SELECT id FROM authors WHERE id IN \
+            (SELECT author_id FROM comments WHERE post_id IN (SELECT id FROM posts WHERE \
+            published = true AND (title = 'x' OR (id > 1 AND (id < 100))))))";
+        // `IN (subquery)` is outside the supported surface, so skip
+        // the validator: what matters here is that the depth budget
+        // does not get in the way of parsing realistic nesting.
+        super::parse_single_query(sql, crate::QueryLimits::DEFAULT)
+            .expect("nested IN subqueries with grouping must parse");
+        let deep_arith = format!("SELECT {}1{} FROM posts", "(".repeat(20), ")".repeat(20));
+        super::parse_select(&deep_arith).expect("20 levels of grouping must parse");
+    }
+
     use super::parse_select;
 
     #[test]

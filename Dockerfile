@@ -26,7 +26,9 @@
 #     -v $(pwd)/palimpsest.toml:/etc/palimpsest/palimpsest.toml \
 #     palimpsest:dev /etc/palimpsest/palimpsest.toml
 
-ARG RUST_VERSION=1.82-bookworm
+# Must satisfy the workspace MSRV (`rust-version` in Cargo.toml); the
+# locked dependency set (postgres-protocol, time) needs 1.88+.
+ARG RUST_VERSION=1.88-bookworm
 
 FROM rust:${RUST_VERSION} AS chef
 RUN cargo install cargo-chef --locked --version 0.1.68

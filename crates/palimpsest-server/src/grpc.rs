@@ -491,6 +491,16 @@ async fn handle_subscribe(
                 .await;
                 return;
             }
+            Err(SqlError::QueryTooDeep { .. }) => {
+                let _ = send_error(
+                    &outbound,
+                    client_subscription_id,
+                    "query_too_deep",
+                    "SQL nesting exceeds the configured depth limit",
+                )
+                .await;
+                return;
+            }
             Err(err @ SqlError::UnsupportedFunction { .. }) => {
                 let _ = send_error(
                     &outbound,
