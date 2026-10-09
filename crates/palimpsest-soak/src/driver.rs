@@ -282,10 +282,21 @@ pub(crate) struct Consumer {
     pub(crate) stop_on_resync: bool,
 }
 
+/// Per-consumer latency sample budget.
+///
+/// The default recorder keeps 256 Ki samples (2 MiB) before it starts
+/// decimating; multiplied by a thousand-plus consumers that is the
+/// dominant allocation in the process and it swamps the engine's own
+/// footprint (~10 KiB per subscription), which made the suite's RSS
+/// numbers measure the harness instead of the router. 1 Ki samples
+/// per consumer (8 KiB) still gives the merged, decimated distribution
+/// a million-plus observations at full scale.
+const CONSUMER_LATENCY_SAMPLES: usize = 1_024;
+
 pub(crate) fn spawn_consumer(mut c: Consumer) -> JoinHandle<ConsumerStats> {
     tokio::spawn(async move {
         let mut stats = ConsumerStats {
-            latency: LatencyRecorder::default(),
+            latency: LatencyRecorder::with_capacity(CONSUMER_LATENCY_SAMPLES),
             events: 0,
             resyncs: 0,
             initial_us: 0,
