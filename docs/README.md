@@ -35,6 +35,7 @@ guides or deep-dives that assume that bigger picture.
 | [`RUNBOOK.md`](RUNBOOK.md) | On-call recovery procedures for the failure modes you're most likely to hit. |
 | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Fast triage matrix: symptom → metric → action. |
 | [`LOAD-TESTING.md`](LOAD-TESTING.md) | The `palimpsest-loadsuite` scenario suite: modeling realistic large-scale workloads, reading its reports, and gating on latency budgets. |
+| [`MEMORY-PROFILE.md`](MEMORY-PROFILE.md) | Measured memory under multi-user, high-volume fan-out: per-subscriber cost, what dominates the heap, and the sizing rule of thumb. |
 
 ## Security
 
