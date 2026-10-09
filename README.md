@@ -244,17 +244,20 @@ docker build -t palimpsest:dev .
 
 ### Cutting a release
 
-Bump `version` in the workspace `Cargo.toml`, then tag it:
+Bump `version` in the workspace `Cargo.toml` and merge it. On the push
+to `main`, [`.github/workflows/auto-release.yml`](.github/workflows/auto-release.yml)
+tags the merge commit `v<version>` (if that tag does not exist yet) and
+runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which builds the static Linux and macOS binaries, attaches them with
+`SHA256SUMS` and `install.sh` to a GitHub Release, and pushes the
+multi-arch image to `ghcr.io/thousandbirdsinc/reactive-palimpsest`
+(tags `X.Y.Z`, `X.Y`, and `latest`; a version like `0.2.0-rc.1` is a
+pre-release and only gets its own tag). Merges that do not change the
+version release nothing.
 
-```sh
-git tag v0.1.1 && git push origin v0.1.1
-```
-
-[`.github/workflows/release.yml`](.github/workflows/release.yml) builds
-the static Linux and macOS binaries, attaches them with `SHA256SUMS` and
-`install.sh` to a GitHub Release, and pushes the multi-arch image to
-`ghcr.io/thousandbirdsinc/reactive-palimpsest` (tags `X.Y.Z`, `X.Y`,
-and `latest`). The crate set goes to crates.io separately:
+Pushing a `v*` tag by hand does the same, and the `Release` workflow
+can be run from the Actions tab with an existing tag to republish it
+after a failed attempt. The crate set goes to crates.io separately:
 
 ```sh
 ./publish.sh

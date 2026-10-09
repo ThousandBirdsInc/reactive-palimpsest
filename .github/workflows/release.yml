@@ -4,9 +4,15 @@ name: Release
 # image so adopters never need a Rust toolchain: a config file plus
 # one of these artifacts is the whole install.
 #
-# Trigger by pushing a tag that matches the workspace version:
+# How a release happens:
 #
-#   git tag v0.1.1 && git push origin v0.1.1
+#   1. Automatically: merge a PR that bumps `version` in the workspace
+#      `Cargo.toml`. `auto-release.yml` tags `v<version>` on main and
+#      calls this workflow for that tag (`workflow_call`).
+#   2. Manually: push a tag yourself
+#      (`git tag v0.1.1 && git push origin v0.1.1`), or run this
+#      workflow from the Actions tab with an existing tag to
+#      (re)publish it after a failed attempt.
 #
 # Artifacts per tag:
 #   - GitHub Release with one tarball per target plus SHA256SUMS
@@ -14,14 +20,26 @@ name: Release
 #   - ghcr.io/<owner>/<repo>:<version> multi-arch image
 #     (linux/amd64 + linux/arm64), built from the same binaries.
 #
-# `workflow_dispatch` builds the tarballs as workflow artifacts only,
-# for checking the recipe without cutting a release.
+# A manual run with the tag left empty builds the tarballs as
+# workflow artifacts only, for checking the recipe without releasing.
 
 on:
   push:
     tags:
       - "v*"
+  workflow_call:
+    inputs:
+      tag:
+        description: "Existing tag to publish, e.g. v0.1.1"
+        required: true
+        type: string
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v0.1.1. Leave empty to only build artifacts."
+        required: false
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,8 +49,44 @@ permissions:
   contents: read
 
 jobs:
+  meta:
+    name: Resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - name: Resolve
+        id: resolve
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-}"
+          if [[ -z "${tag}" && "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ -n "${tag}" && "${tag}" != v* ]]; then
+            echo "::error::tag '${tag}' must look like v<semver>"
+            exit 1
+          fi
+          version="${tag#v}"
+          publish=false; [[ -n "${tag}" ]] && publish=true
+          prerelease=false; [[ "${version}" == *-* ]] && prerelease=true
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "publish=${publish}"
+            echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag='${tag}' publish=${publish} prerelease=${prerelease}"
+
   build:
     name: ${{ matrix.target }}
+    needs: meta
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -57,6 +111,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The tag when publishing (a `workflow_call` runs on main's
+          # ref, so this is what pins the build to the tagged commit);
+          # otherwise whatever ref the run was started from.
+          ref: ${{ needs.meta.outputs.tag || github.sha }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -89,26 +148,22 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
+        env:
+          TAG_VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            version="${GITHUB_REF#refs/tags/v}"
-          else
-            version="$(cargo metadata --no-deps --format-version 1 \
-              | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)"
-            version="${version}-${GITHUB_SHA::7}"
-          fi
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-
-      - name: Check the tag matches the workspace version
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        run: |
+          set -euo pipefail
           crate="$(cargo metadata --no-deps --format-version 1 \
             | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)"
-          if [[ "${crate}" != "${{ steps.version.outputs.version }}" ]]; then
-            echo "::error::tag v${{ steps.version.outputs.version }} does not match workspace version ${crate}"
-            exit 1
+          if [[ -n "${TAG_VERSION}" ]]; then
+            if [[ "${crate}" != "${TAG_VERSION}" ]]; then
+              echo "::error::tag v${TAG_VERSION} does not match workspace version ${crate}"
+              exit 1
+            fi
+            version="${TAG_VERSION}"
+          else
+            version="${crate}-${GITHUB_SHA::7}"
           fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Package
         id: package
@@ -165,14 +220,16 @@ jobs:
 
   release:
     name: GitHub Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [meta, build]
+    if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -195,20 +252,21 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF#refs/tags/}"
-          version="${tag#v}"
-          image="ghcr.io/${GITHUB_REPOSITORY,,}:${version}"
-          prerelease=()
-          if [[ "${version}" == *-* ]]; then
-            prerelease=(--prerelease)
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${VERSION}"
+          flags=(--verify-tag)
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            flags+=(--prerelease)
           fi
           cat > notes.md <<EOF
           ## Install
 
           \`\`\`sh
-          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/install.sh | sh
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/install.sh | sh
           \`\`\`
 
           Or download the tarball for your platform below and put
@@ -224,17 +282,22 @@ jobs:
           \`palimpsest.example.toml\` inside each tarball or
           \`crates/palimpsest-cli/README.md\` for the full reference.
           EOF
-          gh release create "${tag}" \
-            --title "palimpsest ${tag}" \
-            --notes-file notes.md \
-            --verify-tag \
-            "${prerelease[@]}" \
-            release/*
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            # Re-publishing an existing tag (manual re-run after a
+            # failed attempt): replace the assets, keep the release.
+            gh release upload "${TAG}" --clobber release/*
+          else
+            gh release create "${TAG}" \
+              --title "palimpsest ${TAG}" \
+              --notes-file notes.md \
+              "${flags[@]}" \
+              release/*
+          fi
 
   image:
     name: Container image
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [meta, build]
+    if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -242,6 +305,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
 
       - name: Download Linux binaries
         uses: actions/download-artifact@v4
@@ -258,6 +323,23 @@ jobs:
           cp artifacts/palimpsest-linux-arm64 dist/linux/arm64/palimpsest
           chmod 0755 dist/linux/*/palimpsest
 
+      - name: Image tags
+        id: tags
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags="${image}:${VERSION}"
+          if [[ "${PRERELEASE}" != "true" ]]; then
+            major_minor="${VERSION%.*}"
+            tags="${tags},${image}:${major_minor},${image}:latest"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "${tags}"
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -268,16 +350,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -285,5 +357,10 @@ jobs:
           file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=palimpsest
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT OR Apache-2.0

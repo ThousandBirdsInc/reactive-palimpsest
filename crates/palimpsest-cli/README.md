@@ -36,10 +36,11 @@ cargo install palimpsest-cli                 # published crate
 cargo install --path crates/palimpsest-cli   # local checkout
 ```
 
-Repository maintainers cut a release by tagging the workspace version
-(`git tag v0.1.1 && git push origin v0.1.1`); `.github/workflows/release.yml`
-builds the binaries, the GitHub Release, and the image. `./publish.sh`
-publishes the crate set to crates.io.
+Repository maintainers cut a release by merging a bump of `version` in
+the workspace `Cargo.toml`: `.github/workflows/auto-release.yml` tags
+it and `.github/workflows/release.yml` builds the binaries, the GitHub
+Release, and the image. `./publish.sh` publishes the crate set to
+crates.io.
 
 ## Subcommands
 
