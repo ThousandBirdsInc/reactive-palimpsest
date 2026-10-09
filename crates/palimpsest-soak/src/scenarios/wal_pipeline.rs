@@ -366,15 +366,11 @@ pub async fn run(cfg: WalPipelineConfig) -> Result<WalPipelineReport, String> {
         if posts_diffs.is_empty() {
             continue;
         }
+        let delta =
+            QueryTransactionDelta::new(Some(txn_seq as u32 + 1), None, lsn, None, posts_diffs);
+        let event = SubscriptionRouter::pair_transaction(delta, &[0]);
         for (idx, sub) in subs.iter().enumerate() {
-            let delta = QueryTransactionDelta::new(
-                Some(txn_seq as u32 + 1),
-                None,
-                lsn,
-                None,
-                posts_diffs.clone(),
-            );
-            match router.pump_transaction(*sub, delta, &[0]) {
+            match router.pump_event(*sub, event.clone()) {
                 Ok(()) => {
                     delivered[idx] += 1;
                     deliveries += 1;

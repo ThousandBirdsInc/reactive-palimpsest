@@ -1088,11 +1088,14 @@ fn spawn_canonical_pump(
                         .collect(),
                 };
                 // Fan out to every currently attached subscriber.
-                // Clone the delta per subscriber (the aggregate is
-                // small — top-K rows — so this is cheap).
+                // Pair once; each subscriber's channel then holds the
+                // same `Arc`'d row changes, so a hot canonical query
+                // with N followers costs one pairing and one copy of
+                // the row images, not N.
+                let event = SubscriptionRouter::pair_transaction(to_pump, &primary_key);
                 for sub_raw in subscribers {
                     let sub_id = SubscriptionId::new(sub_raw);
-                    match router.pump_transaction(sub_id, to_pump.clone(), &primary_key) {
+                    match router.pump_event(sub_id, event.clone()) {
                         Ok(()) => {}
                         Err(RouterError::UnknownSubscription(_)) => {
                             // Subscriber unsubscribed between

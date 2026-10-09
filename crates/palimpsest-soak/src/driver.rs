@@ -318,7 +318,7 @@ pub(crate) fn spawn_consumer(mut c: Consumer) -> JoinHandle<ConsumerStats> {
                     Some(DiffEvent::TransactionUpdate { commit_lsn, changes, .. }) => {
                         stats.events += 1;
                         let recv_ns = now_ns(c.epoch);
-                        for change in &changes {
+                        for change in changes.iter() {
                             if let Some(new) = &change.new {
                                 if let Some(Datum::I64(sent)) = new.get(SENT_AT_COLUMN) {
                                     let us = recv_ns.saturating_sub(*sent).max(0) / 1_000;
@@ -457,14 +457,16 @@ pub async fn run(cfg: DriverConfig) -> Result<DriverReport, String> {
         if diffs.is_empty() {
             return Ok(());
         }
+        // Pair once; fan the shared event out (one Arc bump per
+        // subscriber), exactly as the server's canonical pump does.
+        let delta = QueryTransactionDelta::new(Some(txn_seq as u32), None, lsn, None, diffs);
+        let event = SubscriptionRouter::pair_transaction(delta, &[0]);
         for &member in global_members.iter().chain(&shard_members[shard]) {
             let slot = &mut slots[member];
             if slot.skip_until > txn_seq {
                 continue;
             }
-            let delta =
-                QueryTransactionDelta::new(Some(txn_seq as u32), None, lsn, None, diffs.clone());
-            match router.pump_transaction(slot.sub, delta, &[0]) {
+            match router.pump_event(slot.sub, event.clone()) {
                 Ok(()) => {
                     slot.delivered += 1;
                     *deliveries += 1;

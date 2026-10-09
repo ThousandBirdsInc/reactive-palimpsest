@@ -100,6 +100,37 @@ Each scenario prints a human-readable report (or JSON with
   `/proc/self/status`; per-subscriber cost is the subscribe-phase
   delta divided by the population.
 
+## Memory profiling
+
+The suite's `rss_*` fields give three points (before subscribe, after
+subscribe, peak); `crates/palimpsest-soak/memprofile.sh` adds the
+shape over time by sampling `/proc` every 250 ms while a scenario
+runs:
+
+```sh
+cargo build --release -p palimpsest-soak --bin palimpsest-loadsuite
+PALIMPSEST_SUITE_JSON=1 PALIMPSEST_SUITE_SUBSCRIBERS=4000 \
+  crates/palimpsest-soak/memprofile.sh steady-4k /tmp/memprof -- \
+  target/release/palimpsest-loadsuite steady-state
+# /tmp/memprof/steady-4k.csv: t_ms,vmrss_kib,vmhwm_kib,vmdata_kib,threads
+```
+
+A plateau means the working set is bounded by subscribers × channel
+depth; a slope that continues across a run with 4× the transactions
+is a leak. For allocation-site attribution build with line tables and
+run under valgrind's DHAT at reduced scale (it is ~30× slower):
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG=line-tables-only \
+  cargo build --release -p palimpsest-soak --bin palimpsest-loadsuite
+PALIMPSEST_SUITE_SUBSCRIBERS=200 PALIMPSEST_SUITE_TXNS=3000 PALIMPSEST_SUITE_TPS=0 \
+  valgrind --tool=dhat --dhat-out-file=dhat.json \
+  target/release/palimpsest-loadsuite steady-state
+```
+
+Measured numbers and what dominated the heap are in
+[`MEMORY-PROFILE.md`](MEMORY-PROFILE.md).
+
 ## CI integration
 
 `crates/palimpsest-soak/tests/smoke.rs` runs every scenario at tiny

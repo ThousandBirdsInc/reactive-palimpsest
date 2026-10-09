@@ -291,15 +291,11 @@ pub async fn run(cfg: ChurnConfig) -> Result<ChurnReport, String> {
                         }
                     }
                 }
+                let delta =
+                    QueryTransactionDelta::new(Some(txn_seq as u32), None, lsn, None, diffs);
+                let event = SubscriptionRouter::pair_transaction(delta, &[0]);
                 for &(entry_id, sub) in &targets {
-                    let delta = QueryTransactionDelta::new(
-                        Some(txn_seq as u32),
-                        None,
-                        lsn,
-                        None,
-                        diffs.clone(),
-                    );
-                    match router.pump_transaction(sub, delta, &[0]) {
+                    match router.pump_event(sub, event.clone()) {
                         Ok(()) => {
                             deliveries += 1;
                             if let Some(entry) = population
