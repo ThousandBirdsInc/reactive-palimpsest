@@ -214,7 +214,7 @@ mod tests {
     fn empty_row_list_round_trips() {
         let bytes = encode_rows(&[]).unwrap();
         let decoded = decode_rows(&bytes).unwrap();
-        assert!(decoded.is_empty());
+        assert!(decoded.is_empty(), "decoded rows: {decoded:?}");
     }
 
     #[test]

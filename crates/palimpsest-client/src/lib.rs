@@ -113,7 +113,7 @@ impl Client {
     ///
     /// # Errors
     /// See [`Self::connect`].
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn connect_with(
         url: impl AsRef<str>,
         auth: Auth,

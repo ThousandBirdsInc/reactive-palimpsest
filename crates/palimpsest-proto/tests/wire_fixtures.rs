@@ -206,7 +206,7 @@ fn named_subscribe_round_trips_name_and_params() {
         panic!("expected Subscribe");
     };
     assert_eq!(subscribe.query_name, "BoardCards");
-    assert!(subscribe.sql.is_empty());
+    assert_eq!(subscribe.sql, "");
     let value = subscribe.vars.get("board_id").expect("param");
     assert!(matches!(
         &value.kind,

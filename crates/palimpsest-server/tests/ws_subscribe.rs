@@ -85,7 +85,10 @@ async fn ws_subscribe_accepts_and_streams_server_messages() {
     let message = ServerMessage::decode(bytes.as_slice()).expect("decodes as ServerMessage");
     match message.kind {
         Some(server_message::Kind::Accepted(accepted)) => {
-            assert!(!accepted.subscription_id.is_empty());
+            assert!(
+                !accepted.subscription_id.is_empty(),
+                "accepted frame carried an empty subscription id"
+            );
         }
         other => panic!("expected Accepted, got {other:?}"),
     }

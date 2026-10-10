@@ -190,9 +190,12 @@ mod tests {
         assert!(registry
             .resolve(ConnectionId::new(10), &ClientSubscriptionId::new("x"))
             .is_none());
-        assert!(registry
-            .connection_subscriptions(ConnectionId::new(10))
-            .is_empty());
+        assert!(
+            registry
+                .connection_subscriptions(ConnectionId::new(10))
+                .is_empty(),
+            "connection 10 should have no subscriptions"
+        );
     }
 
     #[test]

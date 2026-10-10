@@ -317,7 +317,10 @@ async fn failed_remote_write_rolls_back() {
         .mutate(Mutation::delete("posts", [("id", WireDatum::I64(1))]))
         .await
         .unwrap();
-    assert!(h.db.snapshot("posts").is_empty());
+    assert!(
+        h.db.snapshot("posts").is_empty(),
+        "posts snapshot should be empty"
+    );
 
     writer.release();
     wait_for(|| async { h.replica.pending_mutations("posts").await == 0 }).await;

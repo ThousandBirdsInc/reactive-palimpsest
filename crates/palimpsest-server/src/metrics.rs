@@ -104,12 +104,21 @@ impl RouterMetrics {
 
     /// Records a teardown (matched with a prior subscribe).
     pub fn unsubscribe(&self) {
-        self.inner
-            .subscriptions_in_flight
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(1))
-            })
-            .ok();
+        // Saturating decrement: a CAS loop rather than `fetch_sub` so a
+        // stray unsubscribe can never wrap the gauge.
+        let gauge = &self.inner.subscriptions_in_flight;
+        let mut current = gauge.load(Ordering::Relaxed);
+        while current > 0 {
+            match gauge.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Records that the per-subscription channel was found saturated.
@@ -175,10 +184,7 @@ impl RouterMetrics {
     pub fn observe_channel_depth(&self, depth: u64) {
         self.inner
             .channel_depth_max
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.max(depth))
-            })
-            .ok();
+            .fetch_max(depth, Ordering::Relaxed);
     }
 
     /// Sets the current WAL lag (current LSN − applied LSN, in bytes).

@@ -337,7 +337,7 @@ async fn connection_loop(
     // Drain everything we'll need under one lock.
     let (forwarders, host_attachments) = {
         let mut guard = state.lock().expect("connection state lock");
-        let forwarders: Vec<_> = guard.forwarders.handles.drain(..).collect();
+        let forwarders = std::mem::take(&mut guard.forwarders.handles);
         let host_attachments: Vec<(SubscriptionId, String)> =
             guard.host_canonicals.drain().collect();
         (forwarders, host_attachments)

@@ -15,6 +15,7 @@
     // The native impls are async; the wasm impls are not. Keep the
     // signatures uniform so callers don't need cfg.
     clippy::unused_async,
+    clippy::unused_async_trait_impl,
     // The wasm spawn intentionally accepts `!Send` futures because
     // `wasm_bindgen_futures::spawn_local` runs on the JS event loop.
     clippy::future_not_send,

@@ -64,6 +64,9 @@ pub enum AuthError {
 ///
 /// Implementations must be `Send + Sync`: tonic clones the
 /// `Arc<dyn Authenticator>` into the per-stream task.
+// `async_trait` emits `#[must_use]` on the boxed-future method it
+// generates, which clippy 1.99+ reports as redundant.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Authenticator: Send + Sync + 'static {
     /// Resolves an inbound stream's headers into a [`UserContext`].

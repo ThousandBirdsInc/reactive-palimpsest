@@ -130,7 +130,7 @@ async fn connect_subscribe_returns_accepted_event() {
         panic!("expected Accepted, got {event:?}");
     };
     assert!(schema_id > 0);
-    assert!(!schema.columns.is_empty());
+    assert!(!schema.columns.is_empty(), "schema reported no columns");
 
     sub.unsubscribe().await.expect("unsubscribe");
     client.shutdown().await;
