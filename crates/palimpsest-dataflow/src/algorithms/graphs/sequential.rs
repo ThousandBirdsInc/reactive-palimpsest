@@ -83,7 +83,7 @@ where
             messages
                 // .concat(&old_messages)  // /-- possibly too clever: None if any inputs None.
                 // .antijoin(&incomplete)
-                .reduce(move |k, vs, t| t.push((Some(logic(k,vs)),1)))
+                .reduce(move |k, vs, t| t.push((Some(logic(k, vs)), 1)))
                 .concat(&incomplete.map(|x| (x, None)))
         })
 }
