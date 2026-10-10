@@ -17,6 +17,11 @@ on:
         required: false
         default: 'all'
 
+# Least privilege: the default GITHUB_TOKEN gets read-only access.
+# Jobs that need more (publishing, filing issues) widen it themselves.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 

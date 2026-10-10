@@ -10,6 +10,11 @@ on:
   # Also runnable on demand from the Actions tab.
   workflow_dispatch:
 
+# Least privilege: the default GITHUB_TOKEN gets read-only access.
+# Jobs that need more (publishing, filing issues) widen it themselves.
+permissions:
+  contents: read
+
 jobs:
   audit:
     name: cargo audit

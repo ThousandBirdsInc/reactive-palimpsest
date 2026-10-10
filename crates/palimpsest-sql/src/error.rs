@@ -74,6 +74,20 @@ pub enum SqlError {
         limit: usize,
     },
 
+    /// Parenthesis nesting (or parser recursion) exceeded the
+    /// configured depth budget. The parser backtracks across
+    /// `(derived table | nested join)` alternatives at every level, so
+    /// cost grows super-linearly with nesting: a few hundred bytes of
+    /// unclosed `(((` can pin a core for seconds (found by the nightly
+    /// fuzzer). Bounding depth up front keeps rejection O(n).
+    #[error("SQL nests {depth} levels deep, limit is {limit}")]
+    QueryTooDeep {
+        /// Nesting depth observed (or the recursion budget that ran out).
+        depth: usize,
+        /// Configured depth budget.
+        limit: usize,
+    },
+
     /// Wrapped underlying parser failure.
     #[error(transparent)]
     Parse(#[from] sqlparser::parser::ParserError),

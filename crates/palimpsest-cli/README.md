@@ -1,41 +1,139 @@
 # palimpsest-cli
 
 Standalone CLI that boots the embedded `palimpsest-server` (§18.14).
+Everything is driven by one TOML file, so a prebuilt binary is a
+complete install: no Rust toolchain, no code.
+
+## Install
+
+Prebuilt binaries (Linux x86_64/aarch64 as static musl builds, macOS
+x86_64/aarch64) are attached to every
+[GitHub Release](https://github.com/ThousandBirdsInc/reactive-palimpsest/releases):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ThousandBirdsInc/reactive-palimpsest/main/install.sh | sh
+```
+
+The script picks the tarball for your OS/CPU, verifies it against the
+release's `SHA256SUMS`, and installs to `/usr/local/bin` (or
+`~/.local/bin`). Pin a version with `PALIMPSEST_VERSION=v0.1.1`, or
+pick an install dir with `PALIMPSEST_INSTALL=…`. Each tarball also
+carries `palimpsest.example.toml`, the full config reference.
+
+Container image (linux/amd64 + linux/arm64, distroless, runs as
+non-root):
+
+```sh
+docker run --rm -p 50051:50051 -p 9090:9090 \
+  -v "$PWD/palimpsest.toml:/etc/palimpsest/palimpsest.toml" \
+  ghcr.io/thousandbirdsinc/reactive-palimpsest:latest
+```
+
+From source, if you do have a toolchain:
+
+```sh
+cargo install palimpsest-cli                 # published crate
+cargo install --path crates/palimpsest-cli   # local checkout
+```
+
+Repository maintainers cut a release by merging a bump of `version` in
+the workspace `Cargo.toml`: `.github/workflows/auto-release.yml` tags
+it and `.github/workflows/release.yml` builds the binaries, the GitHub
+Release, and the image. `./publish.sh` publishes the crate set to
+crates.io.
 
 ## Subcommands
 
 ```
 palimpsest serve [config]              # default if no command given
-palimpsest validate-config <config>    # parse + permission compile; 0 ok, 1 error
+palimpsest validate-config <config> [--offline]
+                                       # parse + compile + register queries; 0 ok, 1 error
 palimpsest permissions eval <config> --query <sql>
                                        # rewrite query MIR with configured permissions
+palimpsest typegen <config> --out <f>  # TypeScript row/param types for registered queries
 palimpsest skills install              # install Codex and Claude skills for this CLI
-palimpsest dump-catalog [config]       # emit catalog as JSON on stdout
-palimpsest slot-info <config>          # show upstream replication slot status
-                                       # (requires --features slot-info)
+palimpsest dump-catalog [config]       # emit the catalog as JSON on stdout
+palimpsest slot-info <config>          # show replication slot status for [database]
 palimpsest help
 ```
 
 If invoked with a single positional argument that isn't a subcommand,
 the CLI behaves as `serve <config>` for backwards compatibility.
 
-Install locally with Cargo:
+Exit codes: `0` success, `2` usage error, `1` everything else.
 
-```sh
-cargo install --path crates/palimpsest-cli
-```
+`validate-config`, `permissions eval`, and `dump-catalog` work against
+the catalog introspected from `[database]` when it is configured, so
+rules and query files that name your real tables are checked exactly
+as `serve` would check them. Without `[database]` they use the
+built-in demo catalog (tables `posts`, `archived_posts`, `authors`,
+`comments`), which is also what `serve` runs against then.
 
-Install the latest published CLI:
+`--offline` never touches the database. For `validate-config` with
+`[database]` configured it still parses the config, types the user
+schema, and reads every query file, but skips rule compilation and
+query registration instead of checking them against the wrong catalog;
+for `permissions eval` and `dump-catalog` it substitutes the demo
+catalog.
 
-```sh
-cargo install palimpsest-cli
-```
+## Quick start against a real Postgres
 
-Repository maintainers can publish the CLI crate set from the repository root:
+1. Write a query file (sqlc format):
 
-```sh
-./publish.sh
-```
+   ```sql
+   -- queries/live.sql
+   -- name: OpenTickets :many
+   SELECT id, title, owner_id FROM tickets WHERE closed = false;
+   ```
+
+2. Write `palimpsest.toml`:
+
+   ```toml
+   [grpc]
+   addr = "0.0.0.0:50051"
+
+   [metrics]
+   addr = "0.0.0.0:9090"
+
+   [database]
+   dsn = "postgres://palimpsest:secret@db.internal:5432/app?sslmode=require"
+
+   [queries]
+   files = ["queries/live.sql"]
+
+   [auth]
+   kind = "jwt"
+   jwks_url = "https://issuer.example/.well-known/jwks.json"
+   audience = "palimpsest"
+   [auth.claim_to_field]
+   sub = "id"
+
+   [permissions.user_schema]
+   id = "int"
+
+   [[permissions.rules]]
+   name = "own_tickets"
+   table = "tickets"
+   predicate = "owner_id = $user.id"
+   ```
+
+3. Validate, then serve:
+
+   ```sh
+   palimpsest validate-config palimpsest.toml
+   palimpsest serve palimpsest.toml
+   ```
+
+   The engine introspects the catalog, derives the streamed tables from
+   the registered queries, and creates (or resumes) the slot and
+   publication. Postgres needs `wal_level = logical` and a role with
+   `REPLICATION` plus `SELECT` on the queried tables.
+
+4. Generate client types from the same catalog:
+
+   ```sh
+   palimpsest typegen palimpsest.toml --out src/queries.ts
+   ```
 
 ## Agent skills
 
@@ -78,48 +176,40 @@ palimpsest permissions eval palimpsest.toml \
 
 The CLI reads a single TOML file (default: `./palimpsest.toml`). All
 sections are optional; sensible defaults are used for anything you
-omit.
+omit. [`palimpsest.example.toml`](palimpsest.example.toml) is the
+annotated, complete reference; the sections are:
 
-```toml
-[grpc]
-addr = "0.0.0.0:50051"   # gRPC SyncEngine listener
+| Section | Purpose |
+| --- | --- |
+| `[grpc]` | `addr` for the gRPC + gRPC-Web + `/ws/subscribe` listener (default `127.0.0.1:50051`). |
+| `[metrics]` | `addr` for `/metrics`, `/healthz`, `/readyz`; omit to disable. |
+| `[database]` | `dsn`, `slot`, `publication`, `tls_root_ca_file`, `manage_replica_identity`. Turns on the real WAL runtime; requires `[queries]`. |
+| `[queries]` | `files` (sqlc-format query files, resolved relative to the config), `inline_sql`. |
+| `[auth]` | `kind = "anonymous"` or `"jwt"` with `secret` / `public_key_pem` / `jwks` / `jwks_url`, `algorithm`, `issuer`, `audience`, `leeway_secs`, and `[auth.claim_to_field]`. |
+| `[permissions]` | `user_schema` (typed `$user.*` fields) and `[[permissions.rules]]` (`name`, `table`, `predicate`, `mode`). |
+| `[upstream]` | Legacy; `slot-info` still reads `url` / `slot_name` / `publication` from it when `[database]` is absent. |
 
-[metrics]
-addr = "0.0.0.0:9090"    # axum sidecar serving /metrics, /healthz, /readyz
+### `[database]`
 
-[auth]
-kind = "anonymous"       # or "jwt" (see below)
+Supplying `dsn` is the whole of the database-side adoption surface:
+the engine introspects the catalog, derives the streamed tables from
+the registered queries, and owns the slot, the publication, and
+`REPLICA IDENTITY`. Set `manage_replica_identity = false` to refuse to
+start rather than issue `ALTER TABLE … REPLICA IDENTITY FULL`.
 
-# JWT auth (optional)
-# [auth]
-# kind = "jwt"
-# secret = "super-secret"
-# issuer = "palimpsest"
-# audience = "clients"
-# [auth.claim_to_field]
-# sub = "id"
-# org = "org_id"
+TLS follows libpq: `sslmode=disable` never negotiates TLS;
+`prefer`/`require` encrypt without verifying the server;
+`tls_root_ca_file` (PEM) upgrades to full chain + hostname
+verification, the equivalent of `sslmode=verify-full`. Use it for
+anything that crosses a network you do not own.
 
-# Permissions schema + rules (optional)
-[permissions.user_schema]
-# id = "int"
-# org_id = "int"
-# tenant_id = "uuid"
-# prefs = "jsonb"
-# role = "enum"
+### `[queries]`
 
-# [[permissions.rules]]
-# name = "posts_owner"
-# table = "posts"
-# mode = "both"          # row_visibility, subscribe, or both (default)
-# predicate = "author_id = $user.id"
-
-# Upstream Postgres connection (optional, required for slot-info)
-# [upstream]
-# url = "postgres://palimpsest:secret@localhost:5432/app"
-# slot_name = "palimpsest"          # default: "palimpsest"
-# publication = "palimpsest_pub"    # default: "palimpsest_pub"
-```
+sqlc-format query files registered at startup (see
+[`docs/NAMED-QUERIES.md`](../../docs/NAMED-QUERIES.md)). Registration
+failures abort startup naming the query and the exact rejected
+construct. Configuring any file disables raw-SQL subscribes unless
+`inline_sql = true`.
 
 ### `[auth]`
 
@@ -128,22 +218,18 @@ kind = "anonymous"       # or "jwt" (see below)
 
 `kind = "jwt"` validates a JWT in the gRPC `authorization` header,
 maps configured claims onto user-context fields, and rejects malformed,
-expired, or wrong-audience tokens. See `palimpsest_server::JwtAuthConfig`
-for the field shape.
+expired, or wrong-audience tokens. Supply exactly one key source
+(`secret`, `public_key_pem`, `jwks`, or `jwks_url`). See
+`palimpsest_server::JwtAuthConfig` for the field shape.
 
 ### `[permissions]`
 
 `user_schema` declares the typed shape of `$user.*` references that
 permission predicates can use. Field types are `bool`, `int`, `float`,
-`text`, `timestamp`, `uuid`, `jsonb` (alias `json`), and `enum`.
-`rules` are compiled at startup; bad predicates fail `validate-config`
-(and `serve`) with a precise diagnostic.
-
-### `[upstream]`
-
-Currently only consumed by `slot-info`. Will be consumed by the real
-WAL runtime once that lands; defining it now means your config is
-forward-compatible.
+`text`, `timestamp`, `timestamptz`, `date`, `time`, `interval`,
+`numeric`, `bytea`, `uuid`, `jsonb` (alias `json`), `enum`, and
+`array`. `rules` are compiled at startup; bad predicates fail
+`validate-config` (and `serve`) with a precise diagnostic.
 
 ## Health and readiness
 
@@ -161,11 +247,11 @@ The metrics sidecar exposes:
 
 | feature | enables |
 |---------|---------|
-| (default) | core CLI; serve, validate-config, dump-catalog |
-| `slot-info` | adds `tokio-postgres` and the `slot-info` subcommand |
+| (default) | every subcommand, including `slot-info` |
+| `slot-info` | no-op, kept so older `--features slot-info` builds keep working |
 
 The server crate also exposes an `otel` feature that wires
 `tracing-opentelemetry` and forwards spans to an OTLP collector when
 `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Build with
 `cargo build -p palimpsest-cli --features palimpsest-server/otel` to
-opt in.
+opt in; the prebuilt binaries do not include it.

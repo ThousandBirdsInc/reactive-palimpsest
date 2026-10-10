@@ -2,7 +2,7 @@
 # Skeleton chart (§18.14, post-v1 polish target). Adapt to your cluster.
 
 image:
-  repository: ghcr.io/thousandbirds/palimpsest
+  repository: ghcr.io/thousandbirdsinc/reactive-palimpsest
   tag: ""  # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
 

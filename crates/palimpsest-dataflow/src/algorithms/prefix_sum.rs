@@ -121,8 +121,8 @@ where
     let requests = queries
         .flat_map(
             |(idx, key)| {
-                (0 .. 64)
-                    .filter(move |i| (idx & (1usize << i)) != 0)    // set bits require help.
+                (0..64)
+                    .filter(move |i| (idx & (1usize << i)) != 0) // set bits require help.
                     .map(move |i| ((idx >> i) - 1, i, key.clone()))
             }, // width 2^i interval.
         )

@@ -15,6 +15,10 @@
 # no package manager) to keep the attack surface minimal — the §18.14
 # target is ≤ 30 MB final image.
 #
+# This is the from-source build. Released images on
+# ghcr.io/thousandbirdsinc/reactive-palimpsest are produced by
+# `Dockerfile.release` from the prebuilt static binaries instead.
+#
 # Build:
 #   docker build -t palimpsest:dev .
 # Run (with a mounted config + ports):
@@ -22,7 +26,9 @@
 #     -v $(pwd)/palimpsest.toml:/etc/palimpsest/palimpsest.toml \
 #     palimpsest:dev /etc/palimpsest/palimpsest.toml
 
-ARG RUST_VERSION=1.82-bookworm
+# Must satisfy the workspace MSRV (`rust-version` in Cargo.toml); the
+# locked dependency set (postgres-protocol, time) needs 1.88+.
+ARG RUST_VERSION=1.88-bookworm
 
 FROM rust:${RUST_VERSION} AS chef
 RUN cargo install cargo-chef --locked --version 0.1.68

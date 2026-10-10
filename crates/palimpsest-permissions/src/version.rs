@@ -172,7 +172,11 @@ mod tests {
         let mut tracker = RuleVersionTracker::default();
         let first = tracker.install(&rules);
         let second = tracker.install(&rules);
-        assert!(second.changed.is_empty());
+        assert!(
+            second.changed.is_empty(),
+            "unexpected changes: {:?}",
+            second.changed
+        );
         assert_eq!(tracker.version("p"), Some(first.epoch));
     }
 

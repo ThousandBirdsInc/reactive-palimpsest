@@ -262,12 +262,13 @@ where
 
     let labels = _reachability(&cycle, &nodes);
 
-    edges.consolidate()
-         // .inspect(|x| println!("pre-join: {:?}", x))
-         .join_map(&labels, |&e1,&e2,&l1| (e2,(e1,l1)))
-         .join_map(&labels, |&e2,&(e1,l1),&l2| ((e1,e2),(l1,l2)))
-         .filter(|&(_,(l1,l2))| l1 == l2)
-         .map(|((x1,x2),_)| (x2,x1))
+    edges
+        .consolidate()
+        // .inspect(|x| println!("pre-join: {:?}", x))
+        .join_map(&labels, |&e1, &e2, &l1| (e2, (e1, l1)))
+        .join_map(&labels, |&e2, &(e1, l1), &l2| ((e1, e2), (l1, l2)))
+        .filter(|&(_, (l1, l2))| l1 == l2)
+        .map(|((x1, x2), _)| (x2, x1))
 }
 
 fn _reachability<G>(

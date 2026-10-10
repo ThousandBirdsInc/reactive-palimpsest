@@ -15,7 +15,7 @@ where
     N: ExchangeData + Hash,
 {
     // need some bogus initial values.
-    let start = edges.map(|(x, _y)| (x, u32::max_value())).distinct();
+    let start = edges.map(|(x, _y)| (x, u32::MAX)).distinct();
 
     // repeatedly apply color-picking logic.
     sequence(&start, edges, |_node, vals| {
@@ -83,7 +83,7 @@ where
             messages
                 // .concat(&old_messages)  // /-- possibly too clever: None if any inputs None.
                 // .antijoin(&incomplete)
-                .reduce(move |k, vs, t| t.push((Some(logic(k,vs)),1)))
+                .reduce(move |k, vs, t| t.push((Some(logic(k, vs)), 1)))
                 .concat(&incomplete.map(|x| (x, None)))
         })
 }

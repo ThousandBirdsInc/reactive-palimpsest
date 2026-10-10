@@ -62,7 +62,13 @@ pub enum DiffEvent {
         /// End marker LSN, when known.
         end_lsn: Option<Lsn>,
         /// Per-row changes caused by the transaction.
-        changes: Vec<RowChange>,
+        ///
+        /// Shared, not owned: the router pairs a transaction once and
+        /// every subscriber's channel holds the same allocation, so
+        /// fan-out costs one `Arc` bump per subscriber instead of a
+        /// full copy of every row image (which was 97% of peak heap
+        /// under load).
+        changes: std::sync::Arc<[RowChange]>,
     },
     /// The router cannot deliver in-order diffs anymore; client must
     /// reconcile.

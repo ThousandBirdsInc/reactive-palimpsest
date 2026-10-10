@@ -133,7 +133,7 @@ mod tests {
         let runtime = EmptyWalRuntime::at(Lsn::new(42));
         let batch = runtime.fetch_snapshot(&QueryId::new("q")).unwrap();
         assert_eq!(batch.snapshot_lsn, Lsn::new(42));
-        assert!(batch.rows.is_empty());
+        assert!(batch.rows.is_empty(), "batch should carry no rows");
     }
 
     #[test]

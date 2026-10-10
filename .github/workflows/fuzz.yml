@@ -19,6 +19,11 @@ on:
         required: false
         default: '1800'
 
+# Least privilege: the default GITHUB_TOKEN gets read-only access.
+# Jobs that need more (publishing, filing issues) widen it themselves.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -98,7 +103,13 @@ jobs:
             const dir = `fuzz/artifacts/${target}`;
             let seed = '(no artifact found)';
             try {
-              const files = fs.readdirSync(dir).filter(f => f.startsWith('crash-'));
+              // libFuzzer names artifacts by failure class: a panic
+              // is `crash-*`, but a hang is `timeout-*`, a memory blowup
+              // `oom-*`, and a slow input `slow-unit-*`. All of them are
+              // findings (a 20 s parse is a denial-of-service vector),
+              // so pick up every class.
+              const prefixes = ['crash-', 'timeout-', 'oom-', 'leak-', 'slow-unit-'];
+              const files = fs.readdirSync(dir).filter(f => prefixes.some(p => f.startsWith(p)));
               files.sort();
               if (files.length > 0) {
                 const buf = fs.readFileSync(path.join(dir, files[0]));
@@ -110,17 +121,39 @@ jobs:
             } catch (e) {
               core.warning(`could not read crash dir: ${e.message}`);
             }
-            await github.rest.issues.create({
+            const title = `[fuzz] ${target} crashed in ${context.sha.slice(0,7)}`;
+            const body =
+              `Nightly fuzz run failed on \`${target}\`.\n\n` +
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+              `Seed:\n\n${seed}\n\n` +
+              `Reproduce locally:\n\n` +
+              '```bash\n' +
+              `cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<seed-file>\n` +
+              '```\n';
+            // One tracking issue per (target, commit): a failure that
+            // reproduces every night appends to the open issue instead
+            // of filing a duplicate.
+            const open = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `[fuzz] ${target} crashed in ${context.sha.slice(0,7)}`,
-              labels: ['fuzz', 'P1'],
-              body:
-                `Nightly fuzz run failed on \`${target}\`.\n\n` +
-                `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
-                `Seed:\n\n${seed}\n\n` +
-                `Reproduce locally:\n\n` +
-                '```bash\n' +
-                `cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<seed-file>\n` +
-                '```\n',
+              state: 'open',
+              labels: 'fuzz',
+              per_page: 100,
             });
+            const existing = open.data.find(i => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Reproduced again.\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                labels: ['fuzz', 'P1'],
+                body,
+              });
+            }

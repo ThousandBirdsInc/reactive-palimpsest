@@ -164,8 +164,9 @@ The two boundaries that matter:
 > Someone reads or modifies traffic between Palimpsest and the
 > upstream Postgres.
 
-- The `[upstream]` config exposes the libpq connection string; we
-  recommend `sslmode=verify-full` (documented in
+- The `[database]` config exposes the libpq connection string; we
+  recommend `sslmode=require` plus `tls_root_ca_file` (the
+  `verify-full` equivalent, documented in
   `crates/palimpsest-cli/README.md`).
 - **What we don't enforce**: the server does not refuse to start
   with `sslmode=disable`. The recommendation is operator policy, not

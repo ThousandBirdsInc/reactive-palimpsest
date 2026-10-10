@@ -136,7 +136,7 @@ async fn run(
                 };
                 let _ = ws_sink.send(Message::Close(Some(close))).await;
             }
-            return Err(BridgeError::GrpcCall(status));
+            return Err(BridgeError::GrpcCall(Box::new(status)));
         }
     };
     let mut grpc_stream = response.into_inner();
@@ -163,7 +163,8 @@ async fn run(
     // engine → browser: each ServerMessage is one WS binary frame.
     let grpc_to_browser = async {
         while let Some(message) = grpc_stream.next().await {
-            let server_message: ServerMessage = message.map_err(BridgeError::GrpcRecv)?;
+            let server_message: ServerMessage =
+                message.map_err(|status| BridgeError::GrpcRecv(Box::new(status)))?;
             let mut buf = Vec::with_capacity(server_message.encoded_len());
             server_message
                 .encode(&mut buf)
@@ -185,8 +186,10 @@ async fn run(
 
 #[derive(Debug)]
 enum BridgeError {
-    GrpcCall(tonic::Status),
-    GrpcRecv(tonic::Status),
+    // Boxed: `tonic::Status` is ~176 bytes and would dominate the
+    // `Result` size of every bridge function.
+    GrpcCall(Box<tonic::Status>),
+    GrpcRecv(Box<tonic::Status>),
     WsRecv(axum::Error),
     WsSend(axum::Error),
     DecodeClientMessage(prost::DecodeError),

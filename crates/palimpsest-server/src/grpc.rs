@@ -337,7 +337,7 @@ async fn connection_loop(
     // Drain everything we'll need under one lock.
     let (forwarders, host_attachments) = {
         let mut guard = state.lock().expect("connection state lock");
-        let forwarders: Vec<_> = guard.forwarders.handles.drain(..).collect();
+        let forwarders = std::mem::take(&mut guard.forwarders.handles);
         let host_attachments: Vec<(SubscriptionId, String)> =
             guard.host_canonicals.drain().collect();
         (forwarders, host_attachments)
@@ -487,6 +487,16 @@ async fn handle_subscribe(
                     client_subscription_id,
                     "query_too_complex",
                     "lowered MIR exceeds the configured node-count limit",
+                )
+                .await;
+                return;
+            }
+            Err(SqlError::QueryTooDeep { .. }) => {
+                let _ = send_error(
+                    &outbound,
+                    client_subscription_id,
+                    "query_too_deep",
+                    "SQL nesting exceeds the configured depth limit",
                 )
                 .await;
                 return;
@@ -1078,11 +1088,14 @@ fn spawn_canonical_pump(
                         .collect(),
                 };
                 // Fan out to every currently attached subscriber.
-                // Clone the delta per subscriber (the aggregate is
-                // small — top-K rows — so this is cheap).
+                // Pair once; each subscriber's channel then holds the
+                // same `Arc`'d row changes, so a hot canonical query
+                // with N followers costs one pairing and one copy of
+                // the row images, not N.
+                let event = SubscriptionRouter::pair_transaction(to_pump, &primary_key);
                 for sub_raw in subscribers {
                     let sub_id = SubscriptionId::new(sub_raw);
-                    match router.pump_transaction(sub_id, to_pump.clone(), &primary_key) {
+                    match router.pump_event(sub_id, event.clone()) {
                         Ok(()) => {}
                         Err(RouterError::UnknownSubscription(_)) => {
                             // Subscriber unsubscribed between

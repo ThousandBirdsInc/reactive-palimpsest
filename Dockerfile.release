@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1.7
+# Container image for a *prebuilt* `palimpsest` binary.
+#
+# `.github/workflows/release.yml` builds the static musl binaries once
+# per architecture, stages them under `dist/<os>/<arch>/palimpsest`,
+# and runs this file with `--platform linux/amd64,linux/arm64`. There
+# is no compile step (and no RUN at all), so the multi-arch build needs
+# no emulation and the image ships byte-for-byte the released binary.
+#
+# The root `Dockerfile` is the from-source alternative.
+#
+# Run:
+#   docker run --rm -p 50051:50051 -p 9090:9090 \
+#     -v $(pwd)/palimpsest.toml:/etc/palimpsest/palimpsest.toml \
+#     ghcr.io/thousandbirdsinc/reactive-palimpsest:latest
+
+FROM gcr.io/distroless/static-debian12:nonroot
+ARG TARGETOS
+ARG TARGETARCH
+COPY --chmod=0755 dist/${TARGETOS}/${TARGETARCH}/palimpsest /usr/local/bin/palimpsest
+EXPOSE 50051 9090
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/palimpsest"]
+CMD ["serve", "/etc/palimpsest/palimpsest.toml"]

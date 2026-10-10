@@ -14,9 +14,22 @@ on:
     - cron: '0 5 * * *'
   workflow_dispatch:
 
+# Least privilege: the default GITHUB_TOKEN gets read-only access.
+# Jobs that need more (publishing, filing issues) widen it themselves.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   PALIMPSEST_BENCH_REGRESSION_PCT: '10'
+  # The criterion harnesses the gate compares. `--benches` alone would
+  # also select every lib and bin's libtest harness, which rejects
+  # criterion's `--save-baseline` / `--baseline` flags and fails the job.
+  CRITERION_BENCHES: >-
+    --bench operator_criterion
+    --bench commit_to_client
+    --bench parse_and_lower
+    --bench wal_decode
 
 jobs:
   pr-regression:
@@ -61,12 +74,12 @@ jobs:
         run: |
           git fetch origin ${{ github.base_ref }}
           git checkout origin/${{ github.base_ref }}
-          cargo bench --workspace --benches --no-fail-fast -- --save-baseline main
+          cargo bench --workspace ${{ env.CRITERION_BENCHES }} -- --save-baseline main
 
       - name: Compare (PR head)
         run: |
           git checkout ${{ github.sha }}
-          cargo bench --workspace --benches --no-fail-fast -- --baseline main
+          cargo bench --workspace ${{ env.CRITERION_BENCHES }} -- --baseline main
 
       - name: Enforce regression budget
         run: cargo run -p xtask -- check-bench-regression --threshold ${{ env.PALIMPSEST_BENCH_REGRESSION_PCT }}

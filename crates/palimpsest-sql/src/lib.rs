@@ -19,7 +19,7 @@ mod properties;
 
 pub use catalog::{Catalog, ColumnSchema, ColumnType, TableSchema};
 pub use error::SqlError;
-pub use limits::{enforce_graph_size, enforce_input_size, QueryLimits};
+pub use limits::{enforce_graph_size, enforce_input_size, enforce_nesting_depth, QueryLimits};
 pub use lower::{lower_select_statement, parse_and_lower, parse_and_lower_with_limits};
 pub use normalize::{normalize_statement, parse_and_normalize, validate_statement_against_catalog};
 pub use parser::{is_user_placeholder, parse_select, parse_select_with_limits, validate_query};

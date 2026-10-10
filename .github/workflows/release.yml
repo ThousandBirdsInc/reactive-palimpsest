@@ -1,0 +1,366 @@
+name: Release
+
+# Builds the `palimpsest` CLI as prebuilt binaries and a container
+# image so adopters never need a Rust toolchain: a config file plus
+# one of these artifacts is the whole install.
+#
+# How a release happens:
+#
+#   1. Automatically: merge a PR that bumps `version` in the workspace
+#      `Cargo.toml`. `auto-release.yml` tags `v<version>` on main and
+#      calls this workflow for that tag (`workflow_call`).
+#   2. Manually: push a tag yourself
+#      (`git tag v0.1.1 && git push origin v0.1.1`), or run this
+#      workflow from the Actions tab with an existing tag to
+#      (re)publish it after a failed attempt.
+#
+# Artifacts per tag:
+#   - GitHub Release with one tarball per target plus SHA256SUMS
+#     (what `install.sh` downloads).
+#   - ghcr.io/<owner>/<repo>:<version> multi-arch image
+#     (linux/amd64 + linux/arm64), built from the same binaries.
+#
+# A manual run with the tag left empty builds the tarballs as
+# workflow artifacts only, for checking the recipe without releasing.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_call:
+    inputs:
+      tag:
+        description: "Existing tag to publish, e.g. v0.1.1"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v0.1.1. Leave empty to only build artifacts."
+        required: false
+        type: string
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN: palimpsest
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    name: Resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - name: Resolve
+        id: resolve
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-}"
+          if [[ -z "${tag}" && "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ -n "${tag}" && "${tag}" != v* ]]; then
+            echo "::error::tag '${tag}' must look like v<semver>"
+            exit 1
+          fi
+          version="${tag#v}"
+          publish=false; [[ -n "${tag}" ]] && publish=true
+          prerelease=false; [[ "${version}" == *-* ]] && prerelease=true
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "publish=${publish}"
+            echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag='${tag}' publish=${publish} prerelease=${prerelease}"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux binaries are static musl builds: they run on any
+          # distribution (glibc version is irrelevant) and drop into
+          # a distroless/static container unchanged.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # Intel macOS is cross-compiled from the Apple Silicon runner
+          # (the Xcode toolchain carries both archs), so the release
+          # never depends on an Intel runner label staying available.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            cross: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The tag when publishing (a `workflow_call` runs on main's
+          # ref, so this is what pins the build to the tagged commit);
+          # otherwise whatever ref the run was started from.
+          ref: ${{ needs.meta.outputs.tag || github.sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ matrix.target }}-release-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.target }}-release-cargo-
+
+      - name: Build
+        run: cargo build --release --locked -p palimpsest-cli --target ${{ matrix.target }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          TAG_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          crate="$(cargo metadata --no-deps --format-version 1 \
+            | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)"
+          if [[ -n "${TAG_VERSION}" ]]; then
+            if [[ "${crate}" != "${TAG_VERSION}" ]]; then
+              echo "::error::tag v${TAG_VERSION} does not match workspace version ${crate}"
+              exit 1
+            fi
+            version="${TAG_VERSION}"
+          else
+            version="${crate}-${GITHUB_SHA::7}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          target="${{ matrix.target }}"
+          name="${BIN}-${version}-${target}"
+          staging="$(mktemp -d)/${name}"
+          mkdir -p "${staging}"
+
+          cp "target/${target}/release/${BIN}" "${staging}/${BIN}"
+          strip "${staging}/${BIN}" || true
+          cp README.md LICENSE-APACHE LICENSE-MIT "${staging}/"
+          cp crates/palimpsest-cli/palimpsest.example.toml "${staging}/"
+          cp crates/palimpsest-cli/README.md "${staging}/README-cli.md"
+
+          mkdir -p dist
+          tar -C "$(dirname "${staging}")" -czf "dist/${name}.tar.gz" "${name}"
+
+          # Raw binary for the container build; its name encodes the
+          # Docker platform so the image job can pick it up by arch.
+          case "${target}" in
+            x86_64-unknown-linux-musl)  cp "${staging}/${BIN}" "dist/${BIN}-linux-amd64" ;;
+            aarch64-unknown-linux-musl) cp "${staging}/${BIN}" "dist/${BIN}-linux-arm64" ;;
+          esac
+
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          ls -la dist
+
+      - name: Smoke test
+        # Cross-compiled binaries cannot run on the build host.
+        if: ${{ !matrix.cross }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/${BIN}"
+          "${bin}" help
+          "${bin}" validate-config crates/palimpsest-cli/palimpsest.example.toml
+          if [[ "${{ matrix.target }}" == *musl ]]; then
+            # A static binary must not depend on a dynamic loader.
+            if ldd "${bin}" 2>/dev/null | grep -q '=>'; then
+              echo "::error::expected a static binary"; ldd "${bin}"; exit 1
+            fi
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [meta, build]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Assemble release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/*.tar.gz release/
+          (cd release && sha256sum *.tar.gz > SHA256SUMS)
+          cp install.sh release/
+          ls -la release
+          cat release/SHA256SUMS
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${VERSION}"
+          flags=(--verify-tag)
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            flags+=(--prerelease)
+          fi
+          cat > notes.md <<EOF
+          ## Install
+
+          \`\`\`sh
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/install.sh | sh
+          \`\`\`
+
+          Or download the tarball for your platform below and put
+          \`palimpsest\` on your \`PATH\`. Verify with \`SHA256SUMS\`.
+
+          Container image (linux/amd64, linux/arm64):
+
+          \`\`\`sh
+          docker run --rm -v \$PWD/palimpsest.toml:/etc/palimpsest/palimpsest.toml ${image}
+          \`\`\`
+
+          Everything is driven by the TOML config; see
+          \`palimpsest.example.toml\` inside each tarball or
+          \`crates/palimpsest-cli/README.md\` for the full reference.
+          EOF
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            # Re-publishing an existing tag (manual re-run after a
+            # failed attempt): replace the assets, keep the release.
+            gh release upload "${TAG}" --clobber release/*
+          else
+            gh release create "${TAG}" \
+              --title "palimpsest ${TAG}" \
+              --notes-file notes.md \
+              "${flags[@]}" \
+              release/*
+          fi
+
+  image:
+    name: Container image
+    needs: [meta, build]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Stage binaries per platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/linux/amd64 dist/linux/arm64
+          cp artifacts/palimpsest-linux-amd64 dist/linux/amd64/palimpsest
+          cp artifacts/palimpsest-linux-arm64 dist/linux/arm64/palimpsest
+          chmod 0755 dist/linux/*/palimpsest
+
+      - name: Image tags
+        id: tags
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags="${image}:${VERSION}"
+          if [[ "${PRERELEASE}" != "true" ]]; then
+            major_minor="${VERSION%.*}"
+            tags="${tags},${image}:${major_minor},${image}:latest"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "${tags}"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=palimpsest
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT OR Apache-2.0

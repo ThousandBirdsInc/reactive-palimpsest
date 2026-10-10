@@ -400,14 +400,38 @@ impl SubscriptionRouter {
 
     /// Pushes a complete transaction delta into the subscription's
     /// channel after pairing inserts and deletes into row-level changes.
+    ///
+    /// Fanning one transaction out to many subscribers? Pair it once
+    /// with [`Self::pair_transaction`] and push the same event to each
+    /// with [`Self::pump_event`]; this method re-pairs per call.
     pub fn pump_transaction(
         &self,
         sub: SubscriptionId,
         delta: QueryTransactionDelta,
         primary_key: &[usize],
     ) -> Result<(), RouterError> {
+        let event = Self::pair_transaction(delta, primary_key);
+        self.pump_event(sub, event)
+    }
+
+    /// Pairs a transaction's raw diffs into one shareable
+    /// [`DiffEvent::TransactionUpdate`].
+    ///
+    /// The returned event's row changes live behind an `Arc`, so
+    /// cloning it for every subscriber of the same canonical query is
+    /// a pointer bump: pairing work and row-image memory are paid once
+    /// per transaction rather than once per subscriber.
+    #[must_use]
+    pub fn pair_transaction(delta: QueryTransactionDelta, primary_key: &[usize]) -> DiffEvent {
+        pair_transaction_into_event(delta, primary_key)
+    }
+
+    /// Pushes an already-paired event into the subscription's channel.
+    ///
+    /// Saturation is reported via [`RouterError::ChannelSaturated`]
+    /// after the router has force-sent `Resync(Backpressure)`.
+    pub fn pump_event(&self, sub: SubscriptionId, event: DiffEvent) -> Result<(), RouterError> {
         let started = Instant::now();
-        let event = pair_transaction_into_event(delta, primary_key);
         let mut inner = self.inner.lock().expect("router lock");
 
         let (outcome, channel_capacity, channel_full_events) = {
@@ -607,13 +631,16 @@ fn pair_transaction_into_event(delta: QueryTransactionDelta, primary_key: &[usiz
         begin_lsn: delta.begin_lsn,
         commit_lsn: delta.commit_lsn,
         end_lsn: delta.end_lsn,
-        changes,
+        changes: changes.into(),
     }
 }
 
 fn pair_changes(diffs: Vec<RawDiff>, primary_key: &[usize]) -> Vec<RowChange> {
     let mut inserts: BTreeMap<Vec<Vec<u8>>, Vec<RawDiff>> = BTreeMap::new();
     let mut deletes: BTreeMap<Vec<Vec<u8>>, Vec<RawDiff>> = BTreeMap::new();
+    // Every raw diff becomes at most one change (an insert/delete pair
+    // collapses into one update), so this never reallocates.
+    let mut changes = Vec::with_capacity(diffs.len());
 
     for diff in diffs {
         let key = primary_key_bytes(&diff.row, primary_key);
@@ -624,7 +651,6 @@ fn pair_changes(diffs: Vec<RawDiff>, primary_key: &[usize]) -> Vec<RowChange> {
         }
     }
 
-    let mut changes = Vec::new();
     for (key, mut ins) in inserts {
         if let Some(mut outs) = deletes.remove(&key) {
             // Same primary key on both sides ⇒ Update.
