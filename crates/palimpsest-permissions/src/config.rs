@@ -97,6 +97,9 @@ pub struct RuleConfig {
     /// Whether the rule gates row visibility, write authorization, or both.
     #[serde(default)]
     pub mode: Mode,
+    /// Optional current-row selection shared by all rules on this table.
+    #[serde(default)]
+    pub latest: Option<crate::LatestBy>,
 }
 
 impl RuleConfig {
@@ -106,6 +109,7 @@ impl RuleConfig {
             table: self.table,
             predicate: self.predicate,
             mode: self.mode,
+            latest: self.latest,
         }
     }
 }

@@ -107,6 +107,53 @@ A table with **no rule** is visible to everyone — there is no implicit
 deny. Rule absence means "no policy"; if you want a default-deny
 posture, add `predicate = "false"` for tables you haven't reviewed.
 
+## JSON references and version logs
+
+Rules can extract JSON fields with `->` (JSON result) and `->>` (text
+result), including `project->>'id' = ANY($user.project_ids)`. Missing
+keys and JSON null extracted as text evaluate to SQL `NULL`. Integer
+indexes, including negative indexes, address arrays; text keys address
+objects. JSON containment (`@>`) is not supported.
+
+For append-only version logs, configure current-row selection on the
+rule instead of calculating the latest version in the subscriber's SQL:
+
+```toml
+[[permissions.rules]]
+name = "record_project_access"
+table = "core.records"
+predicate = "$user.admin OR project->>'id' = ANY($user.project_ids)"
+latest = { key = ["id"], version = "version" }
+```
+
+Declare `admin` as `bool` and `project_ids` as `text` in
+`[permissions.user_schema]`; supply `project_ids` as a list in the token.
+The standalone permissions-file format uses `[[rule]]` with the same
+`latest` setting. Programmatic rules use `PermissionRule::with_latest`.
+
+Every scan becomes **base rows → latest version per key → permission
+filter → query operators**. The integer version is ordered descending.
+A newer row in an inaccessible project therefore retracts an older
+visible row, including during live WAL updates. A query can simply read
+`SELECT id, version FROM core.records`; a project parameter can use
+`WHERE project->>'id' = sqlc.arg(project)`.
+
+All rules on the same table must specify identical `latest` settings;
+`subscribe`-only rules cannot configure it. Even administrators and
+`true` predicates see only current rows. The setting applies to joins,
+derived tables, and every other scan of that table, so historical queries
+must use a separately configured service if needed. Without `latest`,
+existing per-row filtering is unchanged. General scalar subqueries and
+rules on database views remain unsupported.
+
+The database must enforce non-null keys and versions, and uniqueness of
+`(key columns, version)`; this coarse catalog cannot verify constraints.
+Include tenant identity in the key if IDs are only unique within a tenant.
+Deleting the highest version reveals the next remaining version; represent
+logical deletion as a newer tombstone row and exclude tombstones in the
+permission predicate. The server's database role needs SELECT on every
+referenced base table, including rows needed to determine current versions.
+
 ## Enforcement requires the dataflow
 
 Row-visibility filters are compiled into the query's dataflow plan.

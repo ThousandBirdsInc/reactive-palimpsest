@@ -74,6 +74,7 @@ above). A dash means the row never reaches that gate.
 | `expr = ANY(array)` | Yes | Yes | `ANY`/`SOME` with a comparison operator over an array literal; `ANY(subquery)` is rejected. Also the materialized form of list-valued `$user.*` permission predicates. |
 | `cardinality(array)` | Yes | Yes | Validated for arity and typed as integer; evaluates to the array length (`NULL` for non-array input). |
 | `coalesce(...)` | Yes | Yes | Returns the first non-`NULL` argument. |
+| JSON `->` / `->>` | Yes | Yes | Object keys and integer array indexes (negative indexes count from the end). Missing paths return NULL; `->>` also maps JSON null to SQL NULL. `@>` is not supported. |
 | Other scalar functions | Rejected | — | Rejected at parse time with `SqlError::UnsupportedFunction` so the accepted surface never exceeds what the dataflow evaluates. |
 | `SELECT DISTINCT` | Yes | Yes | Lowers to a `Distinct` MIR node, compiled onto differential's `distinct` operator. |
 | `DISTINCT ON (exprs)` | Yes | Yes | With an `ORDER BY`, the Postgres rule applies (`DISTINCT ON` expressions must match the initial `ORDER BY` expressions) and the order keys pick the surviving row per group; without one the surviving row is arbitrary but deterministic. Order keys the projection dropped are carried as hidden columns and re-projected away above the sort. |

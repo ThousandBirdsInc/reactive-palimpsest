@@ -37,6 +37,17 @@ impl Mode {
     }
 }
 
+/// Select the highest integer version per key before row visibility is evaluated.
+/// The database must enforce NOT NULL keys/version and uniqueness of (key, version).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LatestBy {
+    /// Columns identifying an entity (include tenant identity when necessary).
+    pub key: Vec<String>,
+    /// Integer version column, ordered descending.
+    pub version: String,
+}
+
 /// User-facing permission rule, as it appears in configuration.
 ///
 /// `predicate` is a SQL boolean expression (no `WHERE` keyword) that may
@@ -52,6 +63,9 @@ pub struct PermissionRule {
     /// Whether the rule gates row visibility, subscribe-time auth, or both.
     #[serde(default)]
     pub mode: Mode,
+    /// Optional current-row selection, applied before permissions on every scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<LatestBy>,
 }
 
 impl PermissionRule {
@@ -67,7 +81,15 @@ impl PermissionRule {
             table: table.into(),
             predicate: predicate.into(),
             mode: Mode::default(),
+            latest: None,
         }
+    }
+
+    /// Builder-style current-row selection.
+    #[must_use]
+    pub fn with_latest(mut self, latest: LatestBy) -> Self {
+        self.latest = Some(latest);
+        self
     }
 
     /// Builder-style mode override.

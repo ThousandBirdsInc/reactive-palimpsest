@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use palimpsest_sql::mir::{MirGraph, MirNodeKind};
+use palimpsest_sql::mir::{MirGraph, MirNodeKind, OrderKey};
 
 use crate::{compile::CompiledRule, error::PermissionError, rule::Mode, user::UserContext};
 
@@ -78,6 +78,25 @@ pub fn rewrite(
 
         let Some(rules_for_table) = by_table.get(table.as_str()) else {
             continue;
+        };
+
+        // Every scan observes the same current relation. Selecting after the
+        // permission filter would resurrect an old visible version when the
+        // newest row moves outside the caller's scope.
+        let index = if let Some(latest) = &rules_for_table[0].latest {
+            let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+            output.splice_above(
+                index,
+                MirNodeKind::DistinctOn {
+                    on: latest.key.iter().map(|name| quote(name)).collect(),
+                    order_by: vec![OrderKey {
+                        expression: quote(&latest.version),
+                        descending: true,
+                    }],
+                },
+            )
+        } else {
+            index
         };
 
         // `true OR anything` is `true` — one tautological rule admits

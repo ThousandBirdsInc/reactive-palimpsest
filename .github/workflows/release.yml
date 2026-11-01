@@ -282,6 +282,12 @@ jobs:
           \`palimpsest.example.toml\` inside each tarball or
           \`crates/palimpsest-cli/README.md\` for the full reference.
           EOF
+          if [[ -f "docs/releases/${TAG}.md" ]]; then
+            cat "docs/releases/${TAG}.md" > changes.md
+            printf '\n' >> changes.md
+            cat notes.md >> changes.md
+            mv changes.md notes.md
+          fi
           if gh release view "${TAG}" >/dev/null 2>&1; then
             # Re-publishing an existing tag (manual re-run after a
             # failed attempt): replace the assets, keep the release.

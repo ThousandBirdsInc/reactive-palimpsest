@@ -47,7 +47,7 @@ crates.io.
 ```
 palimpsest serve [config]              # default if no command given
 palimpsest validate-config <config> [--offline]
-                                       # parse + compile + register queries; 0 ok, 1 error
+                                       # parse + compile + register queries; 0 ok, nonzero error
 palimpsest permissions eval <config> --query <sql>
                                        # rewrite query MIR with configured permissions
 palimpsest typegen <config> --out <f>  # TypeScript row/param types for registered queries
@@ -60,7 +60,20 @@ palimpsest help
 If invoked with a single positional argument that isn't a subcommand,
 the CLI behaves as `serve <config>` for backwards compatibility.
 
-Exit codes: `0` success, `2` usage error, `1` everything else.
+Exit codes: `0` success, `2` usage error, `78` invalid configuration
+(config parsing/reading, rule compilation, query files/registration),
+`1` other failures. Rule compilation errors identify the rule and table.
+Both `validate-config` and `serve` reject bad rules and query templates
+before opening listeners or initializing replication. `$project` is not
+a supported placeholder: use `$1` or `sqlc.arg(project)`; validation names
+the query and rejected placeholder.
+
+Run `validate-config` as a deployment gate. Supervisors that support it
+can suppress retries for exit 78 (for example, systemd
+`RestartPreventExitStatus=78`). Kubernetes Deployments restart exited
+containers regardless of this code; validate before rollout to avoid a
+configuration-driven restart loop. See [current-version rules](../../docs/PERMISSIONS.md#json-references-and-version-logs)
+for project authorization on version logs.
 
 `validate-config`, `permissions eval`, and `dump-catalog` work against
 the catalog introspected from `[database]` when it is configured, so

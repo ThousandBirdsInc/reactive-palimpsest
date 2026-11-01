@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "palimpsest-permissions",
  "palimpsest-postgres",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-client"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "futures",
  "gloo-net",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-client-js"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "js-sys",
  "palimpsest-client",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-conformance"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-dataflow"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-integration-tests"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "palimpsest-client",
  "palimpsest-dataflow",
@@ -1774,7 +1774,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-permissions"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "insta",
  "palimpsest-sql",
@@ -1788,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-postgres"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "palimpsest-dataflow",
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-properties"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "palimpsest-dataflow",
  "palimpsest-permissions",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-proto"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "prost",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-server"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-soak"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "palimpsest-dataflow",
@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-sql"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "insta",
@@ -1903,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-test-harness"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "palimpsest-sql",
@@ -1913,7 +1913,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-wal"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -4144,7 +4144,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "flate2",
 ]
