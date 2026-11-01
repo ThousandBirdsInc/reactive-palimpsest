@@ -130,6 +130,8 @@ pub struct CompiledRule {
     pub mode: crate::rule::Mode,
     /// Compiled predicate.
     pub predicate: CompiledPredicate,
+    /// Current-row selection applied before the permission filter.
+    pub latest: Option<crate::LatestBy>,
 }
 
 /// Compile a single rule against the catalog and user-context schema.
@@ -148,10 +150,17 @@ pub fn compile_rule(
             table: rule.table.clone(),
         })?;
 
+    validate_latest(rule, table)?;
+
     let (rewritten, user_fields) = encode_user_placeholders(&rule.predicate, &rule.name, schema)?;
     enforce_predicate_depth(&rewritten, &rule.name)?;
 
-    let lowered = parse_and_lower(&format!("SELECT 1 FROM {} WHERE ({rewritten})", rule.table))?;
+    let lowered = parse_and_lower(&format!("SELECT 1 FROM {} WHERE ({rewritten})", rule.table))
+        .map_err(|source| PermissionError::RuleSql {
+            rule: rule.name.clone(),
+            table: rule.table.clone(),
+            source,
+        })?;
 
     let canonical = extract_filter_predicate(&lowered).ok_or_else(|| {
         PermissionError::InvalidConfig(format!(
@@ -166,6 +175,7 @@ pub fn compile_rule(
         name: rule.name.clone(),
         table: rule.table.clone(),
         mode: rule.mode,
+        latest: rule.latest.clone(),
         predicate: CompiledPredicate {
             canonical,
             user_fields,
@@ -198,6 +208,14 @@ pub fn compile_rules(
     for index in 0..compiled.len() {
         for other in (index + 1)..compiled.len() {
             if compiled[index].table == compiled[other].table
+                && compiled[index].latest != compiled[other].latest
+            {
+                return Err(PermissionError::InvalidConfig(format!(
+                    "rules {:?} and {:?} on table {} must have identical latest settings",
+                    compiled[index].name, compiled[other].name, compiled[index].table
+                )));
+            }
+            if compiled[index].table == compiled[other].table
                 && compiled[index].predicate.canonical == compiled[other].predicate.canonical
             {
                 return Err(PermissionError::AmbiguousRule {
@@ -211,6 +229,45 @@ pub fn compile_rules(
     }
 
     Ok(compiled)
+}
+
+fn validate_latest(
+    rule: &PermissionRule,
+    table: &palimpsest_sql::TableSchema,
+) -> Result<(), PermissionError> {
+    let Some(latest) = &rule.latest else {
+        return Ok(());
+    };
+    let invalid = |reason: &str| {
+        PermissionError::InvalidConfig(format!(
+            "rule {:?} on table {}: latest {reason}",
+            rule.name, rule.table
+        ))
+    };
+    if !rule.mode.affects_visibility() {
+        return Err(invalid("requires a row-visibility mode"));
+    }
+    if latest.key.is_empty() {
+        return Err(invalid("key must not be empty"));
+    }
+    let mut seen = BTreeSet::new();
+    for name in &latest.key {
+        if !seen.insert(name) {
+            return Err(invalid("key contains duplicate columns"));
+        }
+        if table.column(name).is_none() {
+            return Err(invalid(&format!("key column {name:?} does not exist")));
+        }
+    }
+    if seen.contains(&latest.version) {
+        return Err(invalid("version must not be part of the key"));
+    }
+    if table.column(&latest.version).map(|column| column.ty)
+        != Some(palimpsest_sql::ColumnType::Int)
+    {
+        return Err(invalid("version must name an integer column"));
+    }
+    Ok(())
 }
 
 fn encode_user_placeholders(
@@ -451,7 +508,11 @@ pub fn predicate_key(
     rule: &CompiledRule,
     context: &UserContext,
 ) -> Result<String, PermissionError> {
-    rule.predicate.canonical_with_context(context)
+    let predicate = rule.predicate.canonical_with_context(context)?;
+    Ok(match &rule.latest {
+        Some(latest) => format!("{predicate}|latest:{latest:?}"),
+        None => predicate,
+    })
 }
 
 #[cfg(test)]
@@ -470,6 +531,76 @@ mod tests {
             ("org_id".to_owned(), ColumnType::Int),
             ("is_admin".to_owned(), ColumnType::Bool),
         ])
+    }
+
+    #[test]
+    fn unsupported_rule_sql_names_rule_and_table() {
+        let err = compile_rule(
+            &PermissionRule::new("project_access", "posts", "id # 1 = 0"),
+            &Catalog::demo(),
+            &schema(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("project_access")
+                && err.contains("posts")
+                && err.contains("unsupported binary operator"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn latest_configuration_rejects_invalid_or_conflicting_rules() {
+        let latest = crate::LatestBy {
+            key: vec!["id".to_owned()],
+            version: "author_id".to_owned(),
+        };
+        let current = PermissionRule::new("current", "posts", "true").with_latest(latest.clone());
+        assert!(compile_rule(&current, &Catalog::demo(), &schema()).is_ok());
+        for invalid in [
+            crate::LatestBy {
+                key: vec![],
+                ..latest.clone()
+            },
+            crate::LatestBy {
+                key: vec!["missing".to_owned()],
+                ..latest.clone()
+            },
+            crate::LatestBy {
+                key: vec!["id".to_owned(), "id".to_owned()],
+                ..latest.clone()
+            },
+            crate::LatestBy {
+                version: "id".to_owned(),
+                ..latest.clone()
+            },
+            crate::LatestBy {
+                version: "missing".to_owned(),
+                ..latest
+            },
+        ] {
+            assert!(compile_rule(
+                &PermissionRule::new("bad", "posts", "true").with_latest(invalid),
+                &Catalog::demo(),
+                &schema()
+            )
+            .is_err());
+        }
+        assert!(compile_rule(
+            &current.clone().with_mode(crate::Mode::Subscribe),
+            &Catalog::demo(),
+            &schema()
+        )
+        .is_err());
+        let err = compile_rules(
+            &[current, PermissionRule::new("historical", "posts", "false")],
+            &Catalog::demo(),
+            &schema(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("identical latest"), "{err}");
     }
 
     #[test]

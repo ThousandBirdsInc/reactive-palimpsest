@@ -10,8 +10,8 @@
 //! - `validate-config <config> [--offline]` — parse the TOML config,
 //!   compile the permission rules, and register the query files
 //!   against the live catalog when `[database]` is configured
-//!   (`--offline` uses the built-in demo catalog instead); exit 0 on
-//!   success, 1 with a diagnostic on failure. Suitable for CI.
+//!   (`--offline` skips catalog checks with a database configured); exit 0
+//!   on success, nonzero with a diagnostic on failure. Suitable for CI.
 //! - `permissions eval <config> --query <sql>` — compile permission
 //!   rules, rewrite one or more queries for a supplied user context,
 //!   and print the before/after canonical MIR.
@@ -144,6 +144,8 @@ struct PermissionRuleConfig {
     predicate: String,
     #[serde(default)]
     mode: Mode,
+    #[serde(default)]
+    latest: Option<palimpsest_permissions::LatestBy>,
 }
 
 /// Legacy connection section, kept so older configs still drive
@@ -214,11 +216,16 @@ async fn main() -> ExitCode {
 }
 
 /// Maps an error to a stable process exit code so agents can branch on the
-/// failure class without parsing stderr. `0` success, `2` usage, `1`
-/// everything else.
+/// failure class without parsing stderr. `0` success, `2` usage, `78`
+/// invalid configuration, `1` other failures.
 fn exit_code_for(err: &CliError) -> ExitCode {
     let code: u8 = match err {
         CliError::Usage(_) => 2,
+        CliError::ReadConfig(..)
+        | CliError::ParseConfig(_)
+        | CliError::CompilePermissions(_)
+        | CliError::ReadQueryFile(..)
+        | CliError::RegisterQueries(_) => 78,
         _ => 1,
     };
     ExitCode::from(code)
@@ -267,7 +274,7 @@ Commands:
   serve [config]              Run the embedded server (default).
   validate-config <config> [--offline]
                               Parse the TOML config, compile permissions,
-                              register query files, and exit 0/1. Uses the
+                              register query files, and exit 0/nonzero. Uses the
                               live catalog when [database] is set.
   permissions eval <config> --query <sql> [--user field=value]
                               Rewrite query MIR with configured permissions.
@@ -315,7 +322,7 @@ fn build_query_registry(
             fs::read_to_string(&path).map_err(|err| CliError::ReadQueryFile(path.clone(), err))?;
         let names = registry
             .register_sqlc_source(&source, &path.display().to_string(), catalog)
-            .map_err(|err| CliError::RegisterQueries(err.to_string()))?;
+            .map_err(|err| CliError::RegisterQueries(format!("{}: {err}", path.display())))?;
         info!(file = %path.display(), queries = names.len(), "registered named queries");
     }
     Ok(Some(registry))
@@ -427,7 +434,10 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
         .rules
         .iter()
         .map(|rule| {
-            PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode)
+            let mut compiled =
+                PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode);
+            compiled.latest.clone_from(&rule.latest);
+            compiled
         })
         .collect();
     let compiled = compile_rules(&rules, &catalog, &user_schema)
@@ -553,7 +563,10 @@ async fn cmd_validate_config(rest: &[String]) -> Result<(), CliError> {
         .rules
         .iter()
         .map(|rule| {
-            PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode)
+            let mut compiled =
+                PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode);
+            compiled.latest.clone_from(&rule.latest);
+            compiled
         })
         .collect();
 
@@ -689,7 +702,10 @@ async fn cmd_permissions_eval(rest: &[String]) -> Result<(), CliError> {
         .rules
         .iter()
         .map(|rule| {
-            PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode)
+            let mut compiled =
+                PermissionRule::new(&rule.name, &rule.table, &rule.predicate).with_mode(rule.mode);
+            compiled.latest.clone_from(&rule.latest);
+            compiled
         })
         .collect();
     let compiled = compile_rules(&rules, &catalog, &user_schema)
@@ -1746,6 +1762,74 @@ predicate = "author_id = $user.id"
 
         assert!(result.is_ok());
         let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn invalid_rule_is_rejected_by_validate_and_serve_before_startup() {
+        let path = write_temp_permissions_config(
+            "bad-rule",
+            r#"
+[[permissions.rules]]
+name = "project_access"
+table = "posts"
+predicate = "id # 1 = 0"
+"#,
+        );
+        for result in [
+            cmd_validate_config(&[path.display().to_string()]).await,
+            cmd_serve(Some(path.clone())).await,
+        ] {
+            let err = result.unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("project_access") && message.contains("posts"),
+                "{message}"
+            );
+            assert_eq!(exit_code_for(&err), ExitCode::from(78));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn named_placeholder_diagnostic_precedes_subquery_error_at_validation_and_startup() {
+        let dir = temp_test_dir("named-placeholder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[queries]\nfiles = ['queries.sql']\n").unwrap();
+        std::fs::write(dir.join("queries.sql"), "-- name: CurrentRecords :many\nSELECT id FROM posts WHERE author_id = $project AND id = (SELECT max(id) FROM posts)").unwrap();
+        for result in [
+            cmd_validate_config(&[path.display().to_string()]).await,
+            cmd_serve(Some(path.clone())).await,
+        ] {
+            let err = result.unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("CurrentRecords")
+                    && message.contains("$project")
+                    && message.contains("sqlc.arg(name)"),
+                "{message}"
+            );
+            assert_eq!(exit_code_for(&err), ExitCode::from(78));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cli_preserves_latest_rule_settings() {
+        let config: Config = toml::from_str(
+            r#"
+[[permissions.rules]]
+name = "current"
+table = "posts"
+predicate = "true"
+latest = { key = ["id"], version = "author_id" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.permissions.rules[0].latest.as_ref().unwrap().version,
+            "author_id"
+        );
     }
 
     #[tokio::test]

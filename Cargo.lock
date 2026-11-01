@@ -502,9 +502,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "palimpsest-permissions",
  "palimpsest-postgres",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-client"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "futures",
  "gloo-net",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-client-js"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "js-sys",
  "palimpsest-client",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-conformance"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-dataflow"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-integration-tests"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "palimpsest-client",
  "palimpsest-dataflow",
@@ -1774,7 +1774,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-permissions"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "insta",
  "palimpsest-sql",
@@ -1788,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-postgres"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "palimpsest-dataflow",
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-properties"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "palimpsest-dataflow",
  "palimpsest-permissions",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-proto"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "prost",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-server"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-soak"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "palimpsest-dataflow",
@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-sql"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "insta",
@@ -1903,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-test-harness"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "palimpsest-sql",
@@ -1913,7 +1913,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest-wal"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -2527,9 +2527,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -3087,9 +3087,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.2"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "110a78583f19d5cdb2c5ccf321d1290344e71313c6c37d43520d386027d18386"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -4144,7 +4144,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "flate2",
 ]

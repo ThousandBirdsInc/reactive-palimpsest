@@ -294,7 +294,7 @@ fn bind_table_factor(
             };
             let qualifier = alias
                 .as_ref()
-                .map_or_else(|| table_name.clone(), |alias| alias.name.value.clone());
+                .map_or_else(|| object_name(name), |alias| alias.name.value.clone());
             insert_relation(scope, qualifier, columns)
         }
         TableFactor::Derived {
@@ -699,6 +699,8 @@ fn infer_expr_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, SqlError> {
             | BinaryOperator::LtEq
             | BinaryOperator::And
             | BinaryOperator::Or => Ok(ColumnType::Bool),
+            BinaryOperator::Arrow => Ok(ColumnType::Jsonb),
+            BinaryOperator::LongArrow => Ok(ColumnType::Text),
             BinaryOperator::Plus
             | BinaryOperator::Minus
             | BinaryOperator::Multiply
@@ -810,6 +812,18 @@ fn validate_binary_types(
     let right_ty = infer_expr_type(right, scope)?;
 
     match op {
+        BinaryOperator::Arrow | BinaryOperator::LongArrow => {
+            if matches!(left_ty, ColumnType::Jsonb | ColumnType::Unknown)
+                && matches!(
+                    right_ty,
+                    ColumnType::Text | ColumnType::Int | ColumnType::Unknown
+                )
+            {
+                Ok(())
+            } else {
+                Err(SqlError::TypeMismatch(format!("{op} expects JSON and a text key or integer index, got {left_ty:?} and {right_ty:?}")))
+            }
+        }
         BinaryOperator::And | BinaryOperator::Or => {
             if matches!(left_ty, ColumnType::Bool | ColumnType::Unknown)
                 && matches!(right_ty, ColumnType::Bool | ColumnType::Unknown)
@@ -921,8 +935,10 @@ fn output_name(expr: &Expr) -> String {
 
 fn catalog_table_name(name: &ObjectName) -> String {
     name.0
-        .last()
-        .map_or_else(|| name.to_string(), |part| part.value.clone())
+        .iter()
+        .map(|part| part.value.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn object_name(name: &ObjectName) -> String {

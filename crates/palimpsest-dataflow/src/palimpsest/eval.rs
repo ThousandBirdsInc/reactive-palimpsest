@@ -250,6 +250,8 @@ fn infer_type(expr: &Expr, schema: &ScalarSchema) -> ColumnType {
             | BinaryOperator::GtEq
             | BinaryOperator::And
             | BinaryOperator::Or => ColumnType::Bool,
+            BinaryOperator::Arrow => ColumnType::Jsonb,
+            BinaryOperator::LongArrow => ColumnType::Text,
             BinaryOperator::Plus
             | BinaryOperator::Minus
             | BinaryOperator::Multiply
@@ -1229,7 +1231,82 @@ fn binary_scalar(
                 _ => Datum::Null,
             }
         })),
+        BinaryOperator::Arrow | BinaryOperator::LongArrow => Ok(Box::new(move |row| {
+            json_extract(&l(row), &r(row), op == BinaryOperator::LongArrow)
+        })),
         other => Err(EvalError::Unsupported(format!("binary op {other:?}"))),
+    }
+}
+
+/// JSON field/index extraction. Missing paths, incompatible containers and
+/// SQL NULL return SQL NULL; JSON null survives `->` but not `->>`.
+fn json_extract(document: &Datum, key: &Datum, as_text: bool) -> Datum {
+    let (Datum::Jsonb(bytes) | Datum::Json(bytes)) = document else {
+        return Datum::Null;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Datum::Null;
+    };
+    let selected = match (&value, key) {
+        (serde_json::Value::Object(object), Datum::Text(key)) => std::str::from_utf8(key)
+            .ok()
+            .and_then(|key| object.get(key)),
+        (serde_json::Value::Array(array), Datum::I64(index)) => json_index(array, *index),
+        (serde_json::Value::Array(array), Datum::I32(index)) => {
+            json_index(array, i64::from(*index))
+        }
+        (serde_json::Value::Array(array), Datum::I16(index)) => {
+            json_index(array, i64::from(*index))
+        }
+        _ => None,
+    };
+    match selected {
+        None => Datum::Null,
+        Some(serde_json::Value::Null) if as_text => Datum::Null,
+        Some(serde_json::Value::String(text)) if as_text => {
+            Datum::Text(text.as_bytes().to_vec().into())
+        }
+        Some(value) if as_text => Datum::Text(json_text(value).into_bytes().into()),
+        Some(value) => Datum::Jsonb(value.to_string().into_bytes().into()),
+    }
+}
+
+fn json_index(array: &[serde_json::Value], index: i64) -> Option<&serde_json::Value> {
+    let index = if index < 0 {
+        i64::try_from(array.len()).ok()?.checked_add(index)?
+    } else {
+        index
+    };
+    array.get(usize::try_from(index).ok()?)
+}
+
+/// PostgreSQL jsonb text uses spaces and orders object keys by byte length,
+/// then byte value. String scalars are unquoted only at the extraction root.
+fn json_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values.iter().map(json_text).collect::<Vec<_>>().join(", ")
+        ),
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+            format!(
+                "{{{}}}",
+                entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{}: {}",
+                            serde_json::to_string(key).expect("string serializes"),
+                            json_text(value)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        _ => value.to_string(),
     }
 }
 
@@ -1450,6 +1527,40 @@ mod tests {
 
     fn text(s: &str) -> Datum {
         Datum::Text(s.as_bytes().to_vec().into())
+    }
+
+    #[test]
+    fn json_extraction_handles_references_arrays_and_nulls() {
+        let schema = ScalarSchema::from_pairs([("data".to_owned(), ColumnType::Jsonb)]);
+        let row = smallvec![Datum::Jsonb(
+            br#"{"id":"p_1", "items":["first",null,7], "nil":null, "nested":{"long":true,"x":1}}"#
+                .to_vec()
+                .into()
+        )];
+        for (sql, expected) in [
+            ("data->>'id'", text("p_1")),
+            ("data->'items'->> -1", text("7")),
+            ("data->'items'->>0", text("first")),
+            ("data->'items'->>1", Datum::Null),
+            ("data->'items'->>9", Datum::Null),
+            ("data->'items'->> -9", Datum::Null),
+            ("data->>'missing'", Datum::Null),
+            ("data->>'nil'", Datum::Null),
+            ("data->0", Datum::Null),
+            ("data->'id'->>'x'", Datum::Null),
+            ("data->'items'->>'0'", Datum::Null),
+            ("data->>'nested'", text(r#"{"x": 1, "long": true}"#)),
+            ("data->'nil'", Datum::Jsonb(b"null".to_vec().into())),
+        ] {
+            let eval = compile_scalar(sql, &schema).unwrap();
+            assert_eq!(eval(&row), expected, "{sql}");
+            assert_eq!(eval(&smallvec![Datum::Null]), Datum::Null, "{sql}");
+        }
+        assert!(compile_predicate(
+            "data->>'id' = ANY(ARRAY['p_1', 'p_2'])",
+            &schema
+        )
+        .unwrap()(&row));
     }
 
     #[test]

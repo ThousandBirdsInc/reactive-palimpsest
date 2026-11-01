@@ -311,7 +311,9 @@ impl Visitor for UnsupportedExprVisitor {
                 | BinaryOperator::Multiply
                 | BinaryOperator::Divide
                 | BinaryOperator::Modulo
-                | BinaryOperator::StringConcat => ControlFlow::Continue(()),
+                | BinaryOperator::StringConcat
+                | BinaryOperator::Arrow
+                | BinaryOperator::LongArrow => ControlFlow::Continue(()),
                 _ => {
                     ControlFlow::Break(SqlError::UnsupportedFeature("unsupported binary operator"))
                 }

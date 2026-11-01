@@ -1151,7 +1151,14 @@ fn collect_table_aliases(statement: &Statement) -> Vec<(String, String)> {
                     let key = alias
                         .as_ref()
                         .map_or_else(|| table.value.clone(), |a| a.name.value.clone());
-                    self.0.push((key, table.value.clone()));
+                    self.0.push((
+                        key,
+                        name.0
+                            .iter()
+                            .map(|part| part.value.as_str())
+                            .collect::<Vec<_>>()
+                            .join("."),
+                    ));
                 }
             }
             ControlFlow::Continue(())
@@ -1169,6 +1176,21 @@ fn resolve_column_type(
     aliases: &[(String, String)],
     catalog: &Catalog,
 ) -> Result<(String, ColumnType), String> {
+    // Extraction fixes the result type even when the key is dynamic. Keep
+    // resolving the source column so missing/ambiguous references still fail.
+    if let Expr::BinaryOp { left, op, .. } = unwrap_nested(expr) {
+        if matches!(op, BinaryOperator::Arrow | BinaryOperator::LongArrow) {
+            let (name, _) = resolve_column_type(left, aliases, catalog)?;
+            return Ok((
+                name,
+                if *op == BinaryOperator::LongArrow {
+                    ColumnType::Text
+                } else {
+                    ColumnType::Jsonb
+                },
+            ));
+        }
+    }
     let (relation, column) = match unwrap_nested(expr) {
         Expr::Identifier(ident) => (None, ident.value.clone()),
         Expr::CompoundIdentifier(parts) if parts.len() >= 2 => (
@@ -2143,6 +2165,18 @@ INSERT INTO cards (id) VALUES ($1);
         );
         let board_cards = registry.get("BoardCards").expect("registered");
         assert_eq!(board_cards.referenced_tables(), ["cards".to_owned()]);
+    }
+
+    #[test]
+    fn json_extraction_infers_named_parameter_type_on_qualified_table() {
+        let catalog = Catalog::new([TableSchema::new(
+            "core.records",
+            vec![ColumnSchema::new("project", ColumnType::Jsonb)],
+        )]);
+        let mut registry = QueryRegistry::new();
+        registry.register_sqlc_source("-- name: ProjectRecords :many\nSELECT project->>'id' AS project_id FROM core.records WHERE project->>'id' = sqlc.arg(project)", "records.sql", &catalog).unwrap();
+        let prepared = registry.get("ProjectRecords").unwrap();
+        assert_eq!(prepared.params[0].ty, ColumnType::Text);
     }
 
     #[test]

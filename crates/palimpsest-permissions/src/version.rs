@@ -98,7 +98,7 @@ impl RuleVersionTracker {
         };
 
         for rule in rules {
-            let canonical = rule.predicate.canonical.clone();
+            let canonical = format!("{rule:?}");
             match self.versions.get(&rule.name) {
                 Some(existing) if existing.canonical == canonical => {
                     next.insert(
@@ -145,6 +145,30 @@ mod tests {
 
     fn schema() -> UserContextSchema {
         UserContextSchema::new([("id".to_owned(), ColumnType::Int)])
+    }
+
+    #[test]
+    fn changing_latest_selection_invalidates_rule_version_and_key() {
+        let mut rules = compile_rules(
+            &[PermissionRule::new("p", "posts", "true")],
+            &Catalog::demo(),
+            &schema(),
+        )
+        .unwrap();
+        let context = crate::UserContext::default();
+        let before = crate::compile::predicate_key(&rules[0], &context).unwrap();
+        let mut tracker = RuleVersionTracker::default();
+        tracker.install(&rules);
+        rules[0].latest = Some(crate::LatestBy {
+            key: vec!["id".to_owned()],
+            version: "author_id".to_owned(),
+        });
+        let delta = tracker.install(&rules);
+        assert_eq!(delta.changed, vec!["p".to_owned()]);
+        assert_ne!(
+            before,
+            crate::compile::predicate_key(&rules[0], &context).unwrap()
+        );
     }
 
     #[test]

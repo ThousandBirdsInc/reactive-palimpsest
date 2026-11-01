@@ -16,6 +16,6 @@ pub use compile::{compile_rule, compile_rules, CompiledPredicate, CompiledRule};
 pub use config::{load_config, parse_config, Config, RuleConfig, UserContextField};
 pub use error::PermissionError;
 pub use rewriter::{rewrite, RewriteOutcome, RewriteStats};
-pub use rule::{Mode, PermissionRule};
+pub use rule::{LatestBy, Mode, PermissionRule};
 pub use user::{UserContext, UserContextSchema, UserValue};
 pub use version::{RuleVersion, RuleVersionTracker};

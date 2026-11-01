@@ -113,6 +113,18 @@ pub enum PermissionError {
     #[error("invalid permissions config: {0}")]
     InvalidConfig(String),
 
+    /// SQL compilation failure annotated with the owning rule and table.
+    #[error("rule {rule:?} on table {table}: {source}")]
+    RuleSql {
+        /// Rule name.
+        rule: String,
+        /// Target table.
+        table: String,
+        /// Rejected SQL construct.
+        #[source]
+        source: SqlError,
+    },
+
     /// Underlying SQL parser/lower error.
     #[error(transparent)]
     Sql(#[from] SqlError),
