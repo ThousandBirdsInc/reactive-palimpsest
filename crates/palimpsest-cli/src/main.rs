@@ -10,8 +10,8 @@
 //! - `validate-config <config> [--offline]` — parse the TOML config,
 //!   compile the permission rules, and register the query files
 //!   against the live catalog when `[database]` is configured
-//!   (`--offline` uses the built-in demo catalog instead); exit 0 on
-//!   success, 1 with a diagnostic on failure. Suitable for CI.
+//!   (`--offline` skips catalog checks with a database configured); exit 0
+//!   on success, nonzero with a diagnostic on failure. Suitable for CI.
 //! - `permissions eval <config> --query <sql>` — compile permission
 //!   rules, rewrite one or more queries for a supplied user context,
 //!   and print the before/after canonical MIR.
@@ -274,7 +274,7 @@ Commands:
   serve [config]              Run the embedded server (default).
   validate-config <config> [--offline]
                               Parse the TOML config, compile permissions,
-                              register query files, and exit 0/1. Uses the
+                              register query files, and exit 0/nonzero. Uses the
                               live catalog when [database] is set.
   permissions eval <config> --query <sql> [--user field=value]
                               Rewrite query MIR with configured permissions.

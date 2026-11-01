@@ -109,7 +109,7 @@ fn project_move_retracts_previous_visible_row_and_never_resurrects_history() {
     assert_eq!(deltas.len(), 1);
     assert_eq!(deltas[0].diff, -1);
     assert_eq!(deltas[0].row, initial[0]);
-    assert!(host.cached_view("current", 2).unwrap().0.is_empty());
+    assert_eq!(host.cached_view("current", 2).unwrap().0, Vec::<Row>::new());
     assert!(host
         .push_table_diff("current", TABLE, row(1, 3, "b"), 1, Lsn::new(3))
         .is_empty());

@@ -2,7 +2,7 @@
 #
 # Copy to `palimpsest.toml`, edit, then:
 #
-#   palimpsest validate-config palimpsest.toml   # parse + compile, exit 0/1
+#   palimpsest validate-config palimpsest.toml   # parse + compile, exit 0/nonzero
 #   palimpsest serve palimpsest.toml             # run the server
 #
 # Every section is optional and every subcommand is driven by this one
