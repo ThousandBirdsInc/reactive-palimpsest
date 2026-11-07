@@ -106,6 +106,9 @@ addr = "0.0.0.0:50051"
 [metrics]
 addr = "0.0.0.0:9090"
 
+[pgwire]                       # optional: Postgres wire protocol for
+addr = "0.0.0.0:5433"          # backend services (docs/POSTGRES-WIRE.md)
+
 [database]
 dsn = "postgres://palimpsest:secret@db:5432/app?sslmode=require"
 slot = "palimpsest_main"

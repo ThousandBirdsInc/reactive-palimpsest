@@ -66,7 +66,7 @@ const OUTBOUND_CAPACITY: usize = 1024;
 /// Capping concurrency bounds peak memory when several browsers
 /// connect at once and each fires N subscribes in parallel. Cheap
 /// admission decisions (rate limit, parse error) still run unbounded.
-const SUBSCRIBE_BLOCKING_CONCURRENCY: usize = 2;
+pub(crate) const SUBSCRIBE_BLOCKING_CONCURRENCY: usize = 2;
 
 /// Index of cursor pumps by canonical query key.
 ///
@@ -79,12 +79,12 @@ const SUBSCRIBE_BLOCKING_CONCURRENCY: usize = 2;
 /// for its canonical key; the next subscribe to that key (which finds
 /// either a missing or already-finished entry here) spawns a fresh
 /// pump anchored at the new plan's snapshot LSN.
-struct CanonicalPumpRegistry {
+pub(crate) struct CanonicalPumpRegistry {
     inner: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl CanonicalPumpRegistry {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
         }
@@ -96,7 +96,7 @@ pub struct SyncEngineService {
     router: Arc<SubscriptionRouter>,
     auth: DynAuthenticator,
     wal: Arc<dyn WalRuntime>,
-    connection_allocator: AtomicU64,
+    connection_allocator: Arc<AtomicU64>,
     schema_allocator: Arc<AtomicU64>,
     security: SecurityLimits,
     reconnect_tracker: Arc<ReconnectTracker>,
@@ -139,7 +139,7 @@ impl SyncEngineService {
             router,
             auth,
             wal,
-            connection_allocator: AtomicU64::new(1),
+            connection_allocator: Arc::new(AtomicU64::new(1)),
             schema_allocator: Arc::new(AtomicU64::new(1)),
             security,
             reconnect_tracker: Arc::new(ReconnectTracker::new(security.reconnect_rate)),
@@ -159,6 +159,51 @@ impl SyncEngineService {
     }
 
     fn next_connection(&self) -> ConnectionId {
+        ConnectionId::new(self.connection_allocator.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Shares the engine state behind this service with another front
+    /// end (the Postgres wire-protocol listener). Every handle is an
+    /// `Arc` onto the same object, so subscriptions opened over either
+    /// transport attach to the same host plans and cursor pumps.
+    pub(crate) fn query_core(&self) -> QueryCore {
+        QueryCore {
+            router: Arc::clone(&self.router),
+            auth: Arc::clone(&self.auth),
+            wal: Arc::clone(&self.wal),
+            connection_allocator: Arc::clone(&self.connection_allocator),
+            schema_allocator: Arc::clone(&self.schema_allocator),
+            security: self.security,
+            reconnect_tracker: Arc::clone(&self.reconnect_tracker),
+            dataflow_host: Arc::clone(&self.dataflow_host),
+            subscribe_blocking_slots: Arc::clone(&self.subscribe_blocking_slots),
+            pump_registry: Arc::clone(&self.pump_registry),
+            named: Arc::clone(&self.named),
+        }
+    }
+}
+
+/// The transport-independent half of [`SyncEngineService`]: everything
+/// a front end needs to resolve SQL into a live, permission-filtered
+/// result set. See [`SyncEngineService::query_core`].
+#[derive(Clone)]
+pub(crate) struct QueryCore {
+    pub(crate) router: Arc<SubscriptionRouter>,
+    pub(crate) auth: DynAuthenticator,
+    pub(crate) wal: Arc<dyn WalRuntime>,
+    pub(crate) connection_allocator: Arc<AtomicU64>,
+    pub(crate) schema_allocator: Arc<AtomicU64>,
+    pub(crate) security: SecurityLimits,
+    pub(crate) reconnect_tracker: Arc<ReconnectTracker>,
+    pub(crate) dataflow_host: Arc<palimpsest_dataflow::palimpsest::PersistentHost>,
+    pub(crate) subscribe_blocking_slots: Arc<Semaphore>,
+    pub(crate) pump_registry: Arc<CanonicalPumpRegistry>,
+    pub(crate) named: Arc<NamedQueries>,
+}
+
+impl QueryCore {
+    /// Allocates a connection id from the allocator shared with gRPC.
+    pub(crate) fn next_connection(&self) -> ConnectionId {
         ConnectionId::new(self.connection_allocator.fetch_add(1, Ordering::Relaxed))
     }
 }
@@ -768,19 +813,37 @@ async fn handle_subscribe(
 
 /// Bundle of values the blocking subscribe section needs to hand back
 /// to the async caller.
-struct SubscribeOutcome {
-    response: crate::router::SubscribeResponse,
-    schema: SchemaDefinition,
-    compiled_plan_for_host: Option<palimpsest_dataflow::palimpsest::CompiledPlan>,
+pub(crate) struct SubscribeOutcome {
+    pub(crate) response: crate::router::SubscribeResponse,
+    pub(crate) schema: SchemaDefinition,
+    pub(crate) compiled_plan_for_host: Option<palimpsest_dataflow::palimpsest::CompiledPlan>,
     /// `Some(canonical_key)` when this subscribe attached to a shared
     /// `PersistentHost` plan. `None` for pass-through queries the
     /// compiler couldn't lower onto the host.
-    host_canonical: Option<String>,
+    pub(crate) host_canonical: Option<String>,
 }
 
-enum SubscribeBlockingError {
+pub(crate) enum SubscribeBlockingError {
     SchemaLookup(String),
     Router(RouterError),
+}
+
+impl SubscribeBlockingError {
+    /// Stable error code + human message, matching the gRPC frames.
+    pub(crate) fn code_and_message(&self) -> (&'static str, String) {
+        match self {
+            Self::SchemaLookup(detail) => ("schema_lookup_failed", detail.clone()),
+            Self::Router(RouterError::DuplicateClientSubscriptionId) => (
+                "duplicate_subscription_id",
+                "client_subscription_id already in use on this connection".to_owned(),
+            ),
+            Self::Router(RouterError::Permission(err)) => ("permission_denied", err.to_string()),
+            Self::Router(err @ RouterError::PermissionUnenforceable { .. }) => {
+                ("permission_unenforceable", err.to_string())
+            }
+            Self::Router(err) => ("subscribe_failed", err.to_string()),
+        }
+    }
 }
 
 /// CPU-bound half of `handle_subscribe`. Runs on the blocking pool.
@@ -806,7 +869,7 @@ enum SubscribeBlockingError {
 /// * `PersistentHost::register_or_seed` spawns the per-plan timely
 ///   worker outside its own inner lock (`dataflow_host.rs:412..417`).
 #[allow(clippy::too_many_arguments)]
-fn blocking_subscribe(
+pub(crate) fn blocking_subscribe(
     connection: ConnectionId,
     client_id: ClientSubscriptionId,
     query: QueryId,
@@ -950,7 +1013,7 @@ const fn response_attached_via_cache(err: &RouterError) -> bool {
 /// A "finished" handle in the registry (pump exited because subscribers
 /// went to zero) is treated as missing — we abort + replace it.
 #[allow(clippy::too_many_arguments)]
-fn ensure_canonical_pump(
+pub(crate) fn ensure_canonical_pump(
     pump_registry: &CanonicalPumpRegistry,
     canonical: String,
     query: QueryId,
@@ -1178,8 +1241,8 @@ fn spawn_legacy_pump(
 /// Bridges the WAL runtime's `table_schema` lookup into the trait the
 /// MIR compiler consumes. Avoids leaking `WalRuntime` as a generic
 /// bound on the compiler's public surface.
-struct WalTableLookup<'a> {
-    wal: &'a dyn WalRuntime,
+pub(crate) struct WalTableLookup<'a> {
+    pub(crate) wal: &'a dyn WalRuntime,
 }
 
 impl palimpsest_dataflow::palimpsest::TableSchemaLookup for WalTableLookup<'_> {
@@ -1192,7 +1255,7 @@ impl palimpsest_dataflow::palimpsest::TableSchemaLookup for WalTableLookup<'_> {
 /// `SchemaDefinition` (the gRPC `Accepted` payload). PKs collapse to
 /// the first column — fine for aggregate output where `category_id`
 /// (or whatever the group key is) leads the row.
-fn schema_definition_from_plan(
+pub(crate) fn schema_definition_from_plan(
     plan: &palimpsest_dataflow::palimpsest::CompiledPlan,
 ) -> SchemaDefinition {
     let columns = plan

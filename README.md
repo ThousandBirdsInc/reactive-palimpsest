@@ -79,7 +79,7 @@ from the Postgres WAL.
 | Path | Purpose |
 | --- | --- |
 | `crates/palimpsest-cli` | `palimpsest` command-line binary for running and validating a server config. |
-| `crates/palimpsest-server` | Embeddable SyncEngine server, subscription router, auth wiring, `/ws/subscribe` browser transport, metrics, and cursor pumping. |
+| `crates/palimpsest-server` | Embeddable SyncEngine server, subscription router, auth wiring, `/ws/subscribe` browser transport, Postgres wire-protocol listener, metrics, and cursor pumping. |
 | `crates/palimpsest-postgres` | Production Postgres WAL runtime: catalog introspection, slot/publication/replica-identity ownership, fenced snapshots, streaming logical replication over TLS, reconnect-with-reconciliation, and TypeScript type generation. |
 | `crates/palimpsest-client` | Native and WASM-capable Rust client for the SyncEngine protocol. |
 | `crates/palimpsest-client-js` | `wasm-bindgen` wrapper used by browser clients. |
@@ -343,6 +343,7 @@ Start with:
 
 - [docs/supported-sql.md](docs/supported-sql.md)
 - [docs/NAMED-QUERIES.md](docs/NAMED-QUERIES.md)
+- [docs/POSTGRES-WIRE.md](docs/POSTGRES-WIRE.md)
 - [docs/USER-GUIDE.md](docs/USER-GUIDE.md)
 - [docs/PERMISSIONS.md](docs/PERMISSIONS.md)
 

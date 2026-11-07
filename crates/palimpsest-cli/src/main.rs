@@ -56,6 +56,8 @@ struct Config {
     #[serde(default)]
     metrics: MetricsConfig,
     #[serde(default)]
+    pgwire: PgwireConfig,
+    #[serde(default)]
     auth: AuthConfig,
     #[serde(default)]
     permissions: PermissionsConfig,
@@ -118,6 +120,14 @@ impl Default for GrpcConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct MetricsConfig {
+    addr: Option<SocketAddr>,
+}
+
+/// Postgres wire-protocol listener (docs/POSTGRES-WIRE.md). Any
+/// standard Postgres driver can connect and `SELECT` from the live
+/// views; omit the section to leave it off.
+#[derive(Debug, Default, Deserialize)]
+struct PgwireConfig {
     addr: Option<SocketAddr>,
 }
 
@@ -448,7 +458,8 @@ async fn cmd_serve(path: Option<PathBuf>) -> Result<(), CliError> {
     let mut builder = Palimpsest::builder()
         .with_permissions(compiled)
         .with_grpc_addr(config.grpc.addr)
-        .with_metrics_addr(config.metrics.addr);
+        .with_metrics_addr(config.metrics.addr)
+        .with_pgwire_addr(config.pgwire.addr);
 
     // With `[database]` configured the real runtime derives its
     // streamed table set from the registry and owns the slot,

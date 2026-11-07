@@ -14,5 +14,10 @@ spec:
     - name: metrics
       port: {{ .Values.service.metricsPort }}
       targetPort: metrics
+    {{- if .Values.service.pgwirePort }}
+    - name: pgwire
+      port: {{ .Values.service.pgwirePort }}
+      targetPort: pgwire
+    {{- end }}
   selector:
     {{- include "palimpsest.selectorLabels" . | nindent 4 }}

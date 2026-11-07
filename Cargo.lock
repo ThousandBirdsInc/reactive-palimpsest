@@ -1841,6 +1841,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "bytes",
  "criterion",
  "futures",
  "http",
@@ -1859,8 +1860,10 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "sqlparser",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tokio-stream",
  "tokio-tungstenite 0.21.0",
  "tonic",

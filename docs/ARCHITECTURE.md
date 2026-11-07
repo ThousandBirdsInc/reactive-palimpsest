@@ -47,11 +47,13 @@ O(query-cost).
 │   │   - JWT auth                          │                        │
 │   │   - per-IP / per-conn rate limits     │                        │
 │   │   - tonic-web for browsers            │                        │
+│   │   - Postgres wire-protocol listener   │                        │
 │   └────────────────┬──────────────────────┘                        │
 └────────────────────┼───────────────────────────────────────────────┘
                      │
                      ▼
-        Native or WASM clients (palimpsest-client)
+        Native or WASM clients (palimpsest-client),
+        any Postgres driver (docs/POSTGRES-WIRE.md)
 ```
 
 ## Crates at a glance
@@ -151,6 +153,12 @@ JWT auth in the `authorization` metadata header. `tonic-web` enabled
 for browser clients. Schema versioning policy and stability guarantees
 are documented in
 [`palimpsest-proto/VERSIONING.md`](../crates/palimpsest-proto/VERSIONING.md).
+
+The same views are also reachable over the Postgres wire protocol
+([`POSTGRES-WIRE.md`](POSTGRES-WIRE.md)): a statement from any Postgres
+driver subscribes once per connection and later executions read the
+materialized view, so other backend services can use the server as a
+materialized view without a streaming client.
 
 ## Where to go next
 

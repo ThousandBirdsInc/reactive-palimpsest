@@ -58,7 +58,7 @@ RUN cargo build --release --bin palimpsest \
 
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 COPY --from=builder /workspace/target/release/palimpsest /usr/local/bin/palimpsest
-EXPOSE 50051 9090
+EXPOSE 50051 9090 5433
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/palimpsest"]
 CMD ["serve", "/etc/palimpsest/palimpsest.toml"]

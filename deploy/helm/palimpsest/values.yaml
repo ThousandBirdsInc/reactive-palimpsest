@@ -12,6 +12,9 @@ service:
   type: ClusterIP
   grpcPort: 50051
   metricsPort: 9090
+  # Postgres wire-protocol listener; set to 0 to leave it unexposed and
+  # drop the [pgwire] section from `config` below.
+  pgwirePort: 5433
 
 resources:
   requests:
@@ -29,6 +32,9 @@ config: |
 
   [metrics]
   addr = "0.0.0.0:9090"
+
+  [pgwire]
+  addr = "0.0.0.0:5433"
 
   [auth]
   kind = "anonymous"
