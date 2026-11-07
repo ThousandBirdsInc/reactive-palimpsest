@@ -39,6 +39,10 @@ pub struct ServerConfig {
     pub grpc_addr: SocketAddr,
     /// Optional address for the Prometheus `/metrics` axum sidecar.
     pub metrics_addr: Option<SocketAddr>,
+    /// Optional address for the Postgres wire-protocol listener, which
+    /// lets any Postgres driver run `SELECT`s against the live queries
+    /// as materialized views. Off by default.
+    pub pgwire_addr: Option<SocketAddr>,
 }
 
 impl Default for ServerConfig {
@@ -46,6 +50,7 @@ impl Default for ServerConfig {
         Self {
             grpc_addr: "127.0.0.1:50051".parse().expect("static addr"),
             metrics_addr: Some("127.0.0.1:9090".parse().expect("static addr")),
+            pgwire_addr: None,
         }
     }
 }
@@ -121,6 +126,16 @@ impl PalimpsestBuilder {
     #[must_use]
     pub const fn with_metrics_addr(mut self, addr: Option<SocketAddr>) -> Self {
         self.server_config.metrics_addr = addr;
+        self
+    }
+
+    /// Enables the Postgres wire-protocol listener on `addr` (`None`
+    /// disables it, the default). Standard Postgres drivers can then
+    /// connect and run `SELECT`s against the live queries; see the
+    /// `pgwire` module docs for the exact surface.
+    #[must_use]
+    pub const fn with_pgwire_addr(mut self, addr: Option<SocketAddr>) -> Self {
+        self.server_config.pgwire_addr = addr;
         self
     }
 
@@ -293,6 +308,9 @@ impl Palimpsest {
         let service =
             SyncEngineService::with_security(Arc::clone(&router), auth, Arc::clone(&wal), security)
                 .with_named_queries(named);
+        // The wire-protocol front end shares the service's engine
+        // state, so a view queried over either transport is one plan.
+        let query_core = service.query_core();
         let grpc = SyncEngineServer::new(service);
 
         let (mut health_reporter, health_service) = health_reporter();
@@ -302,6 +320,7 @@ impl Palimpsest {
 
         let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
         let (metrics_shutdown_tx, metrics_shutdown_rx) = oneshot::channel::<()>();
+        let (pgwire_shutdown_tx, pgwire_shutdown_rx) = oneshot::channel::<()>();
 
         // Bind up front so a port-0 config resolves before the WS
         // bridge needs the loopback dial address.
@@ -347,6 +366,23 @@ impl Palimpsest {
             })
         });
 
+        let pgwire_handle = match config.pgwire_addr {
+            Some(addr) => {
+                let listener = tokio::net::TcpListener::bind(addr)
+                    .await
+                    .map_err(ServeError::Listener)?;
+                let bound = listener.local_addr().map_err(ServeError::Listener)?;
+                info!(addr = %bound, "Postgres wire protocol listening");
+                Some(tokio::spawn(async move {
+                    crate::pgwire::serve_until(listener, query_core, async {
+                        let _ = pgwire_shutdown_rx.await;
+                    })
+                    .await
+                }))
+            }
+            None => None,
+        };
+
         let router_for_drain = Arc::clone(&router);
         tokio::spawn(async move {
             shutdown.await;
@@ -354,6 +390,7 @@ impl Palimpsest {
             drain_all_subscriptions(&router_for_drain);
             let _ = grpc_shutdown_tx.send(());
             let _ = metrics_shutdown_tx.send(());
+            let _ = pgwire_shutdown_tx.send(());
         });
 
         grpc_handle
@@ -363,6 +400,12 @@ impl Palimpsest {
 
         if let Some(handle) = metrics_handle {
             handle.await.expect("metrics task panicked")?;
+        }
+        if let Some(handle) = pgwire_handle {
+            handle
+                .await
+                .expect("pgwire task panicked")
+                .map_err(ServeError::Listener)?;
         }
         Ok(())
     }

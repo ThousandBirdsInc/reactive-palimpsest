@@ -33,6 +33,7 @@ pub mod metrics;
 pub mod metrics_endpoint;
 pub mod named;
 pub mod permissions;
+mod pgwire;
 pub mod registry;
 pub mod resume;
 pub mod router;
