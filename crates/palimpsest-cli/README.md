@@ -196,6 +196,7 @@ annotated, complete reference; the sections are:
 | --- | --- |
 | `[grpc]` | `addr` for the gRPC + gRPC-Web + `/ws/subscribe` listener (default `127.0.0.1:50051`). |
 | `[metrics]` | `addr` for `/metrics`, `/healthz`, `/readyz`; omit to disable. |
+| `[pgwire]` | `addr` for the Postgres wire-protocol listener (`psql`, JDBC, psycopg, ...); omit to disable. See [`docs/POSTGRES-WIRE.md`](../../docs/POSTGRES-WIRE.md). |
 | `[database]` | `dsn`, `slot`, `publication`, `tls_root_ca_file`, `manage_replica_identity`. Turns on the real WAL runtime; requires `[queries]`. |
 | `[queries]` | `files` (sqlc-format query files, resolved relative to the config), `inline_sql`. |
 | `[auth]` | `kind = "anonymous"` or `"jwt"` with `secret` / `public_key_pem` / `jwks` / `jwks_url`, `algorithm`, `issuer`, `audience`, `leeway_secs`, and `[auth.claim_to_field]`. |

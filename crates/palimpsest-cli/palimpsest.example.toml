@@ -28,6 +28,16 @@ addr = "0.0.0.0:50051"
 # Omit the section (or the key) to disable the sidecar.
 addr = "127.0.0.1:9090"
 
+# [pgwire]
+# Postgres wire-protocol listener (docs/POSTGRES-WIRE.md). Any standard
+# Postgres driver (psql, JDBC, psycopg, tokio-postgres, ...) can connect
+# and SELECT from the same live queries gRPC serves; the first execution
+# of a statement on a connection materializes the view and later ones
+# read it. Read-only. With `[auth] kind = "jwt"` the driver's password is
+# the bearer token. TLS is not terminated here (docs/TLS.md).
+# Omit the section (or the key) to leave the listener off.
+# addr = "127.0.0.1:5433"
+
 # ---------------------------------------------------------------------
 # Postgres (the whole database-side adoption surface is `dsn`)
 # ---------------------------------------------------------------------

@@ -29,6 +29,10 @@ spec:
               containerPort: {{ .Values.service.grpcPort }}
             - name: metrics
               containerPort: {{ .Values.service.metricsPort }}
+            {{- if .Values.service.pgwirePort }}
+            - name: pgwire
+              containerPort: {{ .Values.service.pgwirePort }}
+            {{- end }}
           {{- if .Values.probes.enabled }}
           livenessProbe:
             httpGet:

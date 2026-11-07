@@ -25,6 +25,7 @@ guides or deep-dives that assume that bigger picture.
 | [`WASM-CLIENT.md`](WASM-CLIENT.md) | Minimal HTML + JS quickstart for subscribing to a query from a browser via the WASM client. |
 | [`supported-sql.md`](supported-sql.md) | The deliberately small PostgreSQL `SELECT` subset the SQL frontend accepts. |
 | [`NAMED-QUERIES.md`](NAMED-QUERIES.md) | Server-registered prepared queries (sqlc-format files) that clients subscribe to by name — no SQL in the client. |
+| [`POSTGRES-WIRE.md`](POSTGRES-WIRE.md) | Querying the live views from any standard Postgres driver: the server as a materialized view for other backend services. |
 | [`PERMISSIONS.md`](PERMISSIONS.md) | The row-level access TOML rule DSL, evaluated at subscribe time and folded into every diff. |
 
 ## Operating Palimpsest (running it in production)
